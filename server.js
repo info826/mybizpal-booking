@@ -1,19 +1,12 @@
 import express from "express";
 import bodyParser from "body-parser";
-import fs from "fs";
 import { google } from "googleapis";
 import { DateTime } from "luxon";
 
 const app = express();
 app.use(bodyParser.json());
 
-// Write service-account JSON (from env) to file on Render
-if (process.env.GOOGLE_CREDENTIALS) {
-  fs.mkdirSync("/opt/render/project/src/keys", { recursive: true });
-  fs.writeFileSync("/opt/render/project/src/keys/sa.json", process.env.GOOGLE_CREDENTIALS);
-  process.env.GOOGLE_APPLICATION_CREDENTIALS = "/opt/render/project/src/keys/sa.json";
-}
-
+// ---- Config from env
 const TZ = process.env.BUSINESS_TIMEZONE || "Europe/London";
 const CALENDAR_ID = process.env.CALENDAR_ID;
 const SECRET = process.env.WEBHOOK_SECRET || "";
@@ -21,17 +14,26 @@ const BUF_BEFORE = parseInt(process.env.BUFFER_BEFORE_MIN || "10", 10);
 const BUF_AFTER  = parseInt(process.env.BUFFER_AFTER_MIN  || "10", 10);
 const PORT = process.env.PORT || 3000;
 
-// Business hours 09:00–17:00 Mon–Fri (change here if needed)
+// ---- Google auth (Domain-Wide Delegation - impersonate info@mybizpal.ai)
+const SCOPES = ["https://www.googleapis.com/auth/calendar"];
+const sa = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+const auth = new google.auth.JWT(
+  sa.client_email,
+  null,
+  sa.private_key,
+  SCOPES,
+  "info@mybizpal.ai"   // <- the Workspace user we're acting as
+);
+const calendar = google.calendar({ version: "v3", auth });
+
+// ---- Helpers
 function businessWindow(dt) {
   const d = dt.setZone(TZ);
-  const isBusinessDay = d.weekday >= 1 && d.weekday <= 5;
+  const isBusinessDay = d.weekday >= 1 && d.weekday <= 5; // Mon–Fri
   const start = d.set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
   const end   = d.set({ hour: 17, minute: 0, second: 0, millisecond: 0 });
   return { isBusinessDay, start, end };
 }
-
-const auth = new google.auth.GoogleAuth({ scopes: ["https://www.googleapis.com/auth/calendar"] });
-const calendar = google.calendar({ version: "v3", auth });
 
 function assertAuth(req) {
   return !SECRET || req.body?.auth === SECRET || req.headers["x-webhook-secret"] === SECRET;
@@ -55,7 +57,8 @@ async function createEvent({ summary, description, startISO, endISO, attendees }
       attendees,
       reminders: { useDefault: true }
     },
-    sendUpdates: attendees?.length ? "all" : "none",
+    // with DWD + impersonation we can send emails to attendees
+    sendUpdates: attendees?.length ? "all" : "none"
   })).data;
 }
 
@@ -70,9 +73,11 @@ function parsePreferredStart(now, hint) {
     if (ampm === "pm" && hour < 12) hour += 12;
     dt = dt.set({ hour, minute: min, second: 0, millisecond: 0 });
   }
+  // round up to next 15 minutes
   return dt.minute % 15 === 0 ? dt : dt.plus({ minutes: 15 - (dt.minute % 15) }).set({ second: 0, millisecond: 0 });
 }
 
+// ---- Routes
 app.get("/", (req, res) => res.send("MyBizPal Booking API (Render) ✅"));
 
 app.post("/book", async (req, res) => {
@@ -85,6 +90,7 @@ app.post("/book", async (req, res) => {
     const now = DateTime.now().setZone(TZ);
     let candidate = time_preference ? parsePreferredStart(now, time_preference) : now;
 
+    // search forward in 15-min increments
     for (let i = 0; i < 800; i++) {
       const { isBusinessDay, start, end } = businessWindow(candidate);
 
@@ -132,4 +138,5 @@ app.post("/book", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log("✅ MyBizPal Booking Server on Render running on PORT:", PORT));
+app.listen(PORT, () => console.log("✅ MyBizPal Booking Server (JWT impersonation) on PORT:", PORT));
+
