@@ -1,20 +1,13 @@
 name: Booking Hourly Reminders
-
 on:
-  schedule:
-    # Runs every hour at minute 0 (UTC)
-    - cron: '0 * * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
-  call-reminders-endpoint:
+  send:
     runs-on: ubuntu-latest
+
     steps:
-      - name: POST /cron/reminders
-        env:
-          CRON_URL: https://mybizpal-booking.onrender.com/cron/reminders
-          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-        run: |
-          set -euo pipefail
-          curl -sS -X POST "$CRON_URL" \
-            -H "x-webhook-secret: $WEBHOOK_SECRET"
+    - name: Call reminder endpoint
+      run: |
+        curl -X POST "https://mybizpal-booking.onrender.com/cron/reminders" \
+        -H "x-webhook-secret: ${{ secrets.WEBHOOK_SECRET }}"
