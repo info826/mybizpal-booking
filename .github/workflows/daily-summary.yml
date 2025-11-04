@@ -1,0 +1,17 @@
+name: Booking Daily Summary
+
+on:
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  send_summary:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger daily summary
+        run: |
+          curl -X POST \
+            -H "x-webhook-secret: ${{ secrets.WEBHOOK_SECRET }}" \
+            https://mybizpal-booking.onrender.com/cron/daily-summary
