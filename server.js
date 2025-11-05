@@ -1,399 +1,381 @@
-import express from "express";
-import bodyParser from "body-parser";
-import { google } from "googleapis";
-import { DateTime, Interval } from "luxon";
-import twilio from "twilio";
+// server.js
+import 'dotenv/config';
+import express from 'express';
+import axios from 'axios';
+import bodyParser from 'body-parser';
 
-/**
- * =========================
- *  ENV & CONFIG
- * =========================
- * Required on Render:
- *   - CALENDAR_ID           = info@mybizpal.ai
- *   - GOOGLE_CREDENTIALS    = (full service-account JSON)
- *   - BUSINESS_TIMEZONE     = Europe/London
- *   - WEBHOOK_SECRET        = mybizpal123
- *   - BUFFER_BEFORE_MIN     = 10
- *   - BUFFER_AFTER_MIN      = 10
- *   - TWILIO_ACCOUNT_SID    = ACxxxx
- *   - TWILIO_AUTH_TOKEN     = ********
- *   - SMS_FROM              = +447456438935   ✅ your UK sender
- *   - ADMIN_MOBILE          = +44XXXXXXXXXX   (your phone to receive alerts)
- */
-const TZ = process.env.BUSINESS_TIMEZONE || "Europe/London";
-const CALENDAR_ID = process.env.CALENDAR_ID;
-const SECRET = process.env.WEBHOOK_SECRET || "";
-const BUF_BEFORE = parseInt(process.env.BUFFER_BEFORE_MIN || "10", 10);
-const BUF_AFTER  = parseInt(process.env.BUFFER_AFTER_MIN  || "10", 10);
-const PORT = process.env.PORT || 3000;
+import OpenAI from 'openai';
+import { decideAndRespond } from './logic.js';
 
-// Twilio
-const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-const SMS_FROM = process.env.SMS_FROM || "+447456438935"; // default to your number
-const ADMIN_MOBILE = process.env.ADMIN_MOBILE || ""; // set this in env for admin alerts
+import * as chrono from 'chrono-node';
+import { toZonedTime, fromZonedTime, formatInTimeZone } from 'date-fns-tz';
+import { format as formatDate } from 'date-fns';
 
-// Google auth (Domain-Wide Delegation; impersonate info@mybizpal.ai)
-const SCOPES = ["https://www.googleapis.com/auth/calendar"];
-const sa = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+import twilio from 'twilio';
+import { google } from 'googleapis';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-const auth = new google.auth.JWT(
-  sa.client_email,
-  null,
-  sa.private_key,
-  SCOPES,
-  "info@mybizpal.ai" // act as your Workspace user for invites/emails
-);
+// ──────────────────────────────────────────────────────────────
+// Config
+// ──────────────────────────────────────────────────────────────
+const TZ = process.env.TZ || 'Europe/London';
+const PORT     = process.env.PORT || 3000;
+const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
+const EL_KEY   = process.env.ELEVENLABS_API_KEY;
 
-const calendar = google.calendar({ version: "v3", auth });
-
-// App
+// ──────────────────────────────────────────────────────────────
 const app = express();
+app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 
-/* =========================
-   HELPERS
-========================= */
-function okAuth(req) {
-  if (!SECRET) return true;
-  return req.body?.auth === SECRET || req.headers["x-webhook-secret"] === SECRET;
+// serve /public if you later add assets
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ──────────────────────────────────────────────────────────────
+// OpenAI
+// ──────────────────────────────────────────────────────────────
+if (!process.env.OPENAI_API_KEY) {
+  console.warn('Warning: OPENAI_API_KEY is not set.');
+}
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// ──────────────────────────────────────────────────────────────
+// Twilio (env validation + client)
+// ──────────────────────────────────────────────────────────────
+const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN } = process.env;
+if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+  throw new Error('Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN');
+}
+const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+const TWILIO_NUMBER = process.env.TWILIO_NUMBER; // must be E.164 (+44...)
+
+// ──────────────────────────────────────────────────────────────
+// Google Calendar (Service Account)
+// ──────────────────────────────────────────────────────────────
+const jwt = new google.auth.JWT(
+  process.env.GOOGLE_CLIENT_EMAIL,
+  null,
+  (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+  ['https://www.googleapis.com/auth/calendar']
+);
+const calendar = google.calendar({ version: 'v3', auth: jwt });
+const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'primary';
+
+// Authorize SA at boot (good early failure)
+try {
+  await jwt.authorize();
+  console.log('✅ Google Service Account authorized.');
+} catch (e) {
+  console.warn('⚠️  Google SA authorization failed. Check GOOGLE_* env vars and calendar sharing.');
 }
 
-function businessWindow(dt) {
-  const d = dt.setZone(TZ);
-  const isBusinessDay = d.weekday >= 1 && d.weekday <= 5; // Mon–Fri
-  const start = d.set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
-  const end   = d.set({ hour: 17, minute: 0, second: 0, millisecond: 0 });
-  return { isBusinessDay, start, end };
+// ──────────────────────────────────────────────────────────────
+// In-memory per-call state
+// ──────────────────────────────────────────────────────────────
+const CALL_MEMORY = new Map(); // CallSid -> [{role, content}, ...]
+const CALL_STATE  = new Map(); // CallSid -> { speaking: boolean }
+
+const memFor = (sid) => {
+  if (!CALL_MEMORY.has(sid)) CALL_MEMORY.set(sid, []);
+  return CALL_MEMORY.get(sid);
+};
+const stateFor = (sid) => {
+  if (!CALL_STATE.has(sid)) CALL_STATE.set(sid, { speaking: false });
+  return CALL_STATE.get(sid);
+};
+
+// ──────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────
+const twiml = (xmlInner) =>
+  `<?xml version="1.0" encoding="UTF-8"?><Response>${xmlInner}</Response>`;
+
+function nowInTZ() {
+  return toZonedTime(new Date(), TZ);
 }
 
-async function isFree(startISO, endISO) {
-  const fb = await calendar.freebusy.query({
-    requestBody: {
-      timeMin: startISO,
-      timeMax: endISO,
-      timeZone: TZ,
-      items: [{ id: CALENDAR_ID }]
-    }
+// System prompt
+function buildSystemPreamble() {
+  const niceNow = formatInTimeZone(new Date(), TZ, "eeee dd MMMM yyyy, h:mmaaa");
+  return `
+You are MyBizPal — the AI receptionist for MyBizPal.ai.
+Mission: answer calls, qualify leads, book/reschedule/cancel appointments, and send SMS follow-ups.
+Tone: warm, concise, action-oriented. Use short sentences. Confirm key details.
+Time & Locale: Assume local time is ${TZ}. Today is ${niceNow} (${TZ}). Never act like it’s a past year.
+Dates: When speaking, use natural phrases (“today”, “tomorrow”, “next Tuesday morning”). Internally, use precise timestamps.
+Interruptions: If the caller starts talking while you’re speaking, pause immediately, acknowledge briefly, and adapt.
+Capabilities: You can book appointments (calendar API), send SMS confirmations, and update/cancel bookings.
+Constraint: Don’t say “contact the business directly” if we can do it here—offer the closest action or escalate.
+`;
+}
+
+// Natural date parser → { iso, spoken }
+function parseNaturalDate(utterance, tz = TZ) {
+  if (!utterance) return null;
+  const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
+  if (!parsed) return null;
+
+  const zoned  = toZonedTime(parsed, tz);
+  const iso    = fromZonedTime(zoned, tz).toISOString(); // UTC ISO
+  const spoken = formatInTimeZone(zoned, tz, "eeee do MMMM 'at' h:mmaaa");
+  return { iso, spoken };
+}
+
+// <Gather> with TTS (no background noise)
+function gatherWithPlay({ host, text, action = '/twilio/handle' }) {
+  const enc    = encodeURIComponent(text || '');
+  const ttsUrl = `https://${host}/tts?text=${enc}`;
+  return `
+<Gather input="speech dtmf"
+        language="en-GB"
+        bargeIn="true"
+        actionOnEmptyResult="true"
+        action="${action}"
+        method="POST"
+        partialResultCallback="/twilio/partial"
+        partialResultCallbackMethod="POST"
+        timeout="1"
+        speechTimeout="auto">
+  <Play>${ttsUrl}</Play>
+</Gather>`;
+}
+
+// End intent detection
+function detectEndOfConversation(phrase) {
+  const endPhrases = [
+    "that's fine",
+    "all good",
+    "thank you",
+    "no thanks",
+    "nothing else",
+    "that's all",
+    "thank you very much",
+    "goodbye",
+    "bye"
+  ];
+  return endPhrases.some((e) => phrase?.toLowerCase().includes(e));
+}
+
+// quick ack when user barges in
+function ackPhrase() {
+  const acks = ['Sure—go ahead.', 'Got it.', 'Okay.', 'No problem.', 'Alright.'];
+  return acks[Math.floor(Math.random() * acks.length)];
+}
+
+// ──────────────────────────────────────────────────────────────
+// ElevenLabs TTS endpoint (Twilio <Play> pulls from here)
+// ──────────────────────────────────────────────────────────────
+app.get('/tts', async (req, res) => {
+  try {
+    const text  = (req.query.text || 'Hello').toString().slice(0, 500);
+    const voice = VOICE_ID;
+
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${voice}/stream?optimize_streaming_latency=2`;
+    const r = await axios.post(
+      url,
+      { text, model_id: 'eleven_multilingual_v2' },
+      {
+        responseType: 'arraybuffer',
+        headers: {
+          'xi-api-key': EL_KEY,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(Buffer.from(r.data));
+  } catch (e) {
+    console.error('TTS error:', e?.response?.status, e?.response?.data?.toString?.() || e.message);
+    res.status(500).end();
+  }
+});
+
+// ──────────────────────────────────────────────────────────────
+// Booking action (Calendar + SMS)
+// ──────────────────────────────────────────────────────────────
+async function bookAppointment({ who, whenISO, spokenWhen, phone }) {
+  const startISO = whenISO;
+  const endISO   = new Date(new Date(startISO).getTime() + 30 * 60000).toISOString();
+
+  const event = {
+    summary: `Call with ${who || 'Prospect'}`,
+    start: { dateTime: startISO, timeZone: TZ },
+    end:   { dateTime: endISO,   timeZone: TZ },
+    description: 'Booked by MyBizPal receptionist.',
+  };
+
+  const created = await calendar.events.insert({
+    calendarId: CALENDAR_ID,
+    requestBody: event,
   });
-  return (fb.data.calendars[CALENDAR_ID]?.busy || []).length === 0;
-}
 
-async function createEvent({ summary, description, startISO, endISO, attendees, privateProps }) {
-  return (await calendar.events.insert({
-    calendarId: CALENDAR_ID,
-    requestBody: {
-      summary,
-      description,
-      start: { dateTime: startISO, timeZone: TZ },
-      end:   { dateTime: endISO,   timeZone: TZ },
-      attendees,
-      reminders: { useDefault: true },
-      extendedProperties: privateProps ? { private: privateProps } : undefined
-    },
-    sendUpdates: attendees?.length ? "all" : "none"
-  })).data;
-}
-
-async function patchEventPrivateProps(eventId, props) {
-  return (await calendar.events.patch({
-    calendarId: CALENDAR_ID,
-    eventId,
-    requestBody: {
-      extendedProperties: { private: props }
+  if (phone && TWILIO_NUMBER) {
+    try {
+      await twilioClient.messages.create({
+        to: phone,               // Twilio passes E.164 (e.g., +447...)
+        from: TWILIO_NUMBER,     // must be E.164
+        body: `✅ Booked: ${event.summary} — ${spokenWhen}. Need to reschedule? Reply CHANGE.`,
+      });
+    } catch (err) {
+      console.error('SMS send error:', err?.message || err);
     }
-  })).data;
-}
-
-function parsePreferredStart(now, hint) {
-  let dt = now.setZone(TZ);
-  if (!hint || typeof hint !== "string") return dt;
-
-  const lower = hint.toLowerCase();
-  if (lower.includes("tomorrow")) dt = dt.plus({ days: 1 });
-
-  // e.g. "after 2pm", "after 14:30"
-  const m = lower.match(/after\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-  if (m) {
-    let hour = parseInt(m[1], 10);
-    const minute = m[2] ? parseInt(m[2], 10) : 0;
-    const ampm = (m[3] || "").toLowerCase();
-    if (ampm === "pm" && hour < 12) hour += 12;
-    if (ampm === "am" && hour === 12) hour = 0;
-    dt = dt.set({ hour, minute, second: 0, millisecond: 0 });
   }
 
-  // round up to next 15 min
-  if (dt.minute % 15 !== 0) {
-    dt = dt.plus({ minutes: 15 - (dt.minute % 15) }).set({ second: 0, millisecond: 0 });
+  return created.data;
+}
+
+// AI helper (adds parsed date hints)
+async function handleUserText(latestText, memory) {
+  const nat = parseNaturalDate(latestText, TZ);
+  let augmented = latestText;
+  if (nat) {
+    augmented += `\n\n[ParsedTimeISO:${nat.iso}; SpokenTime:${nat.spoken}; TZ:${TZ}]`;
   }
-  return dt;
+
+  const reply = await decideAndRespond({
+    openai,
+    history: memory,
+    latestText: augmented,
+  });
+
+  memory.push({ role: 'user',      content: latestText });
+  memory.push({ role: 'assistant', content: reply });
+
+  return reply;
 }
 
-// SMS helpers
-function normalizeUK(phone) {
-  if (!phone) return "";
-  const p = phone.toString().trim().replace(/\s+/g, "");
-  if (p.startsWith("+")) return p;
-  if (p.startsWith("0")) return "+44" + p.slice(1);
-  if (p.startsWith("44")) return "+" + p;
-  return p; // assume already E.164
-}
+// ──────────────────────────────────────────────────────────────
+// Health
+// ──────────────────────────────────────────────────────────────
+app.get('/', (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: 'MyBizPal-IVR',
+    time_london: formatInTimeZone(new Date(), TZ, "yyyy-MM-dd HH:mm:ss 'BST/GMT'"),
+  });
+});
 
-async function sendSMS(to, body) {
-  if (!to) return;
-  const dst = normalizeUK(to);
-  await twilioClient.messages.create({ from: SMS_FROM, to: dst, body });
-}
+// ──────────────────────────────────────────────────────────────
+// Twilio Voice Webhooks
+// ──────────────────────────────────────────────────────────────
+app.post('/twilio/voice', async (req, res) => {
+  const callSid = req.body.CallSid || '';
+  const memory  = memFor(callSid);
+  memory.length = 0;
+  const state   = stateFor(callSid);
 
-function fmt(dtISO) {
-  return DateTime.fromISO(dtISO, { zone: TZ }).toFormat("ccc dd LLL, HH:mm");
-}
+  memory.push({ role: 'system', content: buildSystemPreamble() });
 
-/* =========================
-   ROUTES
-========================= */
-app.get("/", (_req, res) => res.send("MyBizPal Booking API ✅"));
-app.get("/health", (_req, res) => res.json({ ok: true, tz: TZ }));
+  const greet = `Welcome to MyBizPal. How can I help you today?`;
+  const xml = twiml(`
+    ${gatherWithPlay({ host: req.headers.host, text: greet, action: '/twilio/handle' })}
+    <Redirect method="POST">/twilio/reprompt</Redirect>
+  `);
+  state.speaking = true;
 
-/**
- * Create booking
- * Body:
- *  - auth, name, email, phone, service, duration_min, time_preference, notes
- */
-app.post("/book", async (req, res) => {
+  res.type('text/xml').send(xml);
+});
+
+app.post('/twilio/partial', bodyParser.urlencoded({ extended: true }), (req, res) => {
+  const partial = req.body.UnstableSpeechResult || req.body.SpeechResult || '';
+  if (partial) console.log('PARTIAL:', partial);
+  res.sendStatus(200);
+});
+
+app.post('/twilio/handle', async (req, res) => {
   try {
-    if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
-    if (!CALENDAR_ID) return res.status(500).json({ error: "CALENDAR_ID missing" });
+    const said       = (req.body.SpeechResult || '').trim();
+    const callSid    = req.body.CallSid || 'unknown';
+    const memory     = memFor(callSid);
+    const state      = stateFor(callSid);
+    const callerPhone= req.body.From; // E.164
 
-    const {
-      name,
-      email,
-      phone,
-      service = "Discovery Call",
-      duration_min = 30,
-      time_preference = "",
-      notes = ""
-    } = req.body || {};
+    const wasSpeaking = state.speaking === true;
+    state.speaking = false;
 
-    const now = DateTime.now().setZone(TZ);
-    let candidate = time_preference ? parsePreferredStart(now, time_preference) : now;
-
-    // Search forward in 15-minute steps
-    for (let i = 0; i < 800; i++) {
-      const { isBusinessDay, start, end } = businessWindow(candidate);
-
-      let slot = candidate;
-      if (!isBusinessDay || slot < start) slot = start;
-
-      if (slot > end) {
-        // next business day at 09:00
-        candidate = start.plus({ days: 1 }).set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
-        continue;
-      }
-
-      // Buffers and checks
-      const eventStart = slot.plus({ minutes: BUF_BEFORE });
-      const eventEnd   = eventStart.plus({ minutes: duration_min });
-      const hardEnd    = end.minus({ minutes: BUF_AFTER });
-
-      if (eventEnd > hardEnd) {
-        candidate = start.plus({ days: 1 }).set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
-        continue;
-      }
-
-      if (await isFree(eventStart.toISO(), eventEnd.toISO())) {
-        // Create event with private flags (to track reminder state)
-        const privateProps = {
-          sms_sent_confirm: "0",
-          sms_sent_24h: "0",
-          sms_sent_2h: "0",
-          client_phone: phone ? normalizeUK(phone) : "",
-          client_email: email || "",
-          client_name: name || ""
-        };
-
-        const ev = await createEvent({
-          summary: `${service} — ${name || "Client"}`,
-          description: [notes && `Notes: ${notes}`, phone && `Phone: ${normalizeUK(phone)}`]
-            .filter(Boolean)
-            .join("\n"),
-          startISO: eventStart.toISO(),
-          endISO: eventEnd.toISO(),
-          attendees: email ? [{ email }] : [],
-          privateProps
-        });
-
-        // SMS: Client confirmation
-        if (phone) {
-          await sendSMS(phone,
-            `Hi ${name || "there"}, your ${service} is booked for ${fmt(ev.start.dateTime)} (${TZ}). ` +
-            `Reply to this SMS if you need help.\n— MyBizPal.ai`
-          );
-        }
-
-        // SMS: Admin alert
-        if (ADMIN_MOBILE) {
-          await sendSMS(ADMIN_MOBILE,
-            `New booking: ${service} at ${fmt(ev.start.dateTime)}. ` +
-            `${name || "Client"} ${phone ? "(" + normalizeUK(phone) + ")" : ""}`
-          );
-        }
-
-        // Mark confirm sent
-        await patchEventPrivateProps(ev.id, { ...privateProps, sms_sent_confirm: "1" });
-
-        return res.json({
-          status: "confirmed",
-          eventId: ev.id,
-          start: ev.start?.dateTime,
-          end: ev.end?.dateTime,
-          htmlLink: ev.htmlLink || null
-        });
-      }
-
-      candidate = candidate.plus({ minutes: 15 });
+    if (!said) {
+      const xml = twiml(`
+        ${gatherWithPlay({ host: req.headers.host, text: `Sorry, I didn’t catch that. How can I help?`, action: '/twilio/handle' })}
+      `);
+      state.speaking = true;
+      return res.type('text/xml').send(xml);
     }
 
-    res.status(409).json({ error: "No free slot found" });
+    // end-of-convo intent
+    if (detectEndOfConversation(said)) {
+      const wrapUpMessage = `Thank you for calling MyBizPal. Have a great day!`;
+      const xml = twiml(`
+        <Say>${wrapUpMessage}</Say>
+        <Hangup/>
+      `);
+      return res.type('text/xml').send(xml);
+    }
+
+    // quick booking path
+    const nat = parseNaturalDate(said, TZ);
+    const wantsBooking = /\b(book|schedule|set (up )?(a )?(call|meeting|appointment)|reserve)\b/i.test(said);
+
+    let voiceReply;
+    if (wantsBooking && nat?.iso) {
+      await bookAppointment({
+        who: 'Prospect',
+        whenISO: nat.iso,
+        spokenWhen: nat.spoken,
+        phone: callerPhone,
+      });
+      voiceReply = `All set for ${nat.spoken}. I’ve texted you the confirmation.`;
+    } else {
+      voiceReply = await handleUserText(said, memory);
+
+      // Replace ISO with spoken phrasing if model emits timestamps
+      if (nat && /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(voiceReply)) {
+        voiceReply = voiceReply.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z/g, nat.spoken);
+      }
+    }
+
+    if (wasSpeaking) {
+      voiceReply = `${ackPhrase()} ${voiceReply}`;
+    }
+
+    const xml = twiml(`
+      ${gatherWithPlay({ host: req.headers.host, text: voiceReply, action: '/twilio/handle' })}
+      <Pause length="1"/>
+    `);
+    state.speaking = true;
+
+    res.type('text/xml').send(xml);
   } catch (err) {
-    console.error("Booking failed:", err?.response?.data || err);
-    res.status(500).json({ error: "Booking failed", details: err.message || "unknown" });
+    console.error('handle error', err);
+    res.type('text/xml').send(twiml('<Hangup/>'));
   }
 });
 
-/**
- * Cancel booking (by eventId)
- * Body: { auth, eventId, reason? }
- */
-app.post("/cancel", async (req, res) => {
-  try {
-    if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
-    const { eventId, reason } = req.body || {};
-    if (!eventId) return res.status(400).json({ error: "eventId required" });
-
-    // Read event to get phone/email before deleting
-    const ev = (await calendar.events.get({ calendarId: CALENDAR_ID, eventId })).data;
-    const startISO = ev.start?.dateTime;
-    const startStr = startISO ? fmt(startISO) : "(unknown time)";
-    const priv = ev.extendedProperties?.private || {};
-    const phone = priv.client_phone || "";
-    const name  = priv.client_name || "Client";
-
-    await calendar.events.delete({ calendarId: CALENDAR_ID, eventId, sendUpdates: "all" });
-
-    // SMS client + admin
-    if (phone) {
-      await sendSMS(phone, `Your appointment on ${startStr} has been cancelled${reason ? `: ${reason}` : "."}`);
-    }
-    if (ADMIN_MOBILE) {
-      await sendSMS(ADMIN_MOBILE, `Cancelled: ${ev.summary || "Appointment"} on ${startStr}${reason ? ` (Reason: ${reason})` : ""}`);
-    }
-
-    res.json({ status: "cancelled", eventId });
-  } catch (err) {
-    console.error("Cancel failed:", err?.response?.data || err);
-    res.status(500).json({ error: "Cancel failed", details: err.message || "unknown" });
-  }
+app.post('/twilio/reprompt', (req, res) => {
+  const xml = twiml(`
+    ${gatherWithPlay({ host: req.headers.host, text: `How can I help?`, action: '/twilio/handle' })}
+  `);
+  res.type('text/xml').send(xml);
 });
 
-/**
- * CRON: reminder sender (hit hourly)
- * - Sends T-24h and T-2h reminders
- * - Uses event extendedProperties.private to avoid duplicates
- */
-app.post("/cron/reminders", async (req, res) => {
-  try {
-    if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
-
-    const now = DateTime.now().setZone(TZ);
-    const windowEnd = now.plus({ hours: 26 }); // scan the next ~day
-    const events = (await calendar.events.list({
-      calendarId: CALENDAR_ID,
-      timeMin: now.toISO(),
-      timeMax: windowEnd.toISO(),
-      singleEvents: true,
-      orderBy: "startTime"
-    })).data.items || [];
-
-    let sent = 0;
-
-    for (const ev of events) {
-      if (!ev.start?.dateTime) continue;
-      const start = DateTime.fromISO(ev.start.dateTime, { zone: TZ });
-      const priv = ev.extendedProperties?.private || {};
-      const phone = priv.client_phone || "";
-
-      if (!phone) continue;
-
-      const hoursToGo = start.diff(now, "hours").hours;
-
-      // T-24h window: 23.5h–24.5h
-      if (hoursToGo <= 24.5 && hoursToGo >= 23.5 && priv.sms_sent_24h !== "1") {
-        await sendSMS(phone,
-          `Reminder: your ${ev.summary || "appointment"} is tomorrow at ${fmt(ev.start.dateTime)} (${TZ}). ` +
-          `Reply to this SMS if you need to reschedule.`
-        );
-        await patchEventPrivateProps(ev.id, { ...priv, sms_sent_24h: "1" });
-        sent++;
-      }
-
-      // T-2h window: 1.5h–2.5h
-      if (hoursToGo <= 2.5 && hoursToGo >= 1.5 && priv.sms_sent_2h !== "1") {
-        await sendSMS(phone,
-          `Heads up: your ${ev.summary || "appointment"} is at ${fmt(ev.start.dateTime)} (${TZ}). ` +
-          `See you soon!`
-        );
-        await patchEventPrivateProps(ev.id, { ...priv, sms_sent_2h: "1" });
-        sent++;
-      }
-    }
-
-    res.json({ ok: true, reminders_sent: sent });
-  } catch (err) {
-    console.error("Reminders failed:", err?.response?.data || err);
-    res.status(500).json({ error: "Reminders failed", details: err.message || "unknown" });
-  }
+// optional: cleanup hook
+app.post('/hangup', (req, res) => {
+  const sid = req.body.CallSid;
+  if (sid) { CALL_MEMORY.delete(sid); CALL_STATE.delete(sid); }
+  res.type('text/xml').send(twiml('<Hangup/>'));
 });
 
-/**
- * CRON: daily summary (hit once each morning)
- * - Sends today's schedule to ADMIN_MOBILE
- */
-app.post("/cron/daily_summary", async (req, res) => {
-  try {
-    if (!okAuth(req)) return res.status(401).json({ error: "unauthorized" });
-    if (!ADMIN_MOBILE) return res.json({ ok: true, note: "ADMIN_MOBILE not set — skipping" });
-
-    const today = DateTime.now().setZone(TZ).startOf("day");
-    const tomorrow = today.plus({ days: 1 });
-    const events = (await calendar.events.list({
-      calendarId: CALENDAR_ID,
-      timeMin: today.toISO(),
-      timeMax: tomorrow.toISO(),
-      singleEvents: true,
-      orderBy: "startTime"
-    })).data.items || [];
-
-    if (!events.length) {
-      await sendSMS(ADMIN_MOBILE, `Daily summary: No bookings today (${today.toFormat("ccc dd LLL")}).`);
-      return res.json({ ok: true, sent: "no-events" });
-    }
-
-    const lines = events.map((ev) => {
-      const start = ev.start?.dateTime ? fmt(ev.start.dateTime) : "unknown";
-      const priv = ev.extendedProperties?.private || {};
-      const who = priv.client_name || (ev.summary || "").split("—").pop()?.trim() || "Client";
-      return `• ${start} — ${ev.summary || "Appointment"} — ${who}`;
-    });
-
-    await sendSMS(ADMIN_MOBILE, `Today's bookings:\n${lines.join("\n")}`);
-    res.json({ ok: true, count: events.length });
-  } catch (err) {
-    console.error("Daily summary failed:", err?.response?.data || err);
-    res.status(500).json({ error: "Daily summary failed", details: err.message || "unknown" });
-  }
-});
-
+// ──────────────────────────────────────────────────────────────
+// Start
+// ──────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log("✅ MyBizPal Booking Server (Full Automation) listening on", PORT);
+  const ts = formatDate(nowInTZ(), 'yyyy-MM-dd HH:mm:ss');
+  console.log(`[server] MyBizPal-IVR listening on :${PORT} — London ${ts}`);
 });
+
+Add IVR agent with Twilio + Calendar + SMS booking
+
