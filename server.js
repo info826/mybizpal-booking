@@ -1,225 +1,123 @@
-// server.js (ESM)
+// server.js
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
 import bodyParser from 'body-parser';
-import fs from 'fs';
 
 import OpenAI from 'openai';
-import { decideAndRespond } from './logic.js';
-
 import * as chrono from 'chrono-node';
 import { toZonedTime, fromZonedTime, formatInTimeZone } from 'date-fns-tz';
 
-// Google Calendar + Twilio
 import twilio from 'twilio';
 import { google } from 'googleapis';
 
-/* =========================
-   Config / Clients
-========================= */
-const TZ = process.env.TZ || 'Europe/London';
-
+/* ================================
+   CONFIG
+================================ */
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 
-const PORT     = process.env.PORT || 3000;
-const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
-const EL_KEY   = process.env.ELEVENLABS_API_KEY;
-
-// OpenAI (for decideAndRespond in logic.js)
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const PORT = process.env.PORT || 3000;
+const TZ   = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
 // Twilio
-const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_NUMBER } = process.env;
+const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN } = process.env;
 if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
   throw new Error('Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN');
 }
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+const TWILIO_NUMBER = process.env.TWILIO_NUMBER || process.env.SMS_FROM;
 
-// Google Calendar auth: supports ENV or a JSON file path if you ever add it
-function buildGoogleAuth() {
-  // Preferred path: env vars
-  let clientEmail = process.env.GOOGLE_CLIENT_EMAIL || '';
-  let privateKey  = (process.env.GOOGLE_PRIVATE_KEY || '');
+// OpenAI
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-  // Optional fallback to a JSON file if you decide to use one later
-  const credsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  if ((!clientEmail || !privateKey) && credsPath && fs.existsSync(credsPath)) {
-    const raw = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
-    clientEmail = raw.client_email;
-    privateKey  = raw.private_key;
-  }
+// ElevenLabs (TTS)
+const EL_KEY   = process.env.ELEVENLABS_API_KEY;
+const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 
-  if (!clientEmail || !privateKey) {
-    throw new Error('Google creds missing: set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY (escaped \\n).');
-  }
-
-  return new google.auth.JWT(
-    clientEmail,
-    null,
-    privateKey.replace(/\\n/g, '\n'),
-    ['https://www.googleapis.com/auth/calendar']
-  );
-}
-
-const jwt = buildGoogleAuth();
+// Google Calendar (Service Account)
+const jwt = new google.auth.JWT(
+  process.env.GOOGLE_CLIENT_EMAIL,
+  null,
+  (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
+  ['https://www.googleapis.com/auth/calendar']
+);
 const calendar = google.calendar({ version: 'v3', auth: jwt });
-// Use ONLY CALENDAR_ID (do NOT set GOOGLE_CALENDAR_ID unless you want fallback)
-const CALENDAR_ID = process.env.CALENDAR_ID || process.env.GOOGLE_CALENDAR_ID || 'primary';
+const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || process.env.CALENDAR_ID || 'primary';
 
-/* =========================
-   In-memory call state
-========================= */
-const CALL_MEMORY = new Map(); // CallSid -> [{role, content}, ...]
-const CALL_STATE  = new Map(); // CallSid -> { speaking: boolean }
-
-const memFor = (sid) => {
-  if (!CALL_MEMORY.has(sid)) CALL_MEMORY.set(sid, []);
-  return CALL_MEMORY.get(sid);
-};
-const stateFor = (sid) => {
-  if (!CALL_STATE.has(sid)) CALL_STATE.set(sid, { speaking: false });
-  return CALL_STATE.get(sid);
-};
-
-/* =========================
-   TwiML helper
-========================= */
-const twiml = (xmlInner) =>
-  `<?xml version="1.0" encoding="UTF-8"?><Response>${xmlInner}</Response>`;
-
-/* =========================
-   System preamble (sales-forward + human mannerisms)
-========================= */
-function buildSystemPreamble() {
+/* ================================
+   PERSONA / SYSTEM PROMPT
+   (Sales-forward, multilingual, safe personal background)
+================================ */
+function buildSystemPreamble(state) {
   const now = toZonedTime(new Date(), TZ);
   const niceNow = formatInTimeZone(now, TZ, "eeee dd MMMM yyyy, h:mmaaa");
 
+  // Language policy string
+  const langPolicy = `
+Language policy:
+- Default to English (primary).
+- If caller likely speaks Spanish, Portuguese, or French, ASK first: 
+  "Would you like to continue in Spanish/Portuguese/French?" 
+- Only switch after caller confirms. 
+- Once switched, remain in that language for the rest of the call.
+Current language: ${state.lang || 'en'}
+`;
+
   return `
-Your name is Ethan. You are a male American AI receptionist for MyBizPal.ai.
-Personality: friendly, smart, casual, modern — like a top tech consultant who’s warm, approachable, and naturally helpful.
-Voice behavior: speak conversationally, with subtle natural mannerisms: soft “haha”, small chuckles, gentle “hmm…”, “ahh okay…”, “let me check that real quick…”, “gotcha”, “totally”, “yeah absolutely”, etc. Keep the tone upbeat and human but never exaggerated. Use short, confident sentences.
-Energy: relaxed but sharp. Like someone who knows tech, understands business, and genuinely wants to help.
-Speech pacing: normal American conversational pace. Add small pauses with “…” when thinking or checking something.
-Tone intention: sound like a friendly tech pro who is competent, lightly humorous, and very easy to talk to.
+You are Gabriel, a friendly, confident, relaxed American male tech consultant for MyBizPal.ai.
+You NEVER say "as an AI", "hmm", "out of context", or anything robotic. Speak naturally.
 
-Your mission:
-• Answer calls in a warm, relatable way  
-• Ask 2–4 quick qualifying questions (goal, timeline, current tools, budget sense)  
-• Understand the caller’s problem and summarize briefly  
-• Steer them toward booking a call as the best way to fix their issue  
-• Use micro-closes (“wanna lock in a quick slot?”)  
-• If they hesitate, offer one more alternative time  
-• Keep momentum positive and natural  
+STYLE
+- Slightly slower delivery, smooth and conversational.
+- Light, tasteful fillers only when helpful: "Alright, let me check that for you", "Okay, got it", "Heh, no worries".
+- Contractions. Brief, clean sentences for TTS.
+- Helpful, modern, calm. No stiff grammar.
 
-Sales guidance:
-You are not pushy — you’re a modern consultant.  
-You help them realize a quick booked call solves their problem faster.
+SALES MINDSET
+- Be consultative. Clarify the problem, give value, then lead to booking.
+- Micro-commitments + gentle assumptions:
+  "Let’s get this sorted quickly for you."
+  "What time usually works best for you?"
+  "I can lock in a quick call—does today or tomorrow work?"
+- Always offer to book as the easiest way to solve the problem.
 
-Time & Locale:
-Assume local time is ${TZ}. Today is ${niceNow}.  
-Use natural time phrases: “today”, “tomorrow afternoon”, “next Tuesday morning”.  
-Internally, rely on exact timestamps.
+RAPPORT & BACKGROUND (use sparingly, only when relevant)
+- Founder Gabriel was born in Venezuela, has Portuguese roots from Madeira, now lives in High Wycombe (UK).
+- He’s married to Raquel, who’s from Barcelona.
+- Safe usage examples:
+  • If caller mentions Spanish/Portuguese/Latin culture: "Our founder has Latin/Portuguese roots—so we really get that side of things."
+  • If caller mentions UK/Bucks/London: "We’re local—based in High Wycombe."
+  • If a light human touch helps: "Gabriel and his wife Raquel built this to be genuinely helpful, not pushy."
+- DO NOT disclose private details (no addresses/surnames/parents). One light line max when relevant.
 
-Human realism:
-Use occasional fillers: “uhh”, “hmm”, “let me see…”, “one sec…”, “alright cool”.  
-Use soft laughs when appropriate (“haha yeah”, “hehe gotcha”).  
-Keep them subtle and occasional.
+PHONE NUMBERS (UK)
+- Recognize digits even if caller says "O" instead of "0". Also "oh"/"zero"/"naught" → 0.
+- UK numbers may start with 0/"O" or +44. Confirm back clearly.
 
-Phone numbers:
-Recognize that O/Oh means 0 when spoken.  
-UK phone numbers may start with 0 or +44.  
-If caller reads the number, confirm last digits politely if needed.
+ENDING RULES (IMPORTANT)
+- Do NOT end the call just because you heard "thanks", "okay", or "that’s fine" in the middle.
+- You may only end after YOU ask: "Is there anything else I can help with?" and the caller replies "no" / "no thanks" / "all good" / "that’s all", etc.
+- Before hanging up, say a warm thank-you with the correct part of day (day/evening).
 
-End of conversation:
-If caller says “that’s all”, “all good”, “thanks”, or similar — wrap up warmly and end call.
+SILENCE / NUDGE
+- If caller is silent briefly, you can say "Are you still there?" politely—but only after a couple of silent turns. Keep it natural and infrequent.
 
-Capabilities:
-You can book appointments via calendar, send SMS confirmations, update/cancel bookings.
+TIME & LOCALE
+- Local time is ${TZ}. Today is ${niceNow} (${TZ}).
+- Prefer natural phrases like “today at 3” or “tomorrow morning”.
 
-Constraints:
-Never tell callers to contact the business directly — handle what you can here.
-  `;
-}
-/* =========================
-   Natural date parsing
-========================= */
-function parseNaturalDate(utterance, tz = TZ) {
-  if (!utterance) return null;
-  const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
-  if (!parsed) return null;
-
-  const zoned  = toZonedTime(parsed, tz);
-  const iso    = fromZonedTime(zoned, tz).toISOString(); // back to UTC ISO for API
-  const spoken = formatInTimeZone(zoned, tz, "eeee do MMMM 'at' h:mmaaa");
-  return { iso, spoken };
+${langPolicy}
+`;
 }
 
-/* =========================
-   Phone extraction & UK normalization
-========================= */
-// Map common spoken tokens to digits
-const DIGIT_WORDS = new Map([
-  ['zero','0'], ['oh','0'], ['o','0'], ['owe','0'],
-  ['one','1'], ['two','2'], ['to','2'], ['too','2'],
-  ['three','3'], ['four','4'], ['for','4'],
-  ['five','5'], ['six','6'], ['seven','7'],
-  ['eight','8'], ['ate','8'], ['nine','9']
-]);
+/* ================================
+   TWIML HELPERS
+================================ */
+const twiml = (xmlInner) =>
+  `<?xml version="1.0" encoding="UTF-8"?><Response>${xmlInner}</Response>`;
 
-function extractRawDigitsFromSpeech(text) {
-  if (!text) return '';
-  // Tokenize by non-alphanumeric, map number words & single letters
-  const tokens = text.toLowerCase().split(/[^a-z0-9+]+/).filter(Boolean);
-  const mapped = tokens.map(tok => {
-    if (DIGIT_WORDS.has(tok)) return DIGIT_WORDS.get(tok);
-    // Single letter "o" already covered; keep numeric chunks as-is
-    if (/^\d+$/.test(tok)) return tok;
-    // Handle things like +44
-    if (/^\+?\d+$/.test(tok)) return tok.replace('+','');
-    return '';
-  }).join('');
-  // Also capture inline digits if user spoke contiguous numbers
-  return mapped.replace(/[^\d]/g, '');
-}
-
-function normalizeUKToE164(rawDigits) {
-  if (!rawDigits) return null;
-  // Trim leading 00 (international format spoken)
-  let d = rawDigits.replace(/^00/, '');
-  // If already looks like 44XXXXXXXXXX (12 digits) → +44…
-  if (d.startsWith('44') && d.length === 12) return `+${d}`;
-  // If starts with 0 and is 11 digits → UK national → +44…
-  if (d.startsWith('0') && d.length === 11) return `+44${d.slice(1)}`;
-  // If already 11 digits without 0 (rare) try +44 + digits
-  if (d.length === 10 && !d.startsWith('0')) return `+44${d}`;
-  // If already E.164 with +, leave it (handled above)
-  return null;
-}
-
-function extractUKPhoneE164FromText(text) {
-  const digits = extractRawDigitsFromSpeech(text);
-  const e164 = normalizeUKToE164(digits);
-  return { e164, digits };
-}
-
-/* =========================
-   End-of-conversation detection
-========================= */
-function detectEndOfConversation(phrase) {
-  const endPhrases = [
-    "that's fine","all good","thank you","thanks","no thanks",
-    "nothing else","that's all","thank you very much","goodbye","bye","cheers","that’s fine","that is all"
-  ];
-  const p = phrase.toLowerCase();
-  return endPhrases.some(e => p.includes(e));
-}
-
-/* =========================
-   Barge-in Gather helper
-========================= */
 function gatherWithPlay({ host, text, action = '/twilio/handle' }) {
   const enc    = encodeURIComponent(text || '');
   const ttsUrl = `https://${host}/tts?text=${enc}`;
@@ -238,21 +136,32 @@ function gatherWithPlay({ host, text, action = '/twilio/handle' }) {
 </Gather>`;
 }
 
-/* =========================
-   ElevenLabs TTS endpoint
-========================= */
+/* ================================
+   ELEVENLABS TTS (natural, slightly slower)
+================================ */
 app.get('/tts', async (req, res) => {
   try {
-    const text  = (req.query.text || 'Hello').toString().slice(0, 500);
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream?optimize_streaming_latency=2`;
-    const r = await axios.post(
-      url,
-      { text, model_id: 'eleven_multilingual_v2' },
-      {
-        responseType: 'arraybuffer',
-        headers: { 'xi-api-key': EL_KEY, 'Content-Type': 'application/json' },
+    const text  = (req.query.text || 'Hello').toString().slice(0, 600);
+    const url   = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream?optimize_streaming_latency=2`;
+
+    const payload = {
+      text,
+      model_id: 'eleven_multilingual_v2',
+      voice_settings: {
+        stability: 0.45,
+        similarity_boost: 0.85,
+        speaking_rate: 0.88
       }
-    );
+    };
+
+    const r = await axios.post(url, payload, {
+      responseType: 'arraybuffer',
+      headers: {
+        'xi-api-key': EL_KEY,
+        'Content-Type': 'application/json'
+      }
+    });
+
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Cache-Control', 'no-store');
     res.send(Buffer.from(r.data));
@@ -262,11 +171,139 @@ app.get('/tts', async (req, res) => {
   }
 });
 
-/* =========================
-   Calendar booking + SMS
-========================= */
+/* ================================
+   CALL MEMORY & STATE
+================================ */
+const CALL_MEMORY = new Map();  // CallSid -> [{role, content}]
+const CALL_STATE  = new Map();  // CallSid -> { speaking, silenceCount, wrapPrompted, lang, pendingLang, langConfirmed }
+
+const memFor = (sid) => {
+  if (!CALL_MEMORY.has(sid)) CALL_MEMORY.set(sid, []);
+  return CALL_MEMORY.get(sid);
+};
+const stateFor = (sid) => {
+  if (!CALL_STATE.has(sid)) CALL_STATE.set(sid, { speaking: false, silenceCount: 0, wrapPrompted: false, lang: 'en', pendingLang: null, langConfirmed: false });
+  return CALL_STATE.get(sid);
+};
+
+/* ================================
+   HELPERS: phone, language, ending
+================================ */
+function normalizeUkPhone(spoken) {
+  if (!spoken) return null;
+  let s = spoken.toLowerCase();
+
+  s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
+  s = s.replace(/\bone\b/g, '1')
+       .replace(/\btwo\b/g, '2')
+       .replace(/\bthree\b/g, '3')
+       .replace(/\bfour\b/g, '4')
+       .replace(/\bfive\b/g, '5')
+       .replace(/\bsix\b/g, '6')
+       .replace(/\bseven\b/g, '7')
+       .replace(/\beight\b/g, '8')
+       .replace(/\bnine\b/g, '9');
+
+  s = s.replace(/[^\d+]/g, '');
+
+  if (s.startsWith('+44')) s = '0' + s.slice(3);
+  if (!s.startsWith('0') && s.length === 10) s = '0' + s;
+
+  return s;
+}
+function isLikelyUkNumber(n) {
+  if (!n) return false;
+  return /^0\d{10}$/.test(n) || /^0\d{9}$/.test(n) || /^\+44\d{10}$/.test(n);
+}
+
+function detectLanguage(text) {
+  const t = (text || '').toLowerCase();
+  // simple keyword heuristics
+  const es = /(hola|gracias|por favor|buenos|buenas|quiero|necesito|mañana|tarde|semana)/i.test(t);
+  const pt = /(olá|ola|obrigado|obrigada|por favor|amanhã|tarde|semana|preciso|quero)/i.test(t);
+  const fr = /(bonjour|bonsoir|merci|s'il vous plaît|svp|demain|semaine|je voudrais|je veux)/i.test(t);
+  if (es) return 'es';
+  if (pt) return 'pt';
+  if (fr) return 'fr';
+  return 'en';
+}
+function yesInAnyLang(text) {
+  const t = (text || '').toLowerCase().trim();
+  return /\b(yes|yeah|yep|sure|ok|okay|si|sí|sim|oui|d'accord)\b/.test(t);
+}
+function noInAnyLang(text) {
+  const t = (text || '').toLowerCase().trim();
+  return /\b(no|nope|nah|not now|pas maintenant|não|nao)\b/.test(t);
+}
+
+function detectEndOfConversation(phrase) {
+  const endPhrases = [
+    "no thanks","nothing else","that's all","that’s all","all good","that’s it","thats it","we’re good","were good","i’m good","im good","no thank you","that will be all","that would be all","no, thanks"
+  ];
+  const p = phrase.toLowerCase();
+  return endPhrases.some((e) => p.includes(e));
+}
+function ackPhrase() {
+  const acks = ['Sure—go ahead.', 'Got it.', 'Okay.', 'No problem.', 'Alright.'];
+  return acks[Math.floor(Math.random() * acks.length)];
+}
+function partOfDay() {
+  const now = toZonedTime(new Date(), TZ);
+  const h = Number(formatInTimeZone(now, TZ, 'H'));
+  if (h < 12) return 'day';
+  if (h < 18) return 'afternoon';
+  return 'evening';
+}
+
+function localized(key, lang) {
+  // Minimal phrases in supported languages
+  const map = {
+    wrapPrompt: {
+      en: 'Is there anything else I can help you with?',
+      es: '¿Hay algo más en lo que pueda ayudarte?',
+      pt: 'Há mais alguma coisa em que eu possa ajudar?',
+      fr: 'Y a-t-il autre chose avec laquelle je peux vous aider ?'
+    },
+    goodbye: {
+      en: (pod) => `Thanks for calling MyBizPal — have a great ${pod}.`,
+      es: (pod) => `Gracias por llamar a MyBizPal — que tengas un excelente ${pod === 'evening' ? 'fin de la tarde' : pod === 'afternoon' ? 'tarde' : 'día'}.`,
+      pt: (pod) => `Obrigado por ligar para a MyBizPal — tenha um ótimo ${pod === 'evening' ? 'fim de tarde' : pod === 'afternoon' ? 'tarde' : 'dia'}.`,
+      fr: (pod) => `Merci d’avoir appelé MyBizPal — passez une excellente ${pod === 'evening' ? 'soirée' : pod === 'afternoon' ? 'après-midi' : 'journée'}.`
+    },
+    stillThere: {
+      en: 'Are you still there?',
+      es: '¿Sigues ahí?',
+      pt: 'Você ainda está aí?',
+      fr: 'Vous êtes toujours là ?'
+    },
+    didntCatch: {
+      en: 'Sorry, I didn’t catch that. How can I help?',
+      es: 'Perdona, no entendí. ¿En qué puedo ayudarte?',
+      pt: 'Desculpe, não entendi. Como posso ajudar?',
+      fr: 'Désolé, je n’ai pas compris. Comment puis-je vous aider ?'
+    }
+  };
+  return map[key]?.[lang] || map[key]?.en;
+}
+
+/* ================================
+   DATES
+================================ */
+function parseNaturalDate(utterance, tz = TZ) {
+  if (!utterance) return null;
+  const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
+  if (!parsed) return null;
+
+  const zoned  = toZonedTime(parsed, tz);
+  const iso    = fromZonedTime(zoned, tz).toISOString(); // UTC ISO
+  const spoken = formatInTimeZone(zoned, tz, "eeee do MMMM 'at' h:mmaaa");
+  return { iso, spoken };
+}
+
+/* ================================
+   BOOK APPOINTMENT + SMS
+================================ */
 async function bookAppointment({ who, whenISO, spokenWhen, phone }) {
-  // 30-minute booking
   const startISO = whenISO;
   const endISO   = new Date(new Date(startISO).getTime() + 30 * 60000).toISOString();
 
@@ -274,142 +311,218 @@ async function bookAppointment({ who, whenISO, spokenWhen, phone }) {
     summary: `Call with ${who || 'Prospect'}`,
     start: { dateTime: startISO, timeZone: TZ },
     end:   { dateTime: endISO,   timeZone: TZ },
-    description: 'Booked by MyBizPal receptionist (Ethan).',
+    description: 'Booked by MyBizPal receptionist (Gabriel).'
   };
 
   const created = await calendar.events.insert({
     calendarId: CALENDAR_ID,
-    requestBody: event,
+    requestBody: event
   });
 
   if (phone && TWILIO_NUMBER) {
+    // Fire-and-forget is fine, but we await here to keep it simple
     await twilioClient.messages.create({
       to: phone,
       from: TWILIO_NUMBER,
-      body: `✅ Your appointment is booked for ${spokenWhen}. This is Ethan from MyBizPal — reply CHANGE to reschedule.`
+      body: `✅ Booked: ${event.summary} — ${spokenWhen}. Need to reschedule? Reply CHANGE.`
     });
   }
-
   return created.data;
 }
 
-/* =========================
-   AI reply helper
-========================= */
-async function handleUserText(latestText, memory) {
-  const nat = parseNaturalDate(latestText, TZ);
-  let augmented = latestText;
-  if (nat) {
-    augmented += `\n\n[ParsedTimeISO:${nat.iso}; SpokenTime:${nat.spoken}; TZ:${TZ}]`;
+/* ================================
+   OPENAI CHAT (with persona + language note)
+================================ */
+async function decideAndRespond({ openai, history, latestText, state }) {
+  const messages = [];
+  messages.push({ role: 'system', content: buildSystemPreamble(state) });
+
+  // Keep last ~12 turns (skip extra system entries)
+  const useful = history.slice(-24);
+  for (const h of useful) {
+    if (h.role === 'system') continue;
+    messages.push({ role: h.role, content: h.content });
   }
 
-  const reply = await decideAndRespond({
-    openai,
-    history: memory,
-    latestText: augmented,
+  // Append a language hint instruction
+  const langHint = state.lang && state.lang !== 'en'
+    ? `Caller prefers language: ${state.lang}. Respond in that language.`
+    : 'Caller language: English.';
+
+  messages.push({ role: 'system', content: langHint });
+  messages.push({ role: 'user', content: latestText });
+
+  const resp = await openai.chat.completions.create({
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    temperature: 0.55,
+    max_tokens: 200,
+    messages
   });
 
-  memory.push({ role: 'user',      content: latestText });
-  memory.push({ role: 'assistant', content: reply });
-
-  return reply;
+  const text = resp.choices?.[0]?.message?.content?.trim() || "Alright—how can I help?";
+  return text;
 }
 
-function ackPhrase() {
-  const acks = ['Sure—go ahead.', 'Got it.', 'Okay.', 'No problem.', 'Alright.'];
-  return acks[Math.floor(Math.random() * acks.length)];
-}
-
-/* =========================
-   Twilio Voice endpoints
-========================= */
+/* ================================
+   ENTRY
+================================ */
 app.post('/twilio/voice', async (req, res) => {
   const callSid = req.body.CallSid || '';
   const memory  = memFor(callSid);
-  memory.length = 0;
-  const state   = stateFor(callSid);
+  memory.length = 0; // reset per call
+  const state   = stateFor(callSid); // includes lang
 
-  memory.push({ role: 'system', content: buildSystemPreamble() });
+  memory.push({ role: 'system', content: buildSystemPreamble(state) });
 
-  const greet = `Welcome to MyBizPal, this is Ethan speaking. How can I help you today?`;
+  const greet = `Hey—this is Gabriel with MyBizPal. How can I help you today?`;
   const xml = twiml(`
     ${gatherWithPlay({ host: req.headers.host, text: greet, action: '/twilio/handle' })}
     <Redirect method="POST">/twilio/reprompt</Redirect>
   `);
   state.speaking = true;
-
   res.type('text/xml').send(xml);
 });
 
+/* ================================
+   PARTIAL
+================================ */
 app.post('/twilio/partial', bodyParser.urlencoded({ extended: true }), (req, res) => {
   const partial = req.body.UnstableSpeechResult || req.body.SpeechResult || '';
   if (partial) console.log('PARTIAL:', partial);
   res.sendStatus(200);
 });
 
+/* ================================
+   MAIN HANDLER
+================================ */
 app.post('/twilio/handle', async (req, res) => {
   try {
-    const saidRaw    = (req.body.SpeechResult || '').trim();
-    const callSid    = req.body.CallSid || 'unknown';
-    const memory     = memFor(callSid);
-    const state      = stateFor(callSid);
-
-    // Try to capture a UK number from speech; fallback to caller ID
-    const spokenPhone = extractUKPhoneE164FromText(saidRaw);
-    let callerPhone   = spokenPhone?.e164 || (req.body.From || '').trim();
+    const said    = (req.body.SpeechResult || '').trim();
+    const callSid = req.body.CallSid || 'unknown';
+    const memory  = memFor(callSid);
+    const state   = stateFor(callSid);
+    const callerPhone = req.body.From; // +447...
 
     const wasSpeaking = state.speaking === true;
     state.speaking = false;
 
-    if (!saidRaw) {
-      const xml = twiml(`
-        ${gatherWithPlay({ host: req.headers.host, text: `Hmm… sorry, I didn’t catch that. How can I help?`, action: '/twilio/handle' })}
-      `);
+    // SILENCE handling
+    if (!said) {
+      state.silenceCount = (state.silenceCount || 0) + 1;
+      const lang = state.lang || 'en';
+      const text = state.silenceCount >= 2
+        ? localized('stillThere', lang)
+        : localized('didntCatch', lang);
+      const xml = twiml(`${gatherWithPlay({ host: req.headers.host, text, action: '/twilio/handle' })}`);
+      state.speaking = true;
+      return res.type('text/xml').send(xml);
+    } else {
+      state.silenceCount = 0; // reset on speech
+    }
+
+    // LANGUAGE detection & confirmation gate
+    if (!state.langConfirmed) {
+      const detected = detectLanguage(said);
+      if (detected !== 'en' && !state.pendingLang && state.lang === 'en') {
+        // Ask permission to switch
+        state.pendingLang = detected;
+        const prompt = {
+          es: '¿Prefieres que sigamos en español?',
+          pt: 'Prefere continuar em português?',
+          fr: 'Préférez-vous continuer en français?'
+        }[detected] || 'Would you like to continue in that language?';
+        const xml = twiml(`${gatherWithPlay({ host: req.headers.host, text: prompt, action: '/twilio/handle' })}`);
+        state.speaking = true;
+        return res.type('text/xml').send(xml);
+      } else if (state.pendingLang) {
+        if (yesInAnyLang(said)) {
+          state.lang = state.pendingLang;
+          state.langConfirmed = true;
+          state.pendingLang = null;
+          const confirm = {
+            es: 'Perfecto — seguimos en español. ¿En qué te ayudo?',
+            pt: 'Perfeito — seguimos em português. Como posso ajudar?',
+            fr: 'Parfait — on continue en français. Comment puis-je vous aider ?'
+          }[state.lang] || 'Great — we’ll continue in your language. How can I help?';
+          const xml = twiml(`${gatherWithPlay({ host: req.headers.host, text: confirm, action: '/twilio/handle' })}`);
+          state.speaking = true;
+          return res.type('text/xml').send(xml);
+        } else if (noInAnyLang(said)) {
+          state.pendingLang = null; // stay in English
+          state.lang = 'en';
+        }
+      }
+    }
+
+    // PHONE capture
+    const normalizedCandidate = normalizeUkPhone(said);
+    if (normalizedCandidate && isLikelyUkNumber(normalizedCandidate)) {
+      memory.push({ role: 'user', content: `Caller phone provided: ${normalizedCandidate}` });
+      const lang = state.lang || 'en';
+      const reply = {
+        en: `Got it — ${normalizedCandidate}. Want me to text your confirmation there once we book?`,
+        es: `Perfecto — ${normalizedCandidate}. ¿Quieres que envíe la confirmación por SMS a ese número cuando reservemos?`,
+        pt: `Perfeito — ${normalizedCandidate}. Quer que eu envie a confirmação por SMS para esse número quando agendarmos?`,
+        fr: `Parfait — ${normalizedCandidate}. Voulez-vous que j’envoie la confirmation par SMS à ce numéro une fois la réservation faite ?`
+      }[lang];
+      const xml = twiml(`${gatherWithPlay({ host: req.headers.host, text: reply, action: '/twilio/handle' })}`);
       state.speaking = true;
       return res.type('text/xml').send(xml);
     }
 
-    // End-of-conversation fast exit
-    if (detectEndOfConversation(saidRaw)) {
-      const wrapUpMessage = `Thanks for calling MyBizPal — this is Ethan. Have a great day!`;
-      const xml = twiml(`<Say>${wrapUpMessage}</Say><Hangup/>`);
-      return res.type('text/xml').send(xml);
-    }
-
-    // Simple fast-path booking
-    const nat = parseNaturalDate(saidRaw, TZ);
-    const wantsBooking = /\b(book|schedule|set (up )?(a )?(call|meeting|appointment)|reserve)\b/i.test(saidRaw);
+    // FAST booking
+    const nat = parseNaturalDate(said, TZ);
+    const wantsBooking = /\b(book|schedule|set (up )?(a )?(call|meeting|appointment)|reserve)\b/i.test(said);
 
     let voiceReply;
-
     if (wantsBooking && nat?.iso) {
-      await bookAppointment({
-        who: 'Prospect',
-        whenISO: nat.iso,
-        spokenWhen: nat.spoken,
-        phone: callerPhone,
-      });
+      const lastPhone = (memory.find(x => x.role === 'user' && /Caller phone provided:/.test(x.content))?.content || '').replace('Caller phone provided:','').trim();
+      const phoneForSms = isLikelyUkNumber(lastPhone) ? lastPhone : callerPhone;
+      await bookAppointment({ who: 'Prospect', whenISO: nat.iso, spokenWhen: nat.spoken, phone: phoneForSms });
 
-      // If user dictated a different phone, briefly confirm last 3–4 digits naturally
-      if (spokenPhone?.e164 && spokenPhone.e164 !== (req.body.From || '').trim()) {
-        const tail = spokenPhone.e164.slice(-4);
-        voiceReply = `Ahh, perfect — all set for ${nat.spoken}. I’ll text the confirmation to the number ending ${tail}.`;
-      } else {
-        voiceReply = `Ahh, perfect — all set for ${nat.spoken}. I’ve just sent you a confirmation by text.`;
-      }
+      const lang = state.lang || 'en';
+      const done = {
+        en: `All set for ${nat.spoken}. I’ll send a quick text confirmation.`,
+        es: `Listo para ${nat.spoken}. Te envío la confirmación por SMS.`,
+        pt: `Tudo certo para ${nat.spoken}. Vou enviar a confirmação por SMS.`,
+        fr: `C’est confirmé pour ${nat.spoken}. J’envoie un SMS de confirmation.`
+      }[lang];
+
+      const wrap = localized('wrapPrompt', lang);
+      voiceReply = `${done} ${wrap}`;
+      state.wrapPrompted = true; // now we can safely end if they decline next turn
     } else {
-      // Sales-forward assistant response
-      voiceReply = await handleUserText(saidRaw, memory);
-      // swap any ISO echo for the nice phrase
-      if (nat && /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(voiceReply)) {
-        voiceReply = voiceReply.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z/g, nat.spoken);
+      // Normal AI reply
+      const response = await decideAndRespond({ openai, history: memory, latestText: said, state });
+
+      // Persuasion tail if they asked info-only things
+      if (/\b(price|cost|how much|timeline|time|demo|consult|book|schedule)\b/i.test(said)) {
+        const tail = {
+          en: ' If you want, I can lock a quick spot so we map it properly.',
+          es: ' Si quieres, puedo reservar un hueco rápido para verlo bien.',
+          pt: ' Se quiser, posso agendar um horário rápido para alinharmos tudo.',
+          fr: ' Si vous voulez, je peux bloquer un créneau rapide pour cadrer tout ça.'
+        }[state.lang || 'en'];
+        voiceReply = response + tail;
+      } else {
+        voiceReply = response;
       }
 
-      // Micro-close nudge if they asked about features/pricing without booking language
-      const infoSeeking = /\b(price|pricing|cost|features?|how (it )?works?|what do you do|services?)\b/i.test(saidRaw);
-      if (infoSeeking && !wantsBooking) {
-        voiceReply += ` Hmm… to make this easier, shall we pop a quick 15–20 minute slot in the diary so I can map your situation and show you the best fit?`;
+      // Do NOT end yet; but if the user *already* said an end phrase and we haven’t prompted,
+      // convert that into a wrap prompt instead of hanging up
+      if (!state.wrapPrompted && detectEndOfConversation(said)) {
+        const wrap = localized('wrapPrompt', state.lang || 'en');
+        voiceReply = wrap;
+        state.wrapPrompted = true;
       }
+    }
+
+    // If user already got the wrap prompt and now declines → end with part-of-day
+    if (state.wrapPrompted && detectEndOfConversation(said)) {
+      const pod = partOfDay();
+      const bye = localized('goodbye', state.lang || 'en')(pod);
+      const xml = twiml(`<Say>${bye}</Say><Hangup/>`);
+      return res.type('text/xml').send(xml);
     }
 
     if (wasSpeaking) voiceReply = `${ackPhrase()} ${voiceReply}`;
@@ -419,21 +532,28 @@ app.post('/twilio/handle', async (req, res) => {
       <Pause length="1"/>
     `);
     state.speaking = true;
-
     res.type('text/xml').send(xml);
+
   } catch (err) {
     console.error('handle error', err);
     res.type('text/xml').send(twiml('<Hangup/>'));
   }
 });
 
+/* ================================
+   REPROMPT
+================================ */
 app.post('/twilio/reprompt', (req, res) => {
-  const xml = twiml(`
-    ${gatherWithPlay({ host: req.headers.host, text: `Alright… how can I help?`, action: '/twilio/handle' })}
-  `);
+  const state = stateFor(req.body.CallSid || 'unknown');
+  const lang = state.lang || 'en';
+  const text = localized('didntCatch', lang);
+  const xml = twiml(`${gatherWithPlay({ host: req.headers.host, text, action: '/twilio/handle' })}`);
   res.type('text/xml').send(xml);
 });
 
+/* ================================
+   CLEANUP
+================================ */
 app.post('/hangup', (req, res) => {
   const sid = req.body.CallSid;
   if (sid) {
@@ -443,11 +563,9 @@ app.post('/hangup', (req, res) => {
   res.type('text/xml').send(twiml('<Hangup/>'));
 });
 
-/* =========================
-   Start
-========================= */
+/* ================================
+   START
+================================ */
 app.listen(PORT, () => {
   console.log(`✅ IVR running on ${PORT}`);
 });
-
-
