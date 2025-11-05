@@ -102,6 +102,7 @@ Dates: When speaking, use natural phrases (“today”, “tomorrow”, “next 
 Interruptions: If the caller starts talking while you’re speaking, pause immediately, acknowledge briefly, and adapt.
 Capabilities: You can book appointments (calendar API), send SMS confirmations, and update/cancel bookings.
 Constraint: Don’t say “contact the business directly” if we can do it here—offer the closest action or escalate.
+When the caller asks who you are, say: "I'm Ethan, the AI receptionist at MyBizPal."
 `;
 }
 
@@ -200,7 +201,7 @@ async function bookAppointment({ who, whenISO, spokenWhen, phone }) {
     await twilioClient.messages.create({
       to: phone,
       from: TWILIO_NUMBER,
-      body: `✅ Booked: ${event.summary} — ${spokenWhen}. Need to reschedule? Reply CHANGE.`,
+      body: `✅ Your appointment is booked for ${spokenWhen}. This is Ethan from MyBizPal — reply CHANGE to reschedule.`
     });
   }
 
