@@ -38,19 +38,22 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
 }
 const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 
-// Google Calendar auth: supports ENV or a JSON file path
+// Google Calendar auth: supports ENV or a JSON file path if you ever add it
 function buildGoogleAuth() {
-  const credsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS; // e.g. /app/keys/sa.json
+  // Preferred path: env vars
   let clientEmail = process.env.GOOGLE_CLIENT_EMAIL || '';
   let privateKey  = (process.env.GOOGLE_PRIVATE_KEY || '');
 
+  // Optional fallback to a JSON file if you decide to use one later
+  const credsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
   if ((!clientEmail || !privateKey) && credsPath && fs.existsSync(credsPath)) {
     const raw = JSON.parse(fs.readFileSync(credsPath, 'utf8'));
     clientEmail = raw.client_email;
     privateKey  = raw.private_key;
   }
+
   if (!clientEmail || !privateKey) {
-    throw new Error('Google creds missing: set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY or provide GOOGLE_APPLICATION_CREDENTIALS JSON.');
+    throw new Error('Google creds missing: set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY (escaped \\n).');
   }
 
   return new google.auth.JWT(
@@ -64,7 +67,7 @@ function buildGoogleAuth() {
 const jwt = buildGoogleAuth();
 const calendar = google.calendar({ version: 'v3', auth: jwt });
 // Use ONLY CALENDAR_ID (do NOT set GOOGLE_CALENDAR_ID)
-const CALENDAR_ID = process.env.CALENDAR_ID || 'primary';
+const CALENDAR_ID = process.env.CALENDAR_ID || process.env.GOOGLE_CALENDAR_ID || 'primary';
 
 /* =========================
    In-memory call state
@@ -88,7 +91,7 @@ const twiml = (xmlInner) =>
   `<?xml version="1.0" encoding="UTF-8"?><Response>${xmlInner}</Response>`;
 
 /* =========================
-   System preamble
+   System preamble (with human mannerisms)
 ========================= */
 function buildSystemPreamble() {
   const now = toZonedTime(new Date(), TZ);
@@ -102,7 +105,15 @@ Dates: When speaking, use natural phrases (“today”, “tomorrow”, “next 
 Interruptions: If the caller starts talking while you’re speaking, pause immediately, acknowledge briefly, and adapt.
 Capabilities: You can book appointments (calendar API), send SMS confirmations, and update/cancel bookings.
 Constraint: Don’t say “contact the business directly” if we can do it here—offer the closest action or escalate.
-When the caller asks who you are, say: "I'm Ethan, the AI receptionist at MyBizPal."
+
+Communication Style (more relaxed & relatable):
+Add subtle human reactions like small laughs (“haha”, “hehe”), soft “ohh I see”, “ahh okay”, or “hmm let me think”. 
+Use gentle filler sounds sparingly to create realism, e.g., “umm…”, “hmm…”, “alright, one moment…”, “let me check that…”.
+Never overdo filler words. Keep responses crisp, friendly, and confident—like a real human receptionist.
+
+Identity handling:
+If asked who you are, say: “I’m Ethan, the AI receptionist at MyBizPal.”
+If a caller says they’re done (“that’s all / all good / thanks / goodbye”), close politely and end the call.
 `;
 }
 
@@ -126,7 +137,7 @@ function parseNaturalDate(utterance, tz = TZ) {
 function detectEndOfConversation(phrase) {
   const endPhrases = [
     "that's fine","all good","thank you","thanks","no thanks",
-    "nothing else","that's all","thank you very much","goodbye","bye","cheers"
+    "nothing else","that's all","thank you very much","goodbye","bye","cheers","that’s fine","that is all"
   ];
   const p = phrase.toLowerCase();
   return endPhrases.some(e => p.includes(e));
@@ -189,7 +200,7 @@ async function bookAppointment({ who, whenISO, spokenWhen, phone }) {
     summary: `Call with ${who || 'Prospect'}`,
     start: { dateTime: startISO, timeZone: TZ },
     end:   { dateTime: endISO,   timeZone: TZ },
-    description: 'Booked by MyBizPal receptionist.',
+    description: 'Booked by MyBizPal receptionist (Ethan).',
   };
 
   const created = await calendar.events.insert({
@@ -246,7 +257,7 @@ app.post('/twilio/voice', async (req, res) => {
 
   memory.push({ role: 'system', content: buildSystemPreamble() });
 
-  const greet = `Welcome to MyBizPal. How can I help you today?`;
+  const greet = `Welcome to MyBizPal, this is Ethan speaking. How can I help you today?`;
   const xml = twiml(`
     ${gatherWithPlay({ host: req.headers.host, text: greet, action: '/twilio/handle' })}
     <Redirect method="POST">/twilio/reprompt</Redirect>
@@ -275,7 +286,7 @@ app.post('/twilio/handle', async (req, res) => {
 
     if (!said) {
       const xml = twiml(`
-        ${gatherWithPlay({ host: req.headers.host, text: `Sorry, I didn’t catch that. How can I help?`, action: '/twilio/handle' })}
+        ${gatherWithPlay({ host: req.headers.host, text: `Hmm… sorry, I didn’t catch that. How can I help?`, action: '/twilio/handle' })}
       `);
       state.speaking = true;
       return res.type('text/xml').send(xml);
@@ -283,7 +294,7 @@ app.post('/twilio/handle', async (req, res) => {
 
     // End-of-conversation fast exit
     if (detectEndOfConversation(said)) {
-      const wrapUpMessage = `Thank you for calling MyBizPal. Have a great day!`;
+      const wrapUpMessage = `Thanks for calling MyBizPal — this is Ethan. Have a great day!`;
       const xml = twiml(`<Say>${wrapUpMessage}</Say><Hangup/>`);
       return res.type('text/xml').send(xml);
     }
@@ -301,7 +312,7 @@ app.post('/twilio/handle', async (req, res) => {
         spokenWhen: nat.spoken,
         phone: callerPhone,
       });
-      voiceReply = `All set for ${nat.spoken}. I’ve texted you the confirmation.`;
+      voiceReply = `Ahh, perfect — all set for ${nat.spoken}. I’ve just sent you a confirmation by text.`;
     } else {
       voiceReply = await handleUserText(said, memory);
       // swap any ISO echo for the nice phrase
@@ -327,7 +338,7 @@ app.post('/twilio/handle', async (req, res) => {
 
 app.post('/twilio/reprompt', (req, res) => {
   const xml = twiml(`
-    ${gatherWithPlay({ host: req.headers.host, text: `How can I help?`, action: '/twilio/handle' })}
+    ${gatherWithPlay({ host: req.headers.host, text: `Alright… how can I help?`, action: '/twilio/handle' })}
   `);
   res.type('text/xml').send(xml);
 });
