@@ -11,6 +11,62 @@ import { toZonedTime, fromZonedTime, formatInTimeZone } from 'date-fns-tz';
 import twilio from 'twilio';
 import { google } from 'googleapis';
 
+// --- DEBUG: verify Google Calendar insert quickly
+app.get('/debug/google', async (req, res) => {
+  try {
+    await ensureGoogleAuth();
+    const start = new Date(Date.now() + 5 * 60 * 1000);
+    const end   = new Date(start.getTime() + 15 * 60 * 1000);
+    const event = {
+      summary: 'MyBizPal DEBUG event (15 min)',
+      start: { dateTime: start.toISOString(), timeZone: TZ },
+      end:   { dateTime: end.toISOString(),   timeZone: TZ },
+      description: 'Smoke test from /debug/google'
+    };
+    const created = await calendar.events.insert({
+      calendarId: CALENDAR_ID,
+      requestBody: event,
+      sendUpdates: 'all'
+    });
+    res.json({ ok: true, id: created.data.id, calendarId: CALENDAR_ID });
+  } catch (e) {
+    console.error('DEBUG google error:', e?.response?.data || e);
+    res.status(500).json({ ok: false, error: e?.message, details: e?.response?.data });
+  }
+});
+
+// --- DEBUG: verify Twilio SMS quickly
+app.post('/debug/sms', async (req, res) => {
+  try {
+    const to = (req.body.to || '').trim();
+    if (!to) return res.status(400).json({ ok: false, error: 'missing body.to in E.164 format' });
+    if (!TWILIO_NUMBER) return res.status(400).json({ ok: false, error: 'TWILIO_NUMBER not set' });
+    const msg = await twilioClient.messages.create({
+      to, from: TWILIO_NUMBER,
+      body: 'MyBizPal SMS debug — if you received this, outbound SMS is working ✅'
+    });
+    res.json({ ok: true, sid: msg.sid, to, from: TWILIO_NUMBER });
+  } catch (e) {
+    console.error('DEBUG sms error:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+// --- DEBUG: quick env presence (redacted)
+app.get('/debug/env', (req, res) => {
+  const mask = v => (v ? '[set]' : '[missing]');
+  res.json({
+    GOOGLE_CLIENT_EMAIL: mask(process.env.GOOGLE_CLIENT_EMAIL),
+    GOOGLE_PRIVATE_KEY:  mask(process.env.GOOGLE_PRIVATE_KEY),
+    GOOGLE_CALENDAR_ID:  process.env.GOOGLE_CALENDAR_ID || process.env.CALENDAR_ID || '[not set]',
+    TWILIO_ACCOUNT_SID:  mask(process.env.TWILIO_ACCOUNT_SID),
+    TWILIO_AUTH_TOKEN:   mask(process.env.TWILIO_AUTH_TOKEN),
+    TWILIO_NUMBER:       process.env.TWILIO_NUMBER || '[not set]',
+    OPENAI_KEY:          mask(process.env.OPENAI_API_KEY),
+    ELEVENLABS_KEY:      mask(process.env.ELEVENLABS_API_KEY)
+  });
+});
+
 /* ================================
    APP + MIDDLEWARE
 ================================ */
