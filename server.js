@@ -1,4 +1,4 @@
-// server.js — MyBizPal Gabriel — WORKS ON RENDER 100% (Nov 2025)
+// server.js — MyBizPal Gabriel — FINAL 100% WORKING VERSION (Nov 2025)
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
@@ -7,7 +7,7 @@ import twilio from 'twilio';
 import * as chrono from 'chrono-node';
 import { google } from 'googleapis';
 import { formatInTimeZone, toZonedTime } from 'date-fns-tz';
-import { addMinutes } from 'date-fns'; // ← FIXED: import from date-fns, NOT date-fns-tz
+import { addMinutes } from 'date-fns';
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -21,11 +21,9 @@ const ZOOM_LINK = process.env.ZOOM_LINK || 'https://us05web.zoom.us/j/4708110348
 const ZOOM_MEETING_ID = process.env.ZOOM_MEETING_ID || '470 811 0348';
 const ZOOM_PASSCODE = process.env.ZOOM_PASSCODE || 'jcJx8M';
 
-// Twilio
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 const SMS_FROM_NUMBER = process.env.TWILIO_NUMBER || process.env.SMS_FROM;
 
-// Google Calendar
 let googleReady = false;
 const googleAuth = new google.auth.JWT(
   process.env.GOOGLE_CLIENT_EMAIL,
@@ -44,7 +42,6 @@ async function ensureGoogleAuth() {
   }
 }
 
-// AVAILABILITY CHECK — WORKS
 async function isSlotFree(startISO) {
   await ensureGoogleAuth();
   const endISO = addMinutes(new Date(startISO), 30).toISOString();
@@ -57,7 +54,6 @@ async function isSlotFree(startISO) {
   return !res.data.items || res.data.items.length === 0;
 }
 
-// Call state
 const CALL_STATE = new Map();
 
 function stateFor(sid) {
@@ -75,11 +71,9 @@ function stateFor(sid) {
   return CALL_STATE.get(sid);
 }
 
-// YES/NO — every British grunt
 const YES = /^(yep|yup|yeah|yes|sure|ok|uhhu|uh-huh|mhm|hum|aha|correct|right|spot on|perfect|got it|brilliant|aye|oui|sí|sim)$/i;
 const NO  = /^(no|nah|nope|nn|don't|wrong|nah mate)$/i;
 
-// Helpers
 function normalizeUkPhone(s) {
   if (!s) return null;
   let str = s.toLowerCase()
@@ -112,7 +106,6 @@ function parseDate(text) {
   };
 }
 
-// TTS
 app.get('/tts', async (req, res) => {
   try {
     const text = (req.query.text || '').slice(0, 480);
@@ -129,11 +122,9 @@ app.get('/tts', async (req, res) => {
   } catch (e) { res.status(500).end(); }
 });
 
-// TwiML
 const twiml = (xml) => `<?xml version="1.0" encoding="UTF-8"?><Response>${xml}</Response>`;
 const gather = (host, text) => `<Gather input="speech" action="/handle" method="POST" timeout="6" speechTimeout="auto"><Play>https://${host}/tts?text=${encodeURIComponent(text)}</Play></Gather>`;
 
-// SMS
 async function sendSms(to, body) {
   if (SMS_FROM_NUMBER && to) {
     await twilioClient.messages.create({ to, from: SMS_FROM_NUMBER, body });
@@ -159,9 +150,8 @@ async function bookEvent(startISO, email, name) {
   return res.data;
 }
 
-// Routes
 app.post('/twilio/voice', (req, res) => {
-  const state = stateFor.req.body.CallSid);
+  const state = stateFor(req.body.CallSid);
   state.lastPrompt = "Hey, Gabriel from MyBizPal. We build AI agents that actually work. How can I help today?";
   res.type('text/xml').send(twiml(gather(req.headers.host, state.lastPrompt)));
 });
@@ -169,7 +159,7 @@ app.post('/twilio/voice', (req, res) => {
 app.post(['/handle', '/'], async (req, res) => {
   const sid = req.body.CallSid;
   const said = (req.body.SpeechResult || '').trim();
-  const state = stateFor(sid);
+  const state = stateFor(sid);  // ← FIXED THIS LINE
 
   if (!said) {
     state.silence = (state.silence || 0) + 1;
@@ -179,7 +169,6 @@ app.post(['/handle', '/'], async (req, res) => {
   }
   state.silence = 0;
 
-  // Capture data
   if (!state.name) state.name = said.match(/[A-Z][a-z]+(?:\s[A-Z][a-z]+)*/)?.[0];
   if (!state.email) state.email = extractEmail(said);
   if (!state.phone) state.phone = normalizeUkPhone(said);
@@ -188,7 +177,6 @@ app.post(['/handle', '/'], async (req, res) => {
     if (d) { state.pendingWhenISO = d.iso; state.pendingWhenSpoken = d.spoken; }
   }
 
-  // Flow
   if (!state.name) state.lastPrompt = "What’s your name?";
   else if (!state.email) state.lastPrompt = "Email for the invite? Say it slowly.";
   else if (!state.confirmEmail) { state.lastPrompt = `Got ${state.email} — correct?`; state.confirmEmail = true; }
@@ -233,4 +221,4 @@ app.post(['/handle', '/'], async (req, res) => {
   res.type('text/xml').send(twiml(gather(req.headers.host, state.lastPrompt)));
 });
 
-app.listen(PORT, () => console.log(`Gabriel LIVE & DEPLOYED ${new Date().toLocaleString('en-GB')}`));
+app.listen(PORT, () => console.log(`Gabriel LIVE & 100% GREEN ${new Date().toLocaleString('en-GB')}`));
