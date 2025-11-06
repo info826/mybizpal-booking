@@ -5,10 +5,11 @@ import axios from 'axios';
 import bodyParser from 'body-parser';
 import OpenAI from 'openai';
 import * as chrono from 'chrono-node';
-import { toZonedTime, formatInTimeZone, addMinutes } from 'date-fns-tz';
-import { addMinutes as addMinutesBase } from 'date-fns';
+import { toZonedTime, formatInTimeZone } from 'date-fns-tz';
+import { addMinutes } from 'date-fns';        // ← FIXED
 import twilio from 'twilio';
 import { google } from 'googleapis';
+import { decideAndRespond } from './logic.js'; // ← GABRIEL'S BRAIN
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
