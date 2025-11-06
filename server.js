@@ -68,7 +68,6 @@ const ZOOM_PASSCODE   = process.env.ZOOM_PASSCODE   || 'jcJx8M';
 
 /* Build branded SMS text with clear date/time */
 function formatDateForSms(iso) {
-  // Example: Wed 05 Nov 2025, 3:00PM (Europe/London)
   return formatInTimeZone(new Date(iso), TZ, "eee dd MMM yyyy, h:mmaaa '('zzzz')'");
 }
 function buildConfirmationSms({ summary, startISO }) {
@@ -366,7 +365,7 @@ function localized(key, lang) {
     goodbye: {
       en: (pod) => `Thanks for calling MyBizPal—have a great ${pod}.`,
       es: (pod) => `Gracias por llamar a MyBizPal—que tengas un excelente ${pod === 'evening' ? 'fin de la tarde' : pod === 'afternoon' ? 'tarde' : 'día'}.`,
-      pt: (pod) => `Obrigado por ligar para a MyBizPal—tenha um ótimo ${pod === 'evening' ? 'fim de tarde' : 'afternoon' ? 'tarde' : 'dia'}.`,
+      pt: (pod) => `Obrigado por ligar para a MyBizPal—tenha um ótimo ${pod === 'evening' ? 'fim de tarde' : pod === 'afternoon' ? 'tarde' : 'dia'}.`,
       fr: (pod) => `Merci d’avoir appelé MyBizPal—passez une excellente ${pod === 'evening' ? 'soirée' : 'journée'}.`
     },
     askEmail: {
@@ -786,7 +785,7 @@ app.post('/twilio/handle', async (req, res) => {
         scheduleSmsReminder({ event, phone: phoneForSms });
       }
 
-      // Send branded SMS again (explicit confirmation) and ask for receipt
+      // Send branded SMS again and ask for receipt
       if (phoneForSms && TWILIO_NUMBER) {
         const smsBody = buildConfirmationSms({ summary: event.summary, startISO: event.start.dateTime });
         await twilioClient.messages.create({
@@ -809,9 +808,18 @@ app.post('/twilio/handle', async (req, res) => {
     } else {
       // Normal chat
       let intentHint = '';
-      if (/\b(price|cost|how much|fee|quote)\b/i.test(said)) intentHint = 'INTENT: pricing/enquiry.';
-      else if (/\bbook|schedule|appointment|reserve|call\b/i.test(said)) intentHint = 'INTENT: booking/ready to buy.';
-      else if (/\bweather|day going|how are you|chat|talk)\b/i.test(said)) intentHint = 'INTENT: chit-chat.';
+      if (/\b(price|cost|how much|fee|quote)\b/i.test(said)) {
+        intentHint = 'INTENT: pricing/enquiry.';
+      } else if (/\b(?:book|schedule|appointment|reserve|call)\b/i.test(said)) {
+        // FIXED: grouped + word boundaries
+        intentHint = 'INTENT: booking/ready to buy.';
+      }
+
+      // Small-talk / chit-chat detector (simple & safe)
+      const smallTalkPhrases = ['weather','day going','how are you','chat','talk'];
+      if (smallTalkPhrases.some(p => said.toLowerCase().includes(p))) {
+        intentHint = 'INTENT: chit-chat.';
+      }
 
       const saidAug = intentHint ? `${said}\n\n(${intentHint})` : said;
       const response = await llm({ history: memory, latestText: saidAug, state });
