@@ -1,4 +1,4 @@
-// server.js — MyBizPal: booking + SMS + no double-book + human yes/no
+// server.js — MyBizPal: booking + SMS + no double-book + human yes/no + UK phone E.164
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
@@ -211,15 +211,15 @@ const stateFor = (sid) => {
     langConfirmed: false,
     lastPrompt: '',
 
-    // Contact capture (don’t reset once set)
-    phone: null,
+    // Contact capture (store NATIONAL + E.164; don’t reset once confirmed)
+    phone_nat: null,   // "07XXXXXXXXX" (spoken back)
+    phone_e164: null,  // "+447XXXXXXXXX" (SMS)
     pendingPhone: false,
+    confirmingPhone: false,
+
     email: null,
     pendingEmail: false,
-
-    // Read-back confirmations asked?
     confirmingEmail: false,
-    confirmingPhone: false,
 
     // Reminder pref
     smsReminder: null,
@@ -238,12 +238,14 @@ const stateFor = (sid) => {
 };
 
 /* ================================
-   HELPERS
+   HELPERS — UK phone handling & email
 ================================ */
-function normalizeUkPhone(spoken) {
+// Parse any UK-ish spoken number into national+E.164 pair
+function parseUkPhone(spoken) {
   if (!spoken) return null;
+
   let s = ` ${spoken.toLowerCase()} `;
-  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, ''); // noise
+  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, '');    // filler noise
   s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
   s = s.replace(/\bone\b/g, '1')
        .replace(/\btwo\b/g, '2')
@@ -254,20 +256,36 @@ function normalizeUkPhone(spoken) {
        .replace(/\bseven\b/g, '7')
        .replace(/\beight\b/g, '8')
        .replace(/\bnine\b/g, '9');
+
   s = s.replace(/[^\d+]/g, '');
-  if (s.startsWith('+44')) s = '0' + s.slice(3);
-  if (!s.startsWith('0') && s.length === 10) s = '0' + s;
-  return s.trim();
+
+  if (s.startsWith('+44')) {
+    const rest = s.slice(3);
+    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
+  } else if (s.startsWith('44')) {
+    const rest = s.slice(2);
+    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
+  } else if (s.startsWith('0') && /^\d{11}$/.test(s)) {
+    return { e164: `+44${s.slice(1)}`, national: s };
+  } else if (/^\d{10}$/.test(s)) {
+    return { e164: `+44${s}`, national: `0${s}` };
+  }
+  return null;
 }
-function isLikelyUkNumber(n) {
-  if (!n) return false;
-  return /^0\d{10}$/.test(n) || /^\+44\d{10}$/.test(n) || /^0\d{9}$/.test(n);
+function isLikelyUkNumberPair(p) {
+  return !!(p && p.national && /^0\d{10}$/.test(p.national) && p.e164 && /^\+44\d{10}$/.test(p.e164));
 }
+function slowPhoneSpeakNational(num07) {
+  if (!num07) return '';
+  return num07.split('').join(', ');
+}
+
 function extractEmail(spoken) {
   if (!spoken) return null;
   let s = ` ${spoken.toLowerCase()} `;
   s = s.replace(/\bat sign\b/g, '@')
        .replace(/\bat symbol\b/g, '@')
+       .replace(/\bat-?sign\b/g, '@')
        .replace(/\barroba\b/g, '@')
        .replace(/\bat\b/g, '@');
   s = s.replace(/\bdot\b/g, '.')
@@ -279,18 +297,16 @@ function extractEmail(spoken) {
   const m = s.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
   return m ? m[0] : null;
 }
-function slowPhoneSpeak(num) {
-  if (!num) return '';
-  return num.split('').join(', ');
-}
 function slowEmailSpeak(email) {
   if (!email) return '';
   return email.replace(/@/g, ' at ').replace(/\./g, ' dot ');
 }
+
 function userAskedToWait(text) {
   const t = (text || '').toLowerCase();
   return /(one (sec|second|moment)|just a sec|give me a (sec|second)|wait|hold on|let me check)/i.test(t);
 }
+
 function parseNaturalDate(utterance, tz = TZ) {
   if (!utterance) return null;
   const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
@@ -311,7 +327,7 @@ function partOfDay() {
 function yesInAnyLang(text) {
   const t = (text || '').toLowerCase().trim();
   return /\b(yes|yeah|yep|sure|ok|okay|si|sí|sim|oui|d'accord|yeppers)\b/.test(t)
-      || /^(mm+|mhm+|uh-?huh|uhu|ah['’]?a)$/i.test(t);
+      || /^(mm+|mhm+|uh-?huh|uhu|ah['’]?a|uhhu)$/i.test(t);
 }
 function noInAnyLang(text) {
   const t = (text || '').toLowerCase().trim();
@@ -384,7 +400,7 @@ async function llm({ history, latestText, state }) {
    Continue if ready (books + SMS)
 ================================ */
 async function continueBookingIfReady({ req, res, state }) {
-  if (state.pendingBookingISO && state.phone && state.email && state.smsReminder !== null) {
+  if (state.pendingBookingISO && state.phone_e164 && state.email && state.smsReminder !== null) {
     try {
       // No double-booking
       const conflict = await hasConflict({ startISO: state.pendingBookingISO, durationMin: 30 });
@@ -402,8 +418,8 @@ async function continueBookingIfReady({ req, res, state }) {
         email: state.email
       });
 
-      // One SMS confirmation (only here, not inside calendar)
-      const to = isLikelyUkNumber(state.phone) ? state.phone : (req.body.From || null);
+      // One SMS confirmation (only here)
+      const to = state.phone_e164 || req.body.From || null;
       if (to && TWILIO_NUMBER && to !== TWILIO_NUMBER) {
         await twilioClient.messages.create({
           to, from: TWILIO_NUMBER, body: buildConfirmationSms({ startISO: event.start.dateTime })
@@ -527,10 +543,13 @@ app.post('/twilio/handle', async (req, res) => {
     }
 
     // Opportunistic captures — ONLY if not already set
-    if (!state.phone) {
-      const p = normalizeUkPhone(said);
-      if (isLikelyUkNumber(p)) {
-        state.phone = p; state.pendingPhone = false; state.confirmingPhone = false;
+    if (!state.phone_e164) {
+      const pair = parseUkPhone(said);
+      if (isLikelyUkNumberPair(pair)) {
+        state.phone_e164 = pair.e164;
+        state.phone_nat  = pair.national;
+        state.pendingPhone = false;
+        state.confirmingPhone = false;
       }
     }
     if (!state.email) {
@@ -565,9 +584,9 @@ app.post('/twilio/handle', async (req, res) => {
 
     // If we have time, gather missing pieces in order: phone → email → reminder → book
     if (state.pendingBookingISO) {
-      if (!state.phone) {
+      if (!state.phone_e164) {
         state.pendingPhone = true;
-        const ask = 'What’s the best mobile number for a quick text confirmation?';
+        const ask = 'What’s the best mobile number for a quick text confirmation? Please say: zero seven, then the rest, digit by digit.';
         state.lastPrompt = ask;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
@@ -589,10 +608,12 @@ app.post('/twilio/handle', async (req, res) => {
 
     // Handle pending phone/email/reminder steps
     if (state.pendingPhone) {
-      const n = normalizeUkPhone(said);
-      if (isLikelyUkNumber(n)) {
-        state.phone = n; state.pendingPhone = false;
-        const rb = `Thanks — let me repeat it slowly: ${slowPhoneSpeak(n)}. Is that correct?`;
+      const pair = parseUkPhone(said);
+      if (isLikelyUkNumberPair(pair)) {
+        state.phone_e164 = pair.e164;
+        state.phone_nat  = pair.national;
+        state.pendingPhone = false;
+        const rb = `Thanks — let me repeat it slowly: ${slowPhoneSpeakNational(state.phone_nat)}. Is that correct?`;
         state.confirmingPhone = true;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: rb })));
       } else {
@@ -605,7 +626,7 @@ app.post('/twilio/handle', async (req, res) => {
       if (yesInAnyLang(said)) {
         state.confirmingPhone = false;
       } else if (noInAnyLang(said)) {
-        state.phone = null; state.confirmingPhone = false; state.pendingPhone = true;
+        state.phone_e164 = null; state.phone_nat = null; state.confirmingPhone = false; state.pendingPhone = true;
         const ask = 'Okay — what’s the correct mobile number?';
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
@@ -639,6 +660,14 @@ app.post('/twilio/handle', async (req, res) => {
       else if (noInAnyLang(said)) { state.smsReminder = false; state.pendingReminder = false; }
       const handled = await continueBookingIfReady({ req, res, state });
       if (handled) return;
+
+      // If user said something else (not yes/no), simply re-ask once more, then move on.
+      if (state.smsReminder === null) {
+        state.pendingReminder = true;
+        const ask = `Would you like a text reminder ${REMINDER_MINUTES_BEFORE} minutes before, or prefer no reminder?`;
+        state.lastPrompt = ask;
+        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
+      }
     }
 
     // Awaiting SMS receipt
@@ -650,7 +679,7 @@ app.post('/twilio/handle', async (req, res) => {
         state.lastPrompt = wrap;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: wrap })));
       } else if (noInAnyLang(said)) {
-        const to = state.phone || req.body.From;
+        const to = state.phone_e164 || req.body.From;
         if (to && TWILIO_NUMBER && to !== TWILIO_NUMBER) {
           const body = `Re-sent: your MyBizPal confirmation.\nZoom: ${ZOOM_LINK}\nID: ${ZOOM_MEETING_ID} | Passcode: ${ZOOM_PASSCODE}`;
           await twilioClient.messages.create({ to, from: TWILIO_NUMBER, body });
