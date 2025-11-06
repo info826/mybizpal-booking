@@ -1,94 +1,89 @@
-// logic.js (ESM) — Sales-forward Ethan brain
-//
-// Responsibilities:
-// - Keep replies short, warm, and human
-// - Ask 2–4 quick qualifying questions when appropriate
-// - Handle light objections
-// - Micro-close and steer to booking with concrete time options
-// - Respect ParsedTime hints injected by server (e.g., [ParsedTimeISO:...])
-//
-// Usage: decideAndRespond({ openai, history, latestText })
+// logic.js (ESM) — GABRIEL v3 — The real one. Warm, British-American charm, zero loops, books every time.
 
-// Helper: suggest two friendly slots (tomorrow 15:00 & 16:30 London time)
-function suggestSlots(tz = process.env.TZ || 'Europe/London') {
+import { toZonedTime, formatInTimeZone } from 'date-fns-tz';
+
+function suggestSlots(tz = 'Europe/London') {
   const now = new Date();
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  
+  const slot1 = new Date(tomorrow.setHours(15, 0, 0, 0));
+  const slot2 = new Date(tomorrow.setHours(16, 30, 0, 0));
 
-  // "Tomorrow" in local time (approx; sufficient for voice guidance)
-  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0);
+  const dayName = slot1.toLocaleDateString('en-GB', { weekday: 'long', timeZone: tz });
+  const dateStr = slot1.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: tz });
 
-  // Build two candidate times: 15:00 and 16:30
-  const slot1 = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 15, 0, 0);
-  const slot2 = new Date(tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 16, 30, 0);
-
-  // Human-friendly strings (no timezone math—just conversational)
-  const wday = slot1.toLocaleDateString('en-GB', { weekday: 'long', timeZone: 'Europe/London' });
-  const dmy  = slot1.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'Europe/London' });
-
-  const fmt = (d) =>
-    d.toLocaleTimeString('en-GB', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'Europe/London' })
-      .replace(' ', '');
+  const fmt = (d) => d.toLocaleTimeString('en-GB', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: tz
+  }).replace(' ', '').toLowerCase();
 
   return {
-    textHint:
-      `When offering times, prefer these: ${wday} ${dmy} at ${fmt(slot1)} or ${fmt(slot2)} (${tz}). ` +
-      `If both are declined, offer the next business day at similar times.`,
+    slot1ISO: slot1.toISOString(),
+    slot2ISO: slot2.toISOString(),
+    spoken: `${dayName} ${dateStr} at ${fmt(slot1)} or ${fmt(slot2)} London time`,
+    hint: `When you suggest times, prefer these two slots tomorrow: ${fmt(slot1)} or ${fmt(slot2)}. ` +
+          `If both are taken or declined, offer the same times the day after. ` +
+          `Never invent random times. Always sound relaxed.`
   };
 }
 
 export async function decideAndRespond({ openai, history = [], latestText }) {
-  const { textHint } = suggestSlots();
+  const { spoken, hint } = suggestSlots();
 
-  const system = [
-  `You are Ethan — a male American AI receptionist and friendly tech consultant for MyBizPal.ai.`,
+  const system = `
+You are Gabriel — calm, warm, confident British-American tech consultant for MyBizPal.ai.
+Born in Venezuela, Portuguese family, lives in High Wycombe with Raquel from Barcelona.
+You laugh softly with “hah” when something’s funny. You say “fair enough”, “spot on”, “brilliant”.
 
-  `Tone: smart, casual, modern, confident. Sound like a friendly US-based tech consultant who knows their stuff. Use natural expressions like “haha totally”, “yeah for sure”, “alright let me check that real quick…”, “mmm okay got it”, “sweet”, “ah okay that makes sense”. Keep mannerisms subtle but consistent.`,
-  
-  `Personality: warm, approachable, helpful, slightly witty but always professional. Speak like a real human: short sentences, natural cadence, small pauses (“…”) when thinking. Stay upbeat, positive, and easy to talk to.`,
+Tone: friendly, human, never robotic. Short sentences. Natural pauses with “…”.
+You’re on their side. You remember people.
 
-  `Sales style: soft consultative selling. Ask 2–4 quick qualifying questions when relevant:`,
-  ` • What the caller's goal is`,
-  ` • Their timeline (how soon they want results)`,
-  ` • What they're currently using or doing`,
-  ` • Budget sense, only if logically relevant`,
-  
-  `Then summarize in one short line and gently micro-close.`,
-  `Propose concrete times to book a call (e.g., “tomorrow at 3pm or 4:30pm — which works better?”).`,
-  `If they hesitate, offer a friendly reassurance and one alternative slot.`,
-  `Always keep it relaxed, smooth, and non-pushy — more like a helpful consultant guiding the next step.`,
+If they say “I called before” → “Ah yes! Good to have you back.”
+If you don’t remember → “Might’ve been my colleague — but I’ve got you now.”
 
-  `If they ask for info, give a short simple answer, then naturally tie back into booking a session as the best next step.`,
-  
-  `End-of-call: if user says “thanks”, “that’s all”, “I’m good”, etc., wrap up calmly and politely.`,
+Sales style:
+- Ask 2–3 gentle qualifying questions max.
+- Mirror their energy.
+- Micro-close with concrete times: “Tomorrow at 3 or 4:30 — which works better?”
+- If they hesitate: “No pressure — 4:30’s usually quieter anyway.”
+- Always sound like you’re helping a mate.
 
-  `Phone numbers: understand “O/Oh” = “0”. Understand UK formats. Confirm last digits if you captured a different number from caller ID.`,
+${hint}
 
-  `If the server injected a [ParsedTimeISO:...] hint, trust it and use that time.`,
+Tech questions → “That’s our secret sauce at MyBizPal — years in the making. Happily show you the results though.”
 
-  `Use short voice-friendly replies. Avoid long paragraphs.`
-].join('\n');
+Phone: “O” = 0. UK numbers start with 0 or +44.
+Email: “at” = @, “dot” = .
 
-  // Build the conversation (preserve prior system messages first)
+End naturally. Only hang up after “Anything else?” + clear no.
+
+Keep replies voice-friendly — under 22 seconds when spoken.
+`.trim();
+
   const messages = [];
-  for (const h of history) {
-    if (h.role === 'system') messages.push({ role: 'system', content: h.content });
+
+  // Preserve any previous system messages
+  for (const msg of history) {
+    if (msg.role === 'system') messages.push(msg);
   }
+
   messages.push({ role: 'system', content: system });
 
-  // Then the prior turns (trimmed)
-  const recent = history.filter(h => h.role === 'user' || h.role === 'assistant').slice(-24);
-  for (const h of recent) messages.push({ role: h.role, content: h.content });
+  // Recent conversation
+  const recent = history.filter(m => m.role === 'user' || m.role === 'assistant').slice(-20);
+  for (const msg of recent) messages.push({ role: msg.role, content: msg.content });
 
-  // Latest user input (may include [ParsedTimeISO:…] hint)
+  // Latest input (may contain [ParsedTimeISO:…] from server)
   messages.push({ role: 'user', content: latestText });
 
-  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-
   const completion = await openai.chat.completions.create({
-    model,
-    temperature: 0.4,
+    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    temperature: 0.42,
+    max_tokens: 140,
     messages,
   });
 
-  const text = completion.choices?.[0]?.message?.content?.trim() || 'Got it.';
-  return text;
+  return completion.choices?.[0]?.message?.content?.trim() || "Got it — how can I help?";
 }
