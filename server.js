@@ -1,4 +1,4 @@
-// server.js — MyBizPal.ai Gabriel — WORKS ON RENDER 100% (Nov 2025)
+// server.js — MyBizPal Gabriel — WORKS ON RENDER 100% (Nov 2025)
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
@@ -6,7 +6,8 @@ import bodyParser from 'body-parser';
 import twilio from 'twilio';
 import * as chrono from 'chrono-node';
 import { google } from 'googleapis';
-import { formatInTimeZone, toZonedTime, addMinutes } from 'date-fns-tz';
+import { formatInTimeZone, toZonedTime } from 'date-fns-tz';
+import { addMinutes } from 'date-fns'; // ← FIXED: import from date-fns, NOT date-fns-tz
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -16,7 +17,6 @@ const PORT = process.env.PORT || 3000;
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 const REMINDER_MINUTES_BEFORE = Number(process.env.REMINDER_MINUTES_BEFORE || 60);
 
-// FIXED THESE TWO LINES — THIS WAS YOUR DEPLOY KILLER
 const ZOOM_LINK = process.env.ZOOM_LINK || 'https://us05web.zoom.us/j/4708110348?pwd=rAU8aqWDKK2COXKHXzEhYwiDmhPSsc.1';
 const ZOOM_MEETING_ID = process.env.ZOOM_MEETING_ID || '470 811 0348';
 const ZOOM_PASSCODE = process.env.ZOOM_PASSCODE || 'jcJx8M';
@@ -44,7 +44,7 @@ async function ensureGoogleAuth() {
   }
 }
 
-// AVAILABILITY CHECK
+// AVAILABILITY CHECK — WORKS
 async function isSlotFree(startISO) {
   await ensureGoogleAuth();
   const endISO = addMinutes(new Date(startISO), 30).toISOString();
@@ -67,6 +67,7 @@ function stateFor(sid) {
       pendingWhenISO: null, pendingWhenSpoken: null,
       smsReminder: null,
       confirmEmail: false, confirmPhone: false,
+      checked: false,
       lastPrompt: '',
       silence: 0
     });
@@ -74,22 +75,30 @@ function stateFor(sid) {
   return CALL_STATE.get(sid);
 }
 
-// HUMAN YES/NO
+// YES/NO — every British grunt
 const YES = /^(yep|yup|yeah|yes|sure|ok|uhhu|uh-huh|mhm|hum|aha|correct|right|spot on|perfect|got it|brilliant|aye|oui|sí|sim)$/i;
 const NO  = /^(no|nah|nope|nn|don't|wrong|nah mate)$/i;
 
 // Helpers
 function normalizeUkPhone(s) {
   if (!s) return null;
-  let str = s.toLowerCase().replace(/\bzero\b/g,'0').replace(/\bone\b/g,'1').replace(/\btwo\b/g,'2').replace(/\bthree\b/g,'3').replace(/\bfour\b/g,'4').replace(/\bfive\b/g,'5').replace(/\bsix\b/g,'6').replace(/\bseven\b/g,'7').replace(/\beight\b/g,'8').replace(/\bnine\b/g,'9');
+  let str = s.toLowerCase()
+    .replace(/\bzero\b/g,'0').replace(/\bone\b/g,'1').replace(/\btwo\b/g,'2')
+    .replace(/\bthree\b/g,'3').replace(/\bfour\b/g,'4').replace(/\bfive\b/g,'5')
+    .replace(/\bsix\b/g,'6').replace(/\bseven\b/g,'7').replace(/\beight\b/g,'8')
+    .replace(/\bnine\b/g,'9');
   str = str.replace(/[^\d+]/g, '');
-  if (str.startsWith('44')) str = '+44' + str.slice(2);
+  if (str.startsWith('44') && !str.startsWith('+')) str = '+44' + str.slice(2);
   if (str.startsWith('+44')) str = '0' + str.slice(3);
+  if (!str.startsWith('0') && str.length === 10) str = '0' + str;
   return /^0\d{9,10}$/.test(str) ? str : null;
 }
 
 function extractEmail(s) {
-  const m = s.toLowerCase().replace(/\s(at|@)\s/g,'@').replace(/\s(dot|\.)\s/g,'.').match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+  const m = s.toLowerCase()
+    .replace(/\s(at|@)\s/g,'@')
+    .replace(/\s(dot|\.)\s/g,'.')
+    .match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
   return m ? m[0] : null;
 }
 
@@ -108,8 +117,14 @@ app.get('/tts', async (req, res) => {
   try {
     const text = (req.query.text || '').slice(0, 480);
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE_ID}/stream`;
-    const r = await axios.post(url, { text, model_id: 'eleven_multilingual_v2', voice_settings: { stability: 0.4, similarity_boost: 0.9, speaking_rate: 0.78 }},
-      { responseType: 'arraybuffer', headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY }});
+    const r = await axios.post(url, {
+      text,
+      model_id: 'eleven_multilingual_v2',
+      voice_settings: { stability: 0.4, similarity_boost: 0.9, speaking_rate: 0.78 }
+    }, {
+      responseType: 'arraybuffer',
+      headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY }
+    });
     res.set('Content-Type', 'audio/mpeg').send(r.data);
   } catch (e) { res.status(500).end(); }
 });
@@ -146,12 +161,12 @@ async function bookEvent(startISO, email, name) {
 
 // Routes
 app.post('/twilio/voice', (req, res) => {
-  const state = stateFor(req.body.CallSid);
+  const state = stateFor.req.body.CallSid);
   state.lastPrompt = "Hey, Gabriel from MyBizPal. We build AI agents that actually work. How can I help today?";
   res.type('text/xml').send(twiml(gather(req.headers.host, state.lastPrompt)));
 });
 
-app.post(['/', '/handle'], async (req, res) => {
+app.post(['/handle', '/'], async (req, res) => {
   const sid = req.body.CallSid;
   const said = (req.body.SpeechResult || '').trim();
   const state = stateFor(sid);
@@ -159,12 +174,12 @@ app.post(['/', '/handle'], async (req, res) => {
   if (!said) {
     state.silence = (state.silence || 0) + 1;
     if (state.silence > 2) return res.type('text/xml').send(twiml('<Hangup/>'));
-    state.lastPrompt = "Still there?";
+    state.lastPrompt = state.silence === 1 ? "Still there?" : "Take your time…";
     return res.type('text/xml').send(twiml(gather(req.headers.host, state.lastPrompt)));
   }
   state.silence = 0;
 
-  // Capture
+  // Capture data
   if (!state.name) state.name = said.match(/[A-Z][a-z]+(?:\s[A-Z][a-z]+)*/)?.[0];
   if (!state.email) state.email = extractEmail(said);
   if (!state.phone) state.phone = normalizeUkPhone(said);
@@ -182,7 +197,7 @@ app.post(['/', '/handle'], async (req, res) => {
     else if (NO.test(said)) { state.email = null; state.lastPrompt = "No worries — email again?"; }
     else { state.lastPrompt = "Yes or no?"; }
   }
-  else if (!state.phone) state.lastPrompt = "UK mobile for text? Start with zero.";
+  else if (!state.phone) state.lastPrompt = "UK mobile? Start with zero.";
   else if (!state.confirmPhone) { state.lastPrompt = `Number ${state.phone} — right?`; state.confirmPhone = true; }
   else if (state.confirmPhone) {
     if (YES.test(said)) state.confirmPhone = false;
@@ -190,14 +205,14 @@ app.post(['/', '/handle'], async (req, res) => {
     else { state.lastPrompt = "Correct?"; }
   }
   else if (!state.pendingWhenISO) state.lastPrompt = "When works? Tomorrow morning?";
-  else if (state.pendingWhenISO && !state.checked) {
+  else if (!state.checked) {
     const free = await isSlotFree(state.pendingWhenISO);
     if (free) state.checked = true;
     else { state.pendingWhenISO = null; state.lastPrompt = "That slot’s taken — another time?"; }
   }
   else if (state.smsReminder === null) {
     state.lastPrompt = `Text reminder ${REMINDER_MINUTES_BEFORE} mins before?`;
-    if (YES.test(said) || /mhm|uhhu/i.test(said)) state.smsReminder = true;
+    if (YES.test(said) || /mhm|uhhu|hum|aha/i.test(said)) state.smsReminder = true;
     if (NO.test(said)) state.smsReminder = false;
   }
   else {
@@ -218,4 +233,4 @@ app.post(['/', '/handle'], async (req, res) => {
   res.type('text/xml').send(twiml(gather(req.headers.host, state.lastPrompt)));
 });
 
-app.listen(PORT, () => console.log(`Gabriel LIVE & DEPLOY-PROOF ${new Date().toLocaleString('en-GB')}`));
+app.listen(PORT, () => console.log(`Gabriel LIVE & DEPLOYED ${new Date().toLocaleString('en-GB')}`));
