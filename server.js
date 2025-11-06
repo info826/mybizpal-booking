@@ -1,4 +1,4 @@
-// server.js — MyBizPal.ai Gabriel Receptionist (FULLY WORKING 2025)
+// server.js — MyBizPal.ai "Gabriel" — FULLY HUMAN + AVAILABILITY CHECK + BOOKING + SMS
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
@@ -7,15 +7,17 @@ import twilio from 'twilio';
 import OpenAI from 'openai';
 import * as chrono from 'chrono-node';
 import { google } from 'googleapis';
-import { formatInTimeZone, toZonedTime } from 'date-fns-tz';
+import { formatInTimeZone, toZonedTime, addMinutes } from 'date-fns-tz';
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(bodyParser.json());
 const PORT = process.env.PORT || 3000;
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const REMINDER_MINUTES_BEFORE = Number(process.env.REMINDER_MINUTES_BEFORE || 60);
+const ZOOM_LINK = process.env.ZOOM_LINK || 'https://us05web.zoom.us/j/4708110348?pwd=rAU8aqWDKK2COXKHXzEhYwiDmhPSsc.1';
+const ZOOM_MEETING_ID = process.env.ZOOM_MEETING_ID || '470 811 0348';
+const ZOOM_PASSCODE = process.env.ZOOM_PASSCODE || 'jcJx8M';
 
 // Twilio
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -24,7 +26,7 @@ const SMS_FROM_NUMBER = process.env.TWILIO_NUMBER || process.env.SMS_FROM;
 // OpenAI
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// GOOGLE CALENDAR — FIXED AUTH
+// GOOGLE CALENDAR — BULLETPROOF
 let googleReady = false;
 const googleAuth = new google.auth.JWT(
   process.env.GOOGLE_CLIENT_EMAIL,
@@ -32,7 +34,6 @@ const googleAuth = new google.auth.JWT(
   (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n').replace(/"/g, '').trim(),
   ['https://www.googleapis.com/auth/calendar']
 );
-
 const calendar = google.calendar({ version: 'v3', auth: googleAuth });
 const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || 'primary';
 
@@ -40,31 +41,36 @@ async function ensureGoogleAuth() {
   if (!googleReady) {
     await googleAuth.authorize();
     googleReady = true;
-    console.log('Google Calendar AUTHORIZED');
+    console.log('Google Calendar CONNECTED');
   }
 }
 
-// Call state
-const CALL_MEMORY = new Map();
+// CALL STATE
 const CALL_STATE = new Map();
-
-function memFor(sid) { if (!CALL_MEMORY.has(sid)) CALL_MEMORY.set(sid, []); return CALL_MEMORY.get(sid); }
 function stateFor(sid) {
   if (!CALL_STATE.has(sid)) CALL_STATE.set(sid, {
     name: null, email: null, phone: null,
     pendingWhenISO: null, pendingWhenSpoken: null,
-    smsReminder: null, smsConfirmSent: false,
-    lastPrompt: '', silenceNudges: 0
+    smsReminder: null,
+    pendingConfirmEmail: false,
+    pendingConfirmPhone: false,
+    smsConfirmSent: false,
+    lastPrompt: '',
+    silenceNudges: 0
   });
   return CALL_STATE.get(sid);
 }
 
-// Helpers
+// HUMAN YES/NO — EVERY GRUNT COVERED
+const YES = /^(yep|yup|yeah|yes|sure|okay|ok|uhhu|uh-huh|uh huh|aha|ah'a|ahaa|mhm|mmhm|mm-hmm|hum|go ahead|please|definitely|absolutely|totally|of course|correct|right|spot on|that's it|exactly|perfect|got it|brilliant|lovely|cheers|aye|oui|sí|sim)$/i;
+const NO  = /^(no|nah|nope|nn|nup|nahh|don't|dont|no thanks|nah thanks|negative|pass|skip|wrong|nah mate|no way|not really)$/i;
+
+// HELPERS
 function normalizeUkPhone(s) {
   if (!s) return null;
   let str = s.toLowerCase();
-  const words = { zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
-  Object.keys(words).forEach(w => str = str.replace(new RegExp('\\b' + w + '\\b', 'g'), words[w]));
+  const words = { zero:0, one:1, two:2, three:3, four:4, five:5, six:6, seven:7, eight:8, nine:9 };
+  Object.keys(words).forEach(w => str = str.replace(new RegExp('\\b'+w+'\\b','g'), words[w]));
   str = str.replace(/[^\d+]/g, '');
   if (str.startsWith('44') && !str.startsWith('+')) str = '+' + str;
   if (str.startsWith('+44')) str = '0' + str.slice(3);
@@ -90,6 +96,23 @@ function parseNaturalDate(text) {
   };
 }
 
+// AVAILABILITY CHECK — THE NEW STAR
+async function isSlotFree(startISO) {
+  await ensureGoogleAuth();
+  const endISO = addMinutes(new Date(startISO), 30).toISOString();
+
+  const res = await calendar.events.list({
+    calendarId: CALENDAR_ID,
+    timeMin: startISO,
+    timeMax: endISO,
+    singleEvents: true,
+    orderBy: 'startTime'
+  });
+
+  const events = res.data.items || [];
+  return events.length === 0;
+}
+
 // TTS
 app.get('/tts', async (req, res) => {
   try {
@@ -104,19 +127,15 @@ app.get('/tts', async (req, res) => {
       headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY }
     });
     res.set('Content-Type', 'audio/mpeg').send(r.data);
-  } catch (e) {
-    res.status(500).end();
-  }
+  } catch (e) { res.status(500).end(); }
 });
 
-// TwiML helpers
+// TwiML
 const twiml = (xml) => `<?xml version="1.0" encoding="UTF-8"?><Response>${xml}</Response>`;
 const gather = (host, text) => `
 <Gather input="speech" action="/twilio/handle" method="POST" timeout="6" speechTimeout="auto">
   <Play>https://${host}/tts?text=${encodeURIComponent(text)}</Play>
 </Gather>`;
-
-const play = (host, text) => `<Play>https://${host}/tts?text=${encodeURIComponent(text)}</Play>`;
 
 // SMS
 async function sendSms(to, body) {
@@ -125,36 +144,32 @@ async function sendSms(to, body) {
 }
 
 function smsConfirm(iso) {
-  const when = formatInTimeZone(new Date(iso), TZ, "eee dd MMM yyyy, h:mmaaa");
-  return `MyBizPal Consultation\nWhen: ${when}\nZoom: https://us05web.zoom.us/j/4708110348?pwd=rAU8aqWDKK2COXKHXzEhYwiDmhPSsc.1\nID: 470 811 0348  Pass: jcJx8M\nReply CHANGE to reschedule`;
+  const when = formatInTimeZone(new Date(iso), TZ, "eee dd MMM yyyy, h:mmaaa (zzzz)");
+  return `MyBizPal Consultation BOOKED\nWhen: ${when}\nZoom: ${ZOOM_LINK}\nID: ${ZOOM_MEETING_ID}  Pass: ${ZOOM_PASSCODE}\nReply CHANGE to reschedule`;
 }
 
-// Book event
+// BOOK EVENT
 async function bookEvent({ startISO, email, name }) {
   await ensureGoogleAuth();
-  const endISO = new Date(new Date(startISO).getTime() + 30 * 60 * 1000).toISOString();
+  const endISO = addMinutes(new Date(startISO), 30).toISOString();
   const event = {
     summary: 'MyBizPal — Business Consultation (30 min)',
     start: { dateTime: startISO, timeZone: TZ },
     end: { dateTime: endISO, timeZone: TZ },
+    description: 'Booked by Gabriel (MyBizPal AI)',
     attendees: email ? [{ email, displayName: name || 'Guest' }] : [],
-    conferenceData: {
-      createRequest: { requestId: Date.now().toString() }
-    },
     sendUpdates: 'all'
   };
   const res = await calendar.events.insert({
     calendarId: CALENDAR_ID,
-    resource: event,
-    conferenceDataVersion: 1
+    resource: event
   });
   return res.data;
 }
 
-// Routes
+// ROUTES
 app.post('/twilio/voice', (req, res) => {
   const sid = req.body.CallSid;
-  memFor(sid);
   const state = stateFor(sid);
   state.lastPrompt = "Hey, Gabriel from MyBizPal. We build AI agents that actually work. How can I help today?";
   res.type('text/xml').send(twiml(gather(req.headers.host, state.lastPrompt)));
@@ -163,20 +178,17 @@ app.post('/twilio/voice', (req, res) => {
 app.post('/twilio/handle', async (req, res) => {
   const sid = req.body.CallSid;
   const said = (req.body.SpeechResult || '').trim();
-  const memory = memFor(sid);
   const state = stateFor(sid);
 
   if (!said) {
     state.silenceNudges = (state.silenceNudges || 0) + 1;
     if (state.silenceNudges > 2) return res.type('text/xml').send(twiml('<Hangup/>'));
-    const nudge = state.silenceNudges === 1 ? "Still there?" : "Take your time...";
-    state.lastPrompt = nudge;
-    return res.type('text/xml').send(twiml(gather(req.headers.host, nudge)));
+    state.lastPrompt = state.silenceNudges === 1 ? "Still there?" : "Take your time…";
+    return res.type('text/xml').send(twiml(gather(req.headers.host, state.lastPrompt)));
   }
   state.silenceNudges = 0;
-  memory.push({ role: 'user', content: said });
 
-  // Capture name/email/phone/time
+  // Capture
   if (!state.name && /[A-Z][a-z]+/.test(said)) state.name = said.match(/[A-Z][a-z]+(?:\s[A-Z][a-z]+)*/)?.[0];
   if (!state.email) state.email = extractEmail(said);
   if (!state.phone) state.phone = normalizeUkPhone(said);
@@ -185,50 +197,82 @@ app.post('/twilio/handle', async (req, res) => {
     if (d) { state.pendingWhenISO = d.iso; state.pendingWhenSpoken = d.spoken; }
   }
 
-  // Flow
+  // FLOW
   if (!state.name) {
-    state.lastPrompt = "What’s your name?";
-  } else if (!state.email) {
-    state.lastPrompt = "Email for the invite? Say it slowly.";
-  } else if (!state.phone) {
-    state.lastPrompt = "UK mobile for text confirmation?";
-  } else if (!state.pendingWhenISO) {
+    state.lastPrompt = "Great — what’s your name?";
+  }
+  else if (!state.email) {
+    state.lastPrompt = "Email for the Zoom invite? Say it slowly.";
+  }
+  else if (state.email && !state.pendingConfirmEmail) {
+    state.lastPrompt = `Got ${state.email} — correct?`;
+    state.pendingConfirmEmail = true;
+  }
+  else if (state.pendingConfirmEmail) {
+    if (YES.test(said)) state.pendingConfirmEmail = false;
+    else if (NO.test(said)) { state.email = null; state.lastPrompt = "No worries — email again?"; }
+    else { state.lastPrompt = "Is that email right?"; }
+  }
+  else if (!state.phone) {
+    state.lastPrompt = "UK mobile for text confirmation? Start with zero.";
+  }
+  else if (state.phone && !state.pendingConfirmPhone) {
+    state.lastPrompt = `Your number ${state.phone.replace(/(\d{4})(\d+)/, '$1 $2')} — right?`;
+    state.pendingConfirmPhone = true;
+  }
+  else if (state.pendingConfirmPhone) {
+    if (YES.test(said)) state.pendingConfirmPhone = false;
+    else if (NO.test(said)) { state.phone = null; state.lastPrompt = "Got it — mobile again?"; }
+    else { state.lastPrompt = "Is that number correct?"; }
+  }
+  else if (!state.pendingWhenISO) {
     state.lastPrompt = "When works? Tomorrow morning? This week?";
-  } else if (state.smsReminder === null) {
-    state.lastPrompt = `Want a text reminder ${REMINDER_MINUTES_BEFORE} mins before?`;
-    if (/yes|yeah|sure/i.test(said)) state.smsReminder = true;
-    if (/no|nah/i.test(said)) state.smsReminder = false;
-  } else {
-    // BOOK IT
-    try {
-      const event = await bookEvent({
-        startISO: state.pendingWhenISO,
-        email: state.email,
-        name: state.name
-      });
+  }
+  else if (state.smsReminder === null) {
+    state.lastPrompt = `Want a text reminder ${REMINDER_MINUTES_BEFORE} minutes before?`;
+    if (YES.test(said)) state.smsReminder = true;
+    else if (NO.test(said)) state.smsReminder = false;
+    else if (/mhm|uhhu|hum|aha/i.test(said)) state.smsReminder = true;
+  }
+  else {
+    // CHECK AVAILABILITY FIRST
+    const free = await isSlotFree(state.pendingWhenISO);
+    if (!free) {
+      state.pendingWhenISO = null;
+      state.pendingWhenSpoken = null;
+      state.lastPrompt = "That slot just got taken — sorry! When else works?";
+    } else {
+      // BOOK IT
+      try {
+        const event = await bookEvent({
+          startISO: state.pendingWhenISO,
+          email: state.email,
+          name: state.name
+        });
 
-      if (state.phone) {
-        await sendSms(state.phone, smsConfirm(event.start.dateTime));
-        state.smsConfirmSent = true;
+        if (state.phone) {
+          await sendSms(state.phone, smsConfirm(event.start.dateTime));
+          state.smsConfirmSent = true;
+        }
+
+        if (state.smsReminder && state.phone) {
+          const delay = new Date(event.start.dateTime).getTime() - Date.now() - REMINDER_MINUTES_BEFORE * 60 * 1000;
+          if (delay > 0) {
+            setTimeout(() => {
+              sendSms(state.phone, `Reminder: MyBizPal call in ${REMINDER_MINUTES_BEFORE} mins!\n${ZOOM_LINK}`);
+            }, delay);
+          }
+        }
+
+        state.lastPrompt = `Booked! ${state.pendingWhenSpoken}. Text sent. Anything else?`;
+      } catch (e) {
+        console.error('BOOKING ERROR:', e.message);
+        state.lastPrompt = "Tiny glitch — I’ll email you manually. Thanks!";
       }
-
-      // Reminder
-      if (state.smsReminder && state.phone) {
-        const delay = new Date(event.start.dateTime).getTime() - Date.now() - REMINDER_MINUTES_BEFORE * 60000;
-        if (delay > 0) setTimeout(() => {
-          sendSms(state.phone, `Reminder: MyBizPal call in ${REMINDER_MINUTES_BEFORE} mins!\nZoom: ${ZOOM_LINK}`);
-        }, delay);
-      }
-
-      state.lastPrompt = `Booked! ${state.pendingWhenSpoken}. I just texted you the details. Anything else?`;
-    } catch (e) {
-      console.error('BOOKING FAILED:', e.message);
-      state.lastPrompt = "Sorry, booking glitch. I'll email you manually. Thanks!";
     }
   }
 
   res.type('text/xml').send(twiml(gather(req.headers.host, state.lastPrompt)));
 });
 
-// Start
-app.listen(PORT, () => console.log(`MyBizPal LIVE on port ${PORT}`));
+app.listen(PORT, () => console.log(`Gabriel LIVE — with REAL-TIME AVAILABILITY CHECK`));
