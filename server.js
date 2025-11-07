@@ -1,4 +1,4 @@
-// server.js — MyBizPal: robust booking (no attendee invites by default) + SMS confirm & auto reminders
+// server.js — MyBizPal v2: name in title + single active booking + warmer UX + faster TTS
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
@@ -21,8 +21,9 @@ app.use(bodyParser.json());
 const PORT = process.env.PORT || 3000;
 const TZ   = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
-// Optional: turn Google attendee invites ON only if you have Domain-Wide Delegation set up
-const CALENDAR_ALLOW_ATTENDEE_INVITES = String(process.env.CALENDAR_ALLOW_ATTENDEE_INVITES || 'false').toLowerCase() === 'true';
+// Attendee invites stay OFF unless you enable DWD + set the env
+const CALENDAR_ALLOW_ATTENDEE_INVITES =
+  String(process.env.CALENDAR_ALLOW_ATTENDEE_INVITES || 'false').toLowerCase() === 'true';
 
 /* ================================
    TWILIO (SMS)
@@ -32,7 +33,7 @@ if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
   throw new Error('Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN');
 }
 const twilioClient  = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-const TWILIO_NUMBER = process.env.TWILIO_NUMBER || process.env.SMS_FROM; // E.164 +447...
+const TWILIO_NUMBER = process.env.TWILIO_NUMBER || process.env.SMS_FROM; // +447...
 
 /* ================================
    OPENAI
@@ -41,7 +42,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 /* ================================
-   ELEVENLABS (TTS)
+   ELEVENLABS (TTS) — a touch faster & livelier
 ================================ */
 const EL_KEY   = process.env.ELEVENLABS_API_KEY;
 const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
@@ -78,11 +79,12 @@ const ZOOM_LINK       = process.env.ZOOM_LINK
 const ZOOM_MEETING_ID = process.env.ZOOM_MEETING_ID || '470 811 0348';
 const ZOOM_PASSCODE   = process.env.ZOOM_PASSCODE   || 'jcJx8M';
 
+/* ================================
+   Formatting
+================================ */
 function formatDateForSms(iso) {
   return formatInTimeZone(new Date(iso), TZ, "eee dd MMM yyyy, h:mmaaa '('zzzz')'");
 }
-
-/* Spoken time/date that's clear for TTS */
 function formatSpokenDateTime(iso) {
   const d = new Date(iso);
   const day  = formatInTimeZone(d, TZ, 'eeee');
@@ -94,47 +96,87 @@ function formatSpokenDateTime(iso) {
   const time = mins === '00' ? `${hour} ${mer}` : `${hour}:${mins} ${mer}`;
   return `${day} ${date} ${month} at ${time}`;
 }
-
-function buildConfirmationSms({ startISO }) {
-  const when = formatDateForSms(startISO);
-  return [
-    '✅ MyBizPal — Business Consultation (15–30 min)',
-    `Date: ${when}`,
-    `Zoom: ${ZOOM_LINK}`,
-    `ID: ${ZOOM_MEETING_ID}  Passcode: ${ZOOM_PASSCODE}`,
-    'Reply CHANGE to reschedule.'
-  ].join('\n');
-}
-
-/* ================================
-   PERSONA
-================================ */
 function timeOfDay() {
   const h = Number(formatInTimeZone(new Date(), TZ, 'H'));
   if (h < 12) return 'morning';
   if (h < 18) return 'afternoon';
   return 'evening';
 }
+
+/* Dynamic closings */
+const CLOSERS = {
+  morning: [
+    "Have a great morning!",
+    "Wishing you a smooth morning ahead.",
+    "Enjoy the rest of your morning!"
+  ],
+  afternoon: [
+    "Have a great afternoon!",
+    "Enjoy the rest of your afternoon.",
+    "Hope your afternoon goes brilliantly."
+  ],
+  evening: [
+    "Have a great evening!",
+    "Enjoy the rest of your evening.",
+    "Wishing you a relaxing evening."
+  ]
+};
+function randomCloser() {
+  const tod = timeOfDay();
+  const list = CLOSERS[tod] || CLOSERS.afternoon;
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+/* ================================
+   SMS builders
+================================ */
+function buildConfirmationSms({ startISO, name }) {
+  const when = formatDateForSms(startISO);
+  const who  = name ? `(${name}) ` : '';
+  return [
+    `✅ ${who}MyBizPal — Business Consultation (15–30 min)`,
+    `Date: ${when}`,
+    `Zoom: ${ZOOM_LINK}`,
+    `ID: ${ZOOM_MEETING_ID}  Passcode: ${ZOOM_PASSCODE}`,
+    'Reply CHANGE to reschedule.'
+  ].join('\n');
+}
+function buildReminderSms({ startISO }) {
+  const when = formatDateForSms(startISO);
+  return [
+    '⏰ Reminder: your MyBizPal consultation',
+    `Starts: ${when}`,
+    `Zoom: ${ZOOM_LINK}`,
+    `ID: ${ZOOM_MEETING_ID} | Passcode: ${ZOOM_PASSCODE}`
+  ].join('\n');
+}
+function buildCancellationSms({ startISO }) {
+  const when = formatDateForSms(startISO);
+  return [
+    '❌ Your previous MyBizPal consultation has been cancelled',
+    `Was: ${when}`,
+    'We’ll send a new confirmation with the updated time.'
+  ].join('\n');
+}
+
+/* ================================
+   Persona
+================================ */
 function buildSystemPreamble(state) {
   const niceNow = formatInTimeZone(new Date(), TZ, "eeee dd MMMM yyyy, h:mmaaa");
   return `
-You are Gabriel — calm, friendly, confident tech consultant for MyBizPal.ai.
-Keep it natural, warm, persuasive. Short spoken-style sentences. Slow email/phone read-backs.
+You are Gabriel — calm, friendly, confident consultant for MyBizPal.ai.
+Sound human: natural pace, warm energy, light humour, brief pauses. Add tiny affirmations like “got it,” “perfect,” “no worries.”
+Short spoken sentences. Slow read-backs for numbers/emails.
+Do NOT suggest third-party tools. Qualify lightly and steer to a Zoom with our team.
+Timezone: ${TZ}. Now: ${niceNow}. Language: ${state.lang || 'en'}.
 
-Default meeting is “MyBizPal — Business Consultation (15–30 min)”.
-Timezone: ${TZ}. Now: ${niceNow}.
-Language: ${state.lang || 'en'} (ask once to switch if caller clearly uses ES/PT/FR).
-
-Do NOT recommend third-party tools. Qualify lightly and steer to a Zoom with our team.
-Focus: listen, clarify needs, book the meeting.
-
-End only after: “Is there anything else I can help you with?” and caller declines.
-If silence: two gentle nudges ~7–8s apart, then hang up (no re-greeting loops).
+Close with a time-appropriate, friendly sign-off (randomized). No re-greeting loops.
 Our code is proprietary — say that if asked about internal details.
 `;}
 
 /* ================================
-   TWIML HELPERS
+   TWIML helpers
 ================================ */
 const twiml = (xmlInner) =>
   `<?xml version="1.0" encoding="UTF-8"?><Response>${xmlInner}</Response>`;
@@ -175,7 +217,7 @@ function playOnly({ host, text }) {
 }
 
 /* ================================
-   TTS
+   TTS — faster & friendlier
 ================================ */
 app.get('/tts', async (req, res) => {
   try {
@@ -184,7 +226,13 @@ app.get('/tts', async (req, res) => {
     const payload = {
       text,
       model_id: 'eleven_multilingual_v2',
-      voice_settings: { stability: 0.38, similarity_boost: 0.9, speaking_rate: 0.78 }
+      voice_settings: {
+        stability: 0.3,            // a bit more expressive
+        similarity_boost: 0.92,
+        speaking_rate: 0.92,       // slightly quicker
+        style: 0.35,               // subtle style
+        use_speaker_boost: true
+      }
     };
     const r = await axios.post(url, payload, {
       responseType: 'arraybuffer',
@@ -200,10 +248,10 @@ app.get('/tts', async (req, res) => {
 });
 
 /* ================================
-   STATE
+   State
 ================================ */
 const CALL_MEMORY = new Map();  // CallSid -> [{role, content}]
-const CALL_STATE  = new Map();  // CallSid -> detailed state
+const CALL_STATE  = new Map();  // CallSid -> state
 
 const memFor = (sid) => {
   if (!CALL_MEMORY.has(sid)) CALL_MEMORY.set(sid, []);
@@ -211,66 +259,48 @@ const memFor = (sid) => {
 };
 const stateFor = (sid) => {
   if (!CALL_STATE.has(sid)) CALL_STATE.set(sid, {
-    speaking: false,
-
-    // silence/nudges
     silenceStartAt: null,
-    nudgeCount: 0,
-    lastNudgeAt: null,
-    agentWaitUntil: 0,
-    userRequestedPause: false,
-    takeYourTimeSaid: false,
+    nudgeCount: 0, lastNudgeAt: null, agentWaitUntil: 0,
+    takeYourTimeSaid: false, wrapPrompted: false,
 
-    wrapPrompted: false,
-    lang: 'en',
-    pendingLang: null,
-    langConfirmed: false,
-    lastPrompt: '',
+    lang: 'en', lastPrompt: '',
 
-    // Contact capture
-    phone_nat: null,   // "07XXXXXXXXX" (spoken back)
-    phone_e164: null,  // "+447XXXXXXXXX" (SMS)
-    phone: null,       // canonical (E.164)
-    pendingPhone: false,
-    confirmingPhone: false,
-
-    email: null,
-    pendingEmail: false,
-    confirmingEmail: false,
+    // Contact + identity
+    name: null, pendingName: false, confirmingName: false,
+    phone_nat: null, phone_e164: null, phone: null,
+    pendingPhone: false, confirmingPhone: false,
+    email: null, pendingEmail: false, confirmingEmail: false, askingToSpellEmail: false,
 
     // Booking time
-    pendingBookingISO: null,
-    pendingBookingSpoken: null,
-    awaitingTimeConfirm: false,
+    pendingBookingISO: null, pendingBookingSpoken: null, awaitingTimeConfirm: false,
 
-    // SMS delivery check
-    smsConfirmSent: false,
-    awaitingSmsReceipt: false
+    // SMS status
+    smsConfirmSent: false, awaitingSmsReceipt: false
   });
   return CALL_STATE.get(sid);
 };
 
 /* ================================
-   HELPERS — UK phone & email
+   Helpers — name, phone, email, dates
 ================================ */
+function extractName(text) {
+  // very light heuristic: catch “I’m X”, “This is X”, “My name is X”
+  const t = (text || '').trim();
+  let m = t.match(/\b(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z '-]{1,30})\b/i);
+  if (m) return m[1].trim().replace(/\s+/g, ' ').split(' ')[0]; // first name
+  // fallback: single token that looks like a first name
+  m = t.match(/\b([A-Za-z][A-Za-z'-]{1,30})\b/);
+  return m ? m[1] : null;
+}
 function parseUkPhone(spoken) {
   if (!spoken) return null;
-
   let s = ` ${spoken.toLowerCase()} `;
   s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, '');
   s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
-  s = s.replace(/\bone\b/g, '1')
-       .replace(/\btwo\b/g, '2')
-       .replace(/\bthree\b/g, '3')
-       .replace(/\bfour\b/g, '4')
-       .replace(/\bfive\b/g, '5')
-       .replace(/\bsix\b/g, '6')
-       .replace(/\bseven\b/g, '7')
-       .replace(/\beight\b/g, '8')
-       .replace(/\bnine\b/g, '9');
-
+  s = s.replace(/\bone\b/g, '1').replace(/\btwo\b/g,'2').replace(/\bthree\b/g,'3')
+       .replace(/\bfour\b/g,'4').replace(/\bfive\b/g,'5').replace(/\bsix\b/g,'6')
+       .replace(/\bseven\b/g,'7').replace(/\beight\b/g,'8').replace(/\bnine\b/g,'9');
   s = s.replace(/[^\d+]/g, '');
-
   if (s.startsWith('+44')) {
     const rest = s.slice(3);
     if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
@@ -285,31 +315,21 @@ function parseUkPhone(spoken) {
   return null;
 }
 function isLikelyUkNumberPair(p) {
-  return !!(p && p.national && /^0\d{10}$/.test(p.national) && p.e164 && /^\+44\d{10}$/.test(p.e164));
+  return !!(p && /^0\d{10}$/.test(p.national) && /^\+44\d{10}$/.test(p.e164));
 }
-function slowPhoneSpeakNational(num07) {
-  if (!num07) return '';
-  return num07.split('').join(', ');
-}
+function slowPhoneSpeak(nat07) { return nat07 ? nat07.split('').join(', ') : ''; }
+
 function extractEmail(spoken) {
   if (!spoken) return null;
   let s = ` ${spoken.toLowerCase()} `;
-  s = s.replace(/\bat(-|\s)?sign\b/g, '@')
-       .replace(/\bat symbol\b/g, '@')
-       .replace(/\barroba\b/g, '@')
-       .replace(/\bat\b/g, '@');
-  s = s.replace(/\bdot\b/g, '.')
-       .replace(/\bpunto\b/g, '.')
-       .replace(/\bponto\b/g, '.')
-       .replace(/\bpoint\b/g, '.');
+  s = s.replace(/\bat(-|\s)?sign\b/g, '@').replace(/\bat symbol\b/g, '@')
+       .replace(/\barroba\b/g, '@').replace(/\bat\b/g, '@');
+  s = s.replace(/\bdot\b/g, '.').replace(/\bpunto\b/g, '.')
+       .replace(/\bponto\b/g, '.').replace(/\bpoint\b/g, '.');
   s = s.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
   s = s.replace(/\s+/g, ' ').trim();
   const m = s.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
   return m ? m[0] : null;
-}
-function slowEmailSpeak(email) {
-  if (!email) return '';
-  return email.replace(/@/g, ' at ').replace(/\./g, ' dot ');
 }
 function userAskedToWait(text) {
   const t = (text || '').toLowerCase();
@@ -325,20 +345,19 @@ function parseNaturalDate(utterance, tz = TZ) {
   return { iso, spoken };
 }
 
-/* Human back-channels → YES/NO */
+/* YES/NO */
 function yesInAnyLang(text) {
   const t = (text || '').toLowerCase().trim();
-  return /\b(yes|yeah|yep|sure|ok|okay|si|sí|sim|oui|d'accord|yeppers)\b/.test(t)
+  return /\b(yes|yeah|yep|sure|ok|okay|si|sí|sim|oui)\b/.test(t)
       || /^(mm+|mhm+|uh-?huh|uhu|ah['’]?a|uhhu)$/i.test(t);
 }
 function noInAnyLang(text) {
   const t = (text || '').toLowerCase().trim();
-  return /\b(no|nope|nah|pas maintenant|não|nao)\b/.test(t)
-      || /^(nn)$/i.test(t);
+  return /\b(no|nope|nah|pas maintenant|não|nao)\b/.test(t) || /^(nn)$/i.test(t);
 }
 
 /* ================================
-   CALENDAR: conflict check + insert
+   Calendar helpers: find/cancel prev booking; conflict; insert
 ================================ */
 async function hasConflict({ startISO, durationMin = 30 }) {
   await ensureGoogleAuth();
@@ -356,22 +375,50 @@ async function hasConflict({ startISO, durationMin = 30 }) {
   return (r.data.items || []).length > 0;
 }
 
-// Insert event; optionally include attendees only if allowed
-async function insertEventBase({ startISO, durationMin = 30, email, withAttendee = false }) {
+async function findExistingBooking({ phone, email }) {
+  await ensureGoogleAuth();
+  const nowISO = new Date().toISOString();
+  const untilISO = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(); // next 60 days
+  const r = await calendar.events.list({
+    calendarId: CALENDAR_ID,
+    timeMin: nowISO,
+    timeMax: untilISO,
+    singleEvents: true,
+    maxResults: 50,
+    orderBy: 'startTime'
+  });
+  const items = r.data.items || [];
+  return items.find(ev => {
+    const desc = (ev.description || '').toLowerCase();
+    const sum  = (ev.summary || '').toLowerCase();
+    const tag  = 'booked by mybizpal (gabriel)';
+    const hasTag = desc.includes(tag);
+    const hasContact = (phone && desc.includes(phone.replace('+', ''))) || (email && desc.includes((email||'').toLowerCase()));
+    const isOurMeeting = sum.includes('mybizpal');
+    return hasTag && isOurMeeting && hasContact;
+  }) || null;
+}
+
+async function cancelEventById(id) {
+  await ensureGoogleAuth();
+  await calendar.events.delete({ calendarId: CALENDAR_ID, eventId: id });
+}
+
+async function insertEventBase({ startISO, durationMin = 30, email, name, phone, withAttendee = false }) {
   await ensureGoogleAuth();
   const endISO = new Date(new Date(startISO).getTime() + durationMin * 60000).toISOString();
-
+  const who  = name ? `(${name}) ` : '';
   const event = {
-    summary: 'MyBizPal — Business Consultation (15–30 min)',
+    summary: `${who}MyBizPal — Business Consultation (15–30 min)`,
     start: { dateTime: startISO, timeZone: TZ },
     end:   { dateTime: endISO,   timeZone: TZ },
-    description: `Booked by MyBizPal (Gabriel).${email ? `\nCaller email (for reference): ${email}` : ''}`
+    description:
+`Booked by MyBizPal (Gabriel).
+Caller name: ${name || 'Prospect'}
+Caller phone: ${phone || 'n/a'}
+Caller email: ${email || 'n/a'}`
   };
-
-  if (withAttendee && email) {
-    event.attendees = [{ email }];
-  }
-
+  if (withAttendee && email) event.attendees = [{ email }];
   const created = await calendar.events.insert({
     calendarId: CALENDAR_ID,
     requestBody: event,
@@ -380,11 +427,10 @@ async function insertEventBase({ startISO, durationMin = 30, email, withAttendee
   return created.data;
 }
 
-// Public insert with safe fallback: try attendees if allowed; otherwise or on 403, insert without
-async function insertEvent({ startISO, durationMin = 30, email }) {
+async function insertEvent({ startISO, durationMin = 30, email, name, phone }) {
   const wantAttendee = CALENDAR_ALLOW_ATTENDEE_INVITES && !!email;
   try {
-    return await insertEventBase({ startISO, durationMin, email, withAttendee: wantAttendee });
+    return await insertEventBase({ startISO, durationMin, email, name, phone, withAttendee: wantAttendee });
   } catch (e) {
     const msg = String(e?.message || '');
     const isDwdError =
@@ -392,87 +438,91 @@ async function insertEvent({ startISO, durationMin = 30, email }) {
       msg.includes('Forbidden') || e?.code === 403;
     if (wantAttendee && isDwdError) {
       console.warn('⚠️ Attendee invite blocked — retrying without attendees…');
-      return await insertEventBase({ startISO, durationMin, email, withAttendee: false });
+      return await insertEventBase({ startISO, durationMin, email, name, phone, withAttendee: false });
     }
     throw e;
   }
 }
 
 /* ================================
-   LLM
+   LLM (for small talk/qualifying, not tools)
 ================================ */
 async function llm({ history, latestText, state }) {
   const messages = [];
   messages.push({ role: 'system', content: buildSystemPreamble(state) });
   for (const h of history.slice(-14)) if (h.role !== 'system') messages.push(h);
-  messages.push({
-    role: 'system',
-    content: state.lang !== 'en'
-      ? `Caller prefers language: ${state.lang}. Respond in that language.`
-      : 'Caller language: English.'
-  });
   messages.push({ role: 'user', content: latestText });
 
   const resp = await openai.chat.completions.create({
     model: OPENAI_MODEL,
-    temperature: 0.4,
-    max_tokens: 120,
+    temperature: 0.45,
+    max_tokens: 130,
     messages
   });
   return resp.choices?.[0]?.message?.content?.trim() || 'Alright—how can I help?';
 }
 
 /* ================================
-   Continue if ready (books + SMS)
-   Auto reminders at T-24h and T-60m
+   Booking continuation: cancel old, book new, SMS flows
 ================================ */
 async function continueBookingIfReady({ req, res, state }) {
   if (state.pendingBookingISO && state.phone && state.email) {
     try {
+      // If user already has a booked slot with us, cancel it and notify
+      const existing = await findExistingBooking({ phone: state.phone, email: state.email });
+      const to = state.phone || state.phone_e164 || req.body.From || null;
+
+      if (existing) {
+        try {
+          await cancelEventById(existing.id);
+          if (to && TWILIO_NUMBER && to !== TWILIO_NUMBER) {
+            await twilioClient.messages.create({
+              to, from: TWILIO_NUMBER, body: buildCancellationSms({ startISO: existing.start.dateTime })
+            });
+          }
+        } catch (ce) {
+          console.warn('Cancel previous failed:', ce?.message || ce);
+        }
+      }
+
+      // Avoid overlap
       const conflict = await hasConflict({ startISO: state.pendingBookingISO, durationMin: 30 });
       if (conflict) {
-        const msg = 'That time just got taken. Want me to look for the next available slot around that time?';
+        const msg = 'That time just got taken. Want me to check the next closest slot?';
         state.lastPrompt = msg;
         res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: msg })));
         return true;
       }
 
+      // Create event
       const event = await insertEvent({
         startISO: state.pendingBookingISO,
         durationMin: 30,
-        email: state.email
+        email: state.email,
+        name: state.name,
+        phone: (state.phone || '').replace('+', '')
       });
-
-      const to = state.phone || state.phone_e164 || req.body.From || null;
 
       // Confirmation SMS
       if (to && TWILIO_NUMBER && to !== TWILIO_NUMBER) {
         await twilioClient.messages.create({
-          to, from: TWILIO_NUMBER, body: buildConfirmationSms({ startISO: event.start.dateTime })
+          to, from: TWILIO_NUMBER, body: buildConfirmationSms({ startISO: event.start.dateTime, name: state.name })
         });
         state.smsConfirmSent = true;
         state.awaitingSmsReceipt = true;
       }
 
-      // Auto reminders: 24h and 60m before
+      // Auto reminders: 24h & 60m
       const startMs = new Date(event.start.dateTime).getTime();
       const nowMs   = Date.now();
-      const reminders = [ startMs - 24*60*60*1000, startMs - 60*60*1000 ];
-
-      for (const fireAt of reminders) {
+      for (const fireAt of [ startMs - 24*60*60*1000, startMs - 60*60*1000 ]) {
         const delay = fireAt - nowMs;
         if (to && TWILIO_NUMBER && delay > 0 && delay < 7*24*60*60*1000) {
           setTimeout(async () => {
             try {
-              const when = formatDateForSms(event.start.dateTime);
-              const body = [
-                '⏰ Reminder: your MyBizPal consultation',
-                `Starts: ${when}`,
-                `Zoom: ${ZOOM_LINK}`,
-                `ID: ${ZOOM_MEETING_ID} | Passcode: ${ZOOM_PASSCODE}`
-              ].join('\n');
-              await twilioClient.messages.create({ to, from: TWILIO_NUMBER, body });
-              console.log('✅ Reminder SMS sent for', new Date(fireAt).toISOString());
+              await twilioClient.messages.create({
+                to, from: TWILIO_NUMBER, body: buildReminderSms({ startISO: event.start.dateTime })
+              });
             } catch (e) { console.error('Reminder SMS error:', e?.message || e); }
           }, delay);
         }
@@ -482,13 +532,13 @@ async function continueBookingIfReady({ req, res, state }) {
       state.pendingBookingISO = null;
       state.pendingBookingSpoken = null;
 
-      const askReceipt = 'I’ve just sent the text—did you receive it?';
+      const askReceipt = 'I’ve sent your text confirmation—did you receive it?';
       state.lastPrompt = askReceipt;
       res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: askReceipt })));
       return true;
     } catch (e) {
       console.error('Booking failed:', e?.message || e);
-      const fail = 'Hmm — I couldn’t finalize that right now. I’ll note your details and follow up.';
+      const fail = 'Hmm — I couldn’t finalize that just now. I’ll note your details and follow up.';
       state.lastPrompt = fail;
       res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: fail })));
       return true;
@@ -506,7 +556,7 @@ app.post('/twilio/voice', (req, res) => {
   const state = stateFor(sid);
 
   state.silenceStartAt = null; state.nudgeCount = 0; state.lastNudgeAt = null;
-  state.userRequestedPause = false; state.takeYourTimeSaid = false;
+  state.takeYourTimeSaid = false;
 
   memory.push({ role: 'system', content: buildSystemPreamble(state) });
 
@@ -536,10 +586,9 @@ app.post('/twilio/handle', async (req, res) => {
     const state   = stateFor(sid);
     const now     = Date.now();
 
-    /* Silence rules — gentle nudges only, no re-greeting loop */
+    // Silence handling (no re-greeting loops)
     if (!said) {
       if (state.silenceStartAt == null) state.silenceStartAt = now;
-
       if (state.agentWaitUntil && now < state.agentWaitUntil) {
         return res.type('text/xml').send(twiml(silentGather({})));
       }
@@ -555,33 +604,36 @@ app.post('/twilio/handle', async (req, res) => {
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: 'Are you still there?' })));
       }
       if (state.nudgeCount >= 2 && (now - state.lastNudgeAt) >= 7000) {
-        const bye = `Thanks for calling MyBizPal—have a great ${timeOfDay()}.`;
+        const bye = `${randomCloser()} Thanks for calling MyBizPal.`;
         return res.type('text/xml').send(twiml(`${playOnly({ host: req.headers.host, text: bye })}<Hangup/>`));
       }
       return res.type('text/xml').send(twiml(silentGather({})));
     } else {
       state.silenceStartAt = null; state.nudgeCount = 0; state.lastNudgeAt = null;
-      state.userRequestedPause = false; state.takeYourTimeSaid = false;
+      state.takeYourTimeSaid = false;
     }
 
-    // User asked us to wait
+    // Wait request
     if (userAskedToWait(said)) {
       if (!state.takeYourTimeSaid) {
         state.takeYourTimeSaid = true;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: 'Take your time—whenever you’re ready.' })));
+        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: 'No rush — take your time.' })));
       }
       return res.type('text/xml').send(twiml(silentGather({})));
     }
 
-    // Opportunistic captures — ONLY if not already set
+    // Opportunistic captures
+    if (!state.name) {
+      const n = extractName(said);
+      if (n && /^[A-Za-z][A-Za-z '-]{1,30}$/.test(n)) state.name = n;
+    }
     if (!state.phone) {
       const pair = parseUkPhone(said);
       if (isLikelyUkNumberPair(pair)) {
         state.phone_e164 = pair.e164;
         state.phone_nat  = pair.national;
-        state.phone      = pair.e164; // canonical
-        state.pendingPhone = false;
-        state.confirmingPhone = false;
+        state.phone      = pair.e164;
+        state.pendingPhone = false; state.confirmingPhone = false;
         console.log('[FLOW] phone set:', state.phone, '(nat:', state.phone_nat, ')');
       }
     }
@@ -593,7 +645,7 @@ app.post('/twilio/handle', async (req, res) => {
       }
     }
 
-    // Natural date detection
+    // Natural date
     const nat = parseNaturalDate(said, TZ);
     if (nat && !state.pendingBookingISO && !state.awaitingTimeConfirm) {
       state.pendingBookingISO    = nat.iso;
@@ -609,33 +661,59 @@ app.post('/twilio/handle', async (req, res) => {
       } else if (noInAnyLang(said)) {
         state.awaitingTimeConfirm = false;
         state.pendingBookingISO = null; state.pendingBookingSpoken = null;
-        const ask = 'No problem—what time works better?';
+        const ask = 'No problem — what time works better?';
         state.lastPrompt = ask;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
     }
 
-    // If we have time, gather missing pieces in order: phone → email → book
+    // If we have a time, gather: name → phone → email → book
     if (state.pendingBookingISO) {
+      if (!state.name) {
+        state.pendingName = true;
+        const ask = 'What’s your first name?';
+        state.lastPrompt = ask;
+        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
+      }
       if (!state.phone) {
         state.pendingPhone = true;
-        const ask = 'What’s the best mobile number for a quick text confirmation? Please say: zero seven, then the rest, digit by digit.';
+        const ask = 'What’s the best mobile number for the confirmation text?';
         state.lastPrompt = ask;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
       if (!state.email) {
         state.pendingEmail = true;
+        state.askingToSpellEmail = false;
         const ask = 'What email should I send the calendar invite to?';
         state.lastPrompt = ask;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
-
-      console.log('[FLOW] continueBookingIfReady? time:', state.pendingBookingISO, 'phone:', state.phone, 'email:', state.email);
+      // once email captured, ask to spell clearly one time
+      if (!state.askingToSpellEmail && state.email) {
+        state.askingToSpellEmail = true;
+        const ask = 'Could you spell that email clearly to make sure I’ve got it right?';
+        state.lastPrompt = ask;
+        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
+      }
+      console.log('[FLOW] continueBookingIfReady? time:', state.pendingBookingISO, 'phone:', state.phone, 'email:', state.email, 'name:', state.name);
       const handled = await continueBookingIfReady({ req, res, state });
       if (handled) return;
     }
 
-    // Handle pending phone/email
+    // Handle pending captures
+    if (state.pendingName) {
+      const n = extractName(said);
+      if (n && /^[A-Za-z][A-Za-z '-]{1,30}$/.test(n)) {
+        state.name = n; state.pendingName = false;
+        const rb = `Thanks ${n}.`;
+        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: rb })));
+      } else {
+        const ask = 'Sorry — what’s your first name?';
+        state.lastPrompt = ask;
+        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
+      }
+    }
+
     if (state.pendingPhone) {
       const pair = parseUkPhone(said);
       if (isLikelyUkNumberPair(pair)) {
@@ -643,11 +721,11 @@ app.post('/twilio/handle', async (req, res) => {
         state.phone_nat  = pair.national;
         state.phone      = pair.e164;
         state.pendingPhone = false;
-        const rb = `Thanks — let me repeat it slowly: ${slowPhoneSpeakNational(state.phone_nat)}. Is that correct?`;
+        const rb = `Let me read that back: ${slowPhoneSpeak(state.phone_nat)}. Is that correct?`;
         state.confirmingPhone = true;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: rb })));
       } else {
-        const ask = 'I didn’t catch that — please say each digit starting with zero.';
+        const ask = 'I didn’t catch that — could you say the full mobile number again?';
         state.lastPrompt = ask;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
@@ -667,21 +745,29 @@ app.post('/twilio/handle', async (req, res) => {
       const e = extractEmail(said);
       if (e) {
         state.email = e; state.pendingEmail = false;
-        const rb = `Perfect — here’s how I heard it: ${slowEmailSpeak(e)}. Is that right?`;
-        state.confirmingEmail = true;
+        const rb = `Perfect — here’s how I heard it: ${e}. We’ll double-check the spelling next.`;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: rb })));
       } else {
-        const ask = "Could you say the email slowly — like 'name at domain dot com'?";
+        const ask = "Could you share the email address?";
         state.lastPrompt = ask;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
+    }
+
+    if (state.askingToSpellEmail && !state.confirmingEmail) {
+      // take whatever they spell and run extraction again
+      const spelled = extractEmail(said) || state.email;
+      state.email = spelled;
+      const rb = `Thanks — just to confirm: ${state.email}. Is that right?`;
+      state.confirmingEmail = true;
+      return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: rb })));
     }
     if (state.confirmingEmail) {
       if (yesInAnyLang(said)) {
         state.confirmingEmail = false;
       } else if (noInAnyLang(said)) {
-        state.email = null; state.confirmingEmail = false; state.pendingEmail = true;
-        const ask = 'No problem — what email should I send it to?';
+        state.email = null; state.confirmingEmail = false; state.pendingEmail = true; state.askingToSpellEmail = false;
+        const ask = 'No worries — what’s the correct email?';
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
     }
@@ -707,11 +793,9 @@ app.post('/twilio/handle', async (req, res) => {
       }
     }
 
-    // Normal conversation via LLM
+    // Small talk / qualifying via LLM (kept human & brief)
     const reply = await llm({ history: memory, latestText: said, state });
     let final = reply;
-
-    // If our reply asks them to wait, stop nudges for ~12s
     if (/(one moment|just a sec|give me a (sec|second)|let me check|hang on)/i.test(final)) {
       state.agentWaitUntil = Date.now() + 12000;
     }
@@ -744,17 +828,18 @@ app.post('/twilio/reprompt', (req, res) => {
 app.post('/hangup', (req, res) => {
   const sid = req.body.CallSid;
   if (sid) { CALL_MEMORY.delete(sid); CALL_STATE.delete(sid); }
-  res.type('text/xml').send(twiml('<Hangup/>'));
+  const bye = `${randomCloser()} Thanks for calling MyBizPal.`;
+  res.type('text/xml').send(twiml(`${playOnly({ host: req.headers.host, text: bye })}<Hangup/>`));
 });
 
 /* ================================
-   DEBUG ROUTES
+   DEBUG
 ================================ */
 app.get('/debug/google', async (req, res) => {
   try {
     await ensureGoogleAuth();
     const startISO = new Date(Date.now() + 10 * 60000).toISOString();
-    const ev = await insertEvent({ startISO, durationMin: 15, email: null });
+    const ev = await insertEvent({ startISO, durationMin: 15, email: null, name: 'Test', phone: '000' });
     res.json({ ok: true, id: ev.id, calendarId: CALENDAR_ID });
   } catch (e) { res.json({ ok: false, error: e?.message || e }); }
 });
