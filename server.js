@@ -1,4 +1,4 @@
-// server.js — MyBizPal: booking + SMS + no double-book + human yes/no + UK phone E.164 + cleaner flow
+// server.js — MyBizPal: robust booking (no attendee invites by default) + SMS confirm & auto reminders
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
@@ -20,6 +20,9 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 const TZ   = process.env.BUSINESS_TIMEZONE || 'Europe/London';
+
+// Optional: turn Google attendee invites ON only if you have Domain-Wide Delegation set up
+const CALENDAR_ALLOW_ATTENDEE_INVITES = String(process.env.CALENDAR_ALLOW_ATTENDEE_INVITES || 'false').toLowerCase() === 'true';
 
 /* ================================
    TWILIO (SMS)
@@ -79,15 +82,15 @@ function formatDateForSms(iso) {
   return formatInTimeZone(new Date(iso), TZ, "eee dd MMM yyyy, h:mmaaa '('zzzz')'");
 }
 
-/* --- Spoken time/date that TTS reads clearly --- */
+/* Spoken time/date that's clear for TTS */
 function formatSpokenDateTime(iso) {
   const d = new Date(iso);
-  const day  = formatInTimeZone(d, TZ, 'eeee');               // Saturday
-  const date = formatInTimeZone(d, TZ, 'd');                  // 9
-  const month= formatInTimeZone(d, TZ, 'LLLL');               // November
-  const mins = formatInTimeZone(d, TZ, 'mm');                 // 00 or 30 etc
-  const hour = formatInTimeZone(d, TZ, 'h');                  // 1..12
-  const mer  = formatInTimeZone(d, TZ, 'a').toLowerCase();    // am/pm
+  const day  = formatInTimeZone(d, TZ, 'eeee');
+  const date = formatInTimeZone(d, TZ, 'd');
+  const month= formatInTimeZone(d, TZ, 'LLLL');
+  const mins = formatInTimeZone(d, TZ, 'mm');
+  const hour = formatInTimeZone(d, TZ, 'h');
+  const mer  = formatInTimeZone(d, TZ, 'a').toLowerCase();
   const time = mins === '00' ? `${hour} ${mer}` : `${hour}:${mins} ${mer}`;
   return `${day} ${date} ${month} at ${time}`;
 }
@@ -106,7 +109,7 @@ function buildConfirmationSms({ startISO }) {
 /* ================================
    PERSONA
 ================================ */
-function partOfDay() {
+function timeOfDay() {
   const h = Number(formatInTimeZone(new Date(), TZ, 'H'));
   if (h < 12) return 'morning';
   if (h < 18) return 'afternoon';
@@ -122,11 +125,11 @@ Default meeting is “MyBizPal — Business Consultation (15–30 min)”.
 Timezone: ${TZ}. Now: ${niceNow}.
 Language: ${state.lang || 'en'} (ask once to switch if caller clearly uses ES/PT/FR).
 
-Do NOT give tool recommendations; steer to booking a Zoom with our team.
-Use light qualification questions to ensure fit, then book.
+Do NOT recommend third-party tools. Qualify lightly and steer to a Zoom with our team.
+Focus: listen, clarify needs, book the meeting.
 
 End only after: “Is there anything else I can help you with?” and caller declines.
-If silence: gentle two nudges ~7–8s apart, then hang up.
+If silence: two gentle nudges ~7–8s apart, then hang up (no re-greeting loops).
 Our code is proprietary — say that if asked about internal details.
 `;}
 
@@ -240,7 +243,7 @@ const stateFor = (sid) => {
     pendingBookingSpoken: null,
     awaitingTimeConfirm: false,
 
-    // SMS confirmation/receipt
+    // SMS delivery check
     smsConfirmSent: false,
     awaitingSmsReceipt: false
   });
@@ -248,7 +251,7 @@ const stateFor = (sid) => {
 };
 
 /* ================================
-   HELPERS — UK phone handling & email
+   HELPERS — UK phone & email
 ================================ */
 function parseUkPhone(spoken) {
   if (!spoken) return null;
@@ -352,7 +355,9 @@ async function hasConflict({ startISO, durationMin = 30 }) {
   });
   return (r.data.items || []).length > 0;
 }
-async function insertEvent({ startISO, durationMin = 30, email }) {
+
+// Insert event; optionally include attendees only if allowed
+async function insertEventBase({ startISO, durationMin = 30, email, withAttendee = false }) {
   await ensureGoogleAuth();
   const endISO = new Date(new Date(startISO).getTime() + durationMin * 60000).toISOString();
 
@@ -360,15 +365,37 @@ async function insertEvent({ startISO, durationMin = 30, email }) {
     summary: 'MyBizPal — Business Consultation (15–30 min)',
     start: { dateTime: startISO, timeZone: TZ },
     end:   { dateTime: endISO,   timeZone: TZ },
-    description: 'Booked by MyBizPal (Gabriel).',
-    attendees: email ? [{ email }] : []
+    description: `Booked by MyBizPal (Gabriel).${email ? `\nCaller email (for reference): ${email}` : ''}`
   };
+
+  if (withAttendee && email) {
+    event.attendees = [{ email }];
+  }
+
   const created = await calendar.events.insert({
     calendarId: CALENDAR_ID,
     requestBody: event,
-    sendUpdates: 'all'
+    sendUpdates: withAttendee ? 'all' : 'none'
   });
   return created.data;
+}
+
+// Public insert with safe fallback: try attendees if allowed; otherwise or on 403, insert without
+async function insertEvent({ startISO, durationMin = 30, email }) {
+  const wantAttendee = CALENDAR_ALLOW_ATTENDEE_INVITES && !!email;
+  try {
+    return await insertEventBase({ startISO, durationMin, email, withAttendee: wantAttendee });
+  } catch (e) {
+    const msg = String(e?.message || '');
+    const isDwdError =
+      msg.includes('Service accounts cannot invite attendees') ||
+      msg.includes('Forbidden') || e?.code === 403;
+    if (wantAttendee && isDwdError) {
+      console.warn('⚠️ Attendee invite blocked — retrying without attendees…');
+      return await insertEventBase({ startISO, durationMin, email, withAttendee: false });
+    }
+    throw e;
+  }
 }
 
 /* ================================
@@ -397,7 +424,7 @@ async function llm({ history, latestText, state }) {
 
 /* ================================
    Continue if ready (books + SMS)
-   Auto-schedule reminders at T-24h and T-60m (no question asked)
+   Auto reminders at T-24h and T-60m
 ================================ */
 async function continueBookingIfReady({ req, res, state }) {
   if (state.pendingBookingISO && state.phone && state.email) {
@@ -430,15 +457,11 @@ async function continueBookingIfReady({ req, res, state }) {
       // Auto reminders: 24h and 60m before
       const startMs = new Date(event.start.dateTime).getTime();
       const nowMs   = Date.now();
-
-      const reminders = [
-        startMs - 24 * 60 * 60 * 1000,     // T-24h
-        startMs - 60 * 60 * 1000           // T-60m
-      ];
+      const reminders = [ startMs - 24*60*60*1000, startMs - 60*60*1000 ];
 
       for (const fireAt of reminders) {
         const delay = fireAt - nowMs;
-        if (to && TWILIO_NUMBER && delay > 0 && delay < 7 * 24 * 60 * 60 * 1000) {
+        if (to && TWILIO_NUMBER && delay > 0 && delay < 7*24*60*60*1000) {
           setTimeout(async () => {
             try {
               const when = formatDateForSms(event.start.dateTime);
@@ -487,8 +510,7 @@ app.post('/twilio/voice', (req, res) => {
 
   memory.push({ role: 'system', content: buildSystemPreamble(state) });
 
-  const pod = partOfDay();
-  const greet = `Good ${pod}, you’re speaking with Gabriel from MyBizPal. How can I help you today?`;
+  const greet = `Good ${timeOfDay()}, you’re speaking with Gabriel from MyBizPal. How can I help you today?`;
   state.lastPrompt = greet;
   res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: greet })));
 });
@@ -514,7 +536,7 @@ app.post('/twilio/handle', async (req, res) => {
     const state   = stateFor(sid);
     const now     = Date.now();
 
-    /* Silence rules — NO re-greeting, only nudges */
+    /* Silence rules — gentle nudges only, no re-greeting loop */
     if (!said) {
       if (state.silenceStartAt == null) state.silenceStartAt = now;
 
@@ -533,7 +555,7 @@ app.post('/twilio/handle', async (req, res) => {
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: 'Are you still there?' })));
       }
       if (state.nudgeCount >= 2 && (now - state.lastNudgeAt) >= 7000) {
-        const bye = `Thanks for calling MyBizPal—have a great ${partOfDay()}.`;
+        const bye = `Thanks for calling MyBizPal—have a great ${timeOfDay()}.`;
         return res.type('text/xml').send(twiml(`${playOnly({ host: req.headers.host, text: bye })}<Hangup/>`));
       }
       return res.type('text/xml').send(twiml(silentGather({})));
@@ -557,7 +579,7 @@ app.post('/twilio/handle', async (req, res) => {
       if (isLikelyUkNumberPair(pair)) {
         state.phone_e164 = pair.e164;
         state.phone_nat  = pair.national;
-        state.phone      = pair.e164;              // canonical for the rest of the flow
+        state.phone      = pair.e164; // canonical
         state.pendingPhone = false;
         state.confirmingPhone = false;
         console.log('[FLOW] phone set:', state.phone, '(nat:', state.phone_nat, ')');
@@ -571,11 +593,11 @@ app.post('/twilio/handle', async (req, res) => {
       }
     }
 
-    // Natural date detection (no keyword needed)
+    // Natural date detection
     const nat = parseNaturalDate(said, TZ);
     if (nat && !state.pendingBookingISO && !state.awaitingTimeConfirm) {
       state.pendingBookingISO    = nat.iso;
-      state.pendingBookingSpoken = nat.spoken; // already “Saturday 9 November at 10 am”
+      state.pendingBookingSpoken = nat.spoken;
       state.awaitingTimeConfirm  = true;
       const ask = `Great — shall I book ${nat.spoken}?`;
       state.lastPrompt = ask;
@@ -613,7 +635,7 @@ app.post('/twilio/handle', async (req, res) => {
       if (handled) return;
     }
 
-    // Handle pending phone/email steps
+    // Handle pending phone/email
     if (state.pendingPhone) {
       const pair = parseUkPhone(said);
       if (isLikelyUkNumberPair(pair)) {
@@ -685,7 +707,7 @@ app.post('/twilio/handle', async (req, res) => {
       }
     }
 
-    // Normal conversation via LLM (with our system prompt steering to booking/qualification)
+    // Normal conversation via LLM
     const reply = await llm({ history: memory, latestText: said, state });
     let final = reply;
 
@@ -751,7 +773,8 @@ app.get('/debug/env', (req, res) => {
     TZ, CALENDAR_ID,
     TWILIO_NUMBER,
     GOOGLE_CLIENT_EMAIL: !!process.env.GOOGLE_CLIENT_EMAIL,
-    GOOGLE_PRIVATE_KEY: !!process.env.GOOGLE_PRIVATE_KEY
+    GOOGLE_PRIVATE_KEY: !!process.env.GOOGLE_PRIVATE_KEY,
+    CALENDAR_ALLOW_ATTENDEE_INVITES
   });
 });
 
