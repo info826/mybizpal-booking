@@ -552,12 +552,15 @@ app.post('/twilio/handle', async (req, res) => {
         state.confirmingPhone = false;
       }
     }
+     if (state.phone) console.log('[FLOW] phone set:', state.phone);
     if (!state.email) {
       const e = extractEmail(said);
       if (e) {
         state.email = e; state.pendingEmail = false; state.confirmingEmail = false;
       }
     }
+   if (state.email) console.log('[FLOW] email set:', state.email);
+   
 
     // Natural date detection (no keyword needed)
     const nat = parseNaturalDate(said, TZ);
@@ -602,7 +605,13 @@ app.post('/twilio/handle', async (req, res) => {
         state.lastPrompt = ask;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
-      const handled = await continueBookingIfReady({ req, res, state });
+      console.log(
+  '[FLOW] continueBookingIfReady? time:', state.pendingBookingISO,
+  'phone:', state.phone,
+  'email:', state.email,
+  'rem:', state.smsReminder
+);
+       const handled = await continueBookingIfReady({ req, res, state });
       if (handled) return;
     }
 
@@ -656,8 +665,9 @@ app.post('/twilio/handle', async (req, res) => {
     }
 
     if (state.pendingReminder) {
-      if (yesInAnyLang(said)) { state.smsReminder = true;  state.pendingReminder = false; }
-      else if (noInAnyLang(said)) { state.smsReminder = false; state.pendingReminder = false; }
+       console.log('[FLOW] awaiting reminder...');
+      if (yesInAnyLang(said)) { console.log('[FLOW] reminder YES'); state.smsReminder = true;  state.pendingReminder = false; }
+      else if (noInAnyLang(said)) {console.log('[FLOW] reminder NO'); state.smsReminder = false; state.pendingReminder = false; }
       const handled = await continueBookingIfReady({ req, res, state });
       if (handled) return;
 
