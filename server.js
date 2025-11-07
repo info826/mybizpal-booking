@@ -1,4 +1,4 @@
-// server.js — MyBizPal: booking + SMS + no double-book + human yes/no + UK phone E.164
+// server.js — MyBizPal: booking + SMS + no double-book + human yes/no + UK phone E.164 + cleaner flow
 import 'dotenv/config';
 import express from 'express';
 import axios from 'axios';
@@ -20,7 +20,6 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 3000;
 const TZ   = process.env.BUSINESS_TIMEZONE || 'Europe/London';
-const REMINDER_MINUTES_BEFORE = Number(process.env.REMINDER_MINUTES_BEFORE || 60);
 
 /* ================================
    TWILIO (SMS)
@@ -79,6 +78,20 @@ const ZOOM_PASSCODE   = process.env.ZOOM_PASSCODE   || 'jcJx8M';
 function formatDateForSms(iso) {
   return formatInTimeZone(new Date(iso), TZ, "eee dd MMM yyyy, h:mmaaa '('zzzz')'");
 }
+
+/* --- Spoken time/date that TTS reads clearly --- */
+function formatSpokenDateTime(iso) {
+  const d = new Date(iso);
+  const day  = formatInTimeZone(d, TZ, 'eeee');               // Saturday
+  const date = formatInTimeZone(d, TZ, 'd');                  // 9
+  const month= formatInTimeZone(d, TZ, 'LLLL');               // November
+  const mins = formatInTimeZone(d, TZ, 'mm');                 // 00 or 30 etc
+  const hour = formatInTimeZone(d, TZ, 'h');                  // 1..12
+  const mer  = formatInTimeZone(d, TZ, 'a').toLowerCase();    // am/pm
+  const time = mins === '00' ? `${hour} ${mer}` : `${hour}:${mins} ${mer}`;
+  return `${day} ${date} ${month} at ${time}`;
+}
+
 function buildConfirmationSms({ startISO }) {
   const when = formatDateForSms(startISO);
   return [
@@ -89,19 +102,16 @@ function buildConfirmationSms({ startISO }) {
     'Reply CHANGE to reschedule.'
   ].join('\n');
 }
-function buildReminderSms({ startISO }) {
-  const when = formatDateForSms(startISO);
-  return [
-    `⏰ Reminder: your MyBizPal consultation in ${REMINDER_MINUTES_BEFORE} min`,
-    `Starts: ${when}`,
-    `Zoom: ${ZOOM_LINK}`,
-    `ID: ${ZOOM_MEETING_ID} | Passcode: ${ZOOM_PASSCODE}`
-  ].join('\n');
-}
 
 /* ================================
    PERSONA
 ================================ */
+function partOfDay() {
+  const h = Number(formatInTimeZone(new Date(), TZ, 'H'));
+  if (h < 12) return 'morning';
+  if (h < 18) return 'afternoon';
+  return 'evening';
+}
 function buildSystemPreamble(state) {
   const niceNow = formatInTimeZone(new Date(), TZ, "eeee dd MMMM yyyy, h:mmaaa");
   return `
@@ -111,6 +121,9 @@ Keep it natural, warm, persuasive. Short spoken-style sentences. Slow email/phon
 Default meeting is “MyBizPal — Business Consultation (15–30 min)”.
 Timezone: ${TZ}. Now: ${niceNow}.
 Language: ${state.lang || 'en'} (ask once to switch if caller clearly uses ES/PT/FR).
+
+Do NOT give tool recommendations; steer to booking a Zoom with our team.
+Use light qualification questions to ensure fit, then book.
 
 End only after: “Is there anything else I can help you with?” and caller declines.
 If silence: gentle two nudges ~7–8s apart, then hang up.
@@ -211,9 +224,10 @@ const stateFor = (sid) => {
     langConfirmed: false,
     lastPrompt: '',
 
-    // Contact capture (store NATIONAL + E.164; don’t reset once confirmed)
+    // Contact capture
     phone_nat: null,   // "07XXXXXXXXX" (spoken back)
     phone_e164: null,  // "+447XXXXXXXXX" (SMS)
+    phone: null,       // canonical (E.164)
     pendingPhone: false,
     confirmingPhone: false,
 
@@ -221,18 +235,14 @@ const stateFor = (sid) => {
     pendingEmail: false,
     confirmingEmail: false,
 
-    // Reminder pref
-    smsReminder: null,
-    pendingReminder: false,
-
-    // SMS delivery check
-    smsConfirmSent: false,
-    awaitingSmsReceipt: false,
-
     // Booking time
     pendingBookingISO: null,
     pendingBookingSpoken: null,
-    awaitingTimeConfirm: false
+    awaitingTimeConfirm: false,
+
+    // SMS confirmation/receipt
+    smsConfirmSent: false,
+    awaitingSmsReceipt: false
   });
   return CALL_STATE.get(sid);
 };
@@ -240,12 +250,11 @@ const stateFor = (sid) => {
 /* ================================
    HELPERS — UK phone handling & email
 ================================ */
-// Parse any UK-ish spoken number into national+E.164 pair
 function parseUkPhone(spoken) {
   if (!spoken) return null;
 
   let s = ` ${spoken.toLowerCase()} `;
-  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, '');    // filler noise
+  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, '');
   s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
   s = s.replace(/\bone\b/g, '1')
        .replace(/\btwo\b/g, '2')
@@ -279,13 +288,11 @@ function slowPhoneSpeakNational(num07) {
   if (!num07) return '';
   return num07.split('').join(', ');
 }
-
 function extractEmail(spoken) {
   if (!spoken) return null;
   let s = ` ${spoken.toLowerCase()} `;
-  s = s.replace(/\bat sign\b/g, '@')
+  s = s.replace(/\bat(-|\s)?sign\b/g, '@')
        .replace(/\bat symbol\b/g, '@')
-       .replace(/\bat-?sign\b/g, '@')
        .replace(/\barroba\b/g, '@')
        .replace(/\bat\b/g, '@');
   s = s.replace(/\bdot\b/g, '.')
@@ -301,26 +308,18 @@ function slowEmailSpeak(email) {
   if (!email) return '';
   return email.replace(/@/g, ' at ').replace(/\./g, ' dot ');
 }
-
 function userAskedToWait(text) {
   const t = (text || '').toLowerCase();
   return /(one (sec|second|moment)|just a sec|give me a (sec|second)|wait|hold on|let me check)/i.test(t);
 }
-
 function parseNaturalDate(utterance, tz = TZ) {
   if (!utterance) return null;
   const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
   if (!parsed) return null;
   const zoned  = toZonedTime(parsed, tz);
   const iso    = fromZonedTime(zoned, tz).toISOString();
-  const spoken = formatInTimeZone(zoned, tz, "eeee do MMMM 'at' h:mmaaa");
+  const spoken = formatSpokenDateTime(iso);
   return { iso, spoken };
-}
-function partOfDay() {
-  const h = Number(formatInTimeZone(new Date(), TZ, 'H'));
-  if (h < 12) return 'day';
-  if (h < 18) return 'afternoon';
-  return 'evening';
 }
 
 /* Human back-channels → YES/NO */
@@ -398,11 +397,11 @@ async function llm({ history, latestText, state }) {
 
 /* ================================
    Continue if ready (books + SMS)
+   Auto-schedule reminders at T-24h and T-60m (no question asked)
 ================================ */
 async function continueBookingIfReady({ req, res, state }) {
-  if (state.pendingBookingISO && state.phone_e164 && state.email && state.smsReminder !== null) {
+  if (state.pendingBookingISO && state.phone && state.email) {
     try {
-      // No double-booking
       const conflict = await hasConflict({ startISO: state.pendingBookingISO, durationMin: 30 });
       if (conflict) {
         const msg = 'That time just got taken. Want me to look for the next available slot around that time?';
@@ -411,15 +410,15 @@ async function continueBookingIfReady({ req, res, state }) {
         return true;
       }
 
-      // Create event
       const event = await insertEvent({
         startISO: state.pendingBookingISO,
         durationMin: 30,
         email: state.email
       });
 
-      // One SMS confirmation (only here)
-      const to = state.phone_e164 || req.body.From || null;
+      const to = state.phone || state.phone_e164 || req.body.From || null;
+
+      // Confirmation SMS
       if (to && TWILIO_NUMBER && to !== TWILIO_NUMBER) {
         await twilioClient.messages.create({
           to, from: TWILIO_NUMBER, body: buildConfirmationSms({ startISO: event.start.dateTime })
@@ -428,18 +427,29 @@ async function continueBookingIfReady({ req, res, state }) {
         state.awaitingSmsReceipt = true;
       }
 
-      // Optional reminder
-      if (state.smsReminder && to && TWILIO_NUMBER) {
-        const startMs = new Date(event.start.dateTime).getTime();
-        const fireAt  = startMs - REMINDER_MINUTES_BEFORE * 60000;
-        const delay   = fireAt - Date.now();
-        if (delay > 0 && delay < 7 * 24 * 60 * 60 * 1000) {
+      // Auto reminders: 24h and 60m before
+      const startMs = new Date(event.start.dateTime).getTime();
+      const nowMs   = Date.now();
+
+      const reminders = [
+        startMs - 24 * 60 * 60 * 1000,     // T-24h
+        startMs - 60 * 60 * 1000           // T-60m
+      ];
+
+      for (const fireAt of reminders) {
+        const delay = fireAt - nowMs;
+        if (to && TWILIO_NUMBER && delay > 0 && delay < 7 * 24 * 60 * 60 * 1000) {
           setTimeout(async () => {
             try {
-              await twilioClient.messages.create({
-                to, from: TWILIO_NUMBER,
-                body: buildReminderSms({ startISO: event.start.dateTime })
-              });
+              const when = formatDateForSms(event.start.dateTime);
+              const body = [
+                '⏰ Reminder: your MyBizPal consultation',
+                `Starts: ${when}`,
+                `Zoom: ${ZOOM_LINK}`,
+                `ID: ${ZOOM_MEETING_ID} | Passcode: ${ZOOM_PASSCODE}`
+              ].join('\n');
+              await twilioClient.messages.create({ to, from: TWILIO_NUMBER, body });
+              console.log('✅ Reminder SMS sent for', new Date(fireAt).toISOString());
             } catch (e) { console.error('Reminder SMS error:', e?.message || e); }
           }, delay);
         }
@@ -477,7 +487,8 @@ app.post('/twilio/voice', (req, res) => {
 
   memory.push({ role: 'system', content: buildSystemPreamble(state) });
 
-  const greet = 'Hey—this is Gabriel with MyBizPal. How can I help today?';
+  const pod = partOfDay();
+  const greet = `Good ${pod}, you’re speaking with Gabriel from MyBizPal. How can I help you today?`;
   state.lastPrompt = greet;
   res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: greet })));
 });
@@ -501,10 +512,9 @@ app.post('/twilio/handle', async (req, res) => {
     const sid     = req.body.CallSid || 'unknown';
     const memory  = memFor(sid);
     const state   = stateFor(sid);
-    const lang    = state.lang || 'en';
     const now     = Date.now();
 
-    /* Silence rules */
+    /* Silence rules — NO re-greeting, only nudges */
     if (!said) {
       if (state.silenceStartAt == null) state.silenceStartAt = now;
 
@@ -528,7 +538,6 @@ app.post('/twilio/handle', async (req, res) => {
       }
       return res.type('text/xml').send(twiml(silentGather({})));
     } else {
-      // reset silence streak
       state.silenceStartAt = null; state.nudgeCount = 0; state.lastNudgeAt = null;
       state.userRequestedPause = false; state.takeYourTimeSaid = false;
     }
@@ -543,30 +552,30 @@ app.post('/twilio/handle', async (req, res) => {
     }
 
     // Opportunistic captures — ONLY if not already set
-    if (!state.phone_e164) {
+    if (!state.phone) {
       const pair = parseUkPhone(said);
       if (isLikelyUkNumberPair(pair)) {
         state.phone_e164 = pair.e164;
         state.phone_nat  = pair.national;
+        state.phone      = pair.e164;              // canonical for the rest of the flow
         state.pendingPhone = false;
         state.confirmingPhone = false;
+        console.log('[FLOW] phone set:', state.phone, '(nat:', state.phone_nat, ')');
       }
     }
-     if (state.phone) console.log('[FLOW] phone set:', state.phone);
     if (!state.email) {
       const e = extractEmail(said);
       if (e) {
         state.email = e; state.pendingEmail = false; state.confirmingEmail = false;
+        console.log('[FLOW] email set:', state.email);
       }
     }
-   if (state.email) console.log('[FLOW] email set:', state.email);
-   
 
     // Natural date detection (no keyword needed)
     const nat = parseNaturalDate(said, TZ);
     if (nat && !state.pendingBookingISO && !state.awaitingTimeConfirm) {
       state.pendingBookingISO    = nat.iso;
-      state.pendingBookingSpoken = nat.spoken;
+      state.pendingBookingSpoken = nat.spoken; // already “Saturday 9 November at 10 am”
       state.awaitingTimeConfirm  = true;
       const ask = `Great — shall I book ${nat.spoken}?`;
       state.lastPrompt = ask;
@@ -576,7 +585,6 @@ app.post('/twilio/handle', async (req, res) => {
       if (yesInAnyLang(said)) {
         state.awaitingTimeConfirm = false;
       } else if (noInAnyLang(said)) {
-        // reset and ask for another time
         state.awaitingTimeConfirm = false;
         state.pendingBookingISO = null; state.pendingBookingSpoken = null;
         const ask = 'No problem—what time works better?';
@@ -585,9 +593,9 @@ app.post('/twilio/handle', async (req, res) => {
       }
     }
 
-    // If we have time, gather missing pieces in order: phone → email → reminder → book
+    // If we have time, gather missing pieces in order: phone → email → book
     if (state.pendingBookingISO) {
-      if (!state.phone_e164) {
+      if (!state.phone) {
         state.pendingPhone = true;
         const ask = 'What’s the best mobile number for a quick text confirmation? Please say: zero seven, then the rest, digit by digit.';
         state.lastPrompt = ask;
@@ -599,28 +607,19 @@ app.post('/twilio/handle', async (req, res) => {
         state.lastPrompt = ask;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
-      if (state.smsReminder === null) {
-        state.pendingReminder = true;
-        const ask = `Would you like a text reminder ${REMINDER_MINUTES_BEFORE} minutes before, or prefer no reminder?`;
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-      console.log(
-  '[FLOW] continueBookingIfReady? time:', state.pendingBookingISO,
-  'phone:', state.phone,
-  'email:', state.email,
-  'rem:', state.smsReminder
-);
-       const handled = await continueBookingIfReady({ req, res, state });
+
+      console.log('[FLOW] continueBookingIfReady? time:', state.pendingBookingISO, 'phone:', state.phone, 'email:', state.email);
+      const handled = await continueBookingIfReady({ req, res, state });
       if (handled) return;
     }
 
-    // Handle pending phone/email/reminder steps
+    // Handle pending phone/email steps
     if (state.pendingPhone) {
       const pair = parseUkPhone(said);
       if (isLikelyUkNumberPair(pair)) {
         state.phone_e164 = pair.e164;
         state.phone_nat  = pair.national;
+        state.phone      = pair.e164;
         state.pendingPhone = false;
         const rb = `Thanks — let me repeat it slowly: ${slowPhoneSpeakNational(state.phone_nat)}. Is that correct?`;
         state.confirmingPhone = true;
@@ -635,7 +634,8 @@ app.post('/twilio/handle', async (req, res) => {
       if (yesInAnyLang(said)) {
         state.confirmingPhone = false;
       } else if (noInAnyLang(said)) {
-        state.phone_e164 = null; state.phone_nat = null; state.confirmingPhone = false; state.pendingPhone = true;
+        state.phone_e164 = null; state.phone_nat = null; state.phone = null;
+        state.confirmingPhone = false; state.pendingPhone = true;
         const ask = 'Okay — what’s the correct mobile number?';
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
       }
@@ -664,22 +664,6 @@ app.post('/twilio/handle', async (req, res) => {
       }
     }
 
-    if (state.pendingReminder) {
-       console.log('[FLOW] awaiting reminder...');
-      if (yesInAnyLang(said)) { console.log('[FLOW] reminder YES'); state.smsReminder = true;  state.pendingReminder = false; }
-      else if (noInAnyLang(said)) {console.log('[FLOW] reminder NO'); state.smsReminder = false; state.pendingReminder = false; }
-      const handled = await continueBookingIfReady({ req, res, state });
-      if (handled) return;
-
-      // If user said something else (not yes/no), simply re-ask once more, then move on.
-      if (state.smsReminder === null) {
-        state.pendingReminder = true;
-        const ask = `Would you like a text reminder ${REMINDER_MINUTES_BEFORE} minutes before, or prefer no reminder?`;
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-    }
-
     // Awaiting SMS receipt
     if (state.awaitingSmsReceipt) {
       if (yesInAnyLang(said)) {
@@ -689,7 +673,7 @@ app.post('/twilio/handle', async (req, res) => {
         state.lastPrompt = wrap;
         return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: wrap })));
       } else if (noInAnyLang(said)) {
-        const to = state.phone_e164 || req.body.From;
+        const to = state.phone || req.body.From;
         if (to && TWILIO_NUMBER && to !== TWILIO_NUMBER) {
           const body = `Re-sent: your MyBizPal confirmation.\nZoom: ${ZOOM_LINK}\nID: ${ZOOM_MEETING_ID} | Passcode: ${ZOOM_PASSCODE}`;
           await twilioClient.messages.create({ to, from: TWILIO_NUMBER, body });
@@ -701,15 +685,9 @@ app.post('/twilio/handle', async (req, res) => {
       }
     }
 
-    // Normal conversation via LLM
+    // Normal conversation via LLM (with our system prompt steering to booking/qualification)
     const reply = await llm({ history: memory, latestText: said, state });
     let final = reply;
-
-    // Close if they decline more help
-    if (state.wrapPrompted && (noInAnyLang(said) || /\b(that's all|thats all|all good)\b/i.test(said))) {
-      const bye = `Thanks for calling MyBizPal—have a great ${partOfDay()}.`;
-      return res.type('text/xml').send(twiml(`${playOnly({ host: req.headers.host, text: bye })}<Hangup/>`));
-    }
 
     // If our reply asks them to wait, stop nudges for ~12s
     if (/(one moment|just a sec|give me a (sec|second)|let me check|hang on)/i.test(final)) {
