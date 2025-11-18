@@ -862,11 +862,11 @@ app.get('/debug/env', (req, res) => {
     CALENDAR_ALLOW_ATTENDEE_INVITES
   });
 });
-
 /* ==========================================
    WEBSITE → START CALL (Zapier Webhook)
    ========================================== */
 app.post('/start-call', (req, res) => {
+   try{
   const { Name, Email, Message, "Full Phone Number": Phone } = req.body || {};
 
   console.log("⚠️ New website lead from /start-call:", {
@@ -878,13 +878,12 @@ app.post('/start-call', (req, res) => {
 
   // Respond to Zapier
   res.json({ ok: true, received: true });
-});
+      
   } catch (err) {
     console.error('❌ Error in /start-call:', err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 });
-
 /* ================================
    START
 ================================ */
