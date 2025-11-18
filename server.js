@@ -862,23 +862,54 @@ app.get('/debug/env', (req, res) => {
     CALENDAR_ALLOW_ATTENDEE_INVITES
   });
 });
-/* ==========================================
+/* ================================
    WEBSITE → START CALL (Zapier Webhook)
-   ========================================== */
-app.post('/start-call', (req, res) => {
-   try{
-  const { Name, Email, Message, "Full Phone Number": Phone } = req.body || {};
+================================ */
+app.post('/start-call', async (req, res) => {
+  try {
+    const { Name, Email, Message, "Full Phone Number": FullPhone } = req.body || {};
 
-  console.log("⚠️ New website lead from /start-call:", {
-    name: Name,
-    email: Email,
-    phone: Phone,
-    message: Message,
-  });
+    console.log("▲ New website lead from /start-call:", {
+      name: Name,
+      email: Email,
+      phone: FullPhone,
+      message: Message,
+    });
 
-  // Respond to Zapier
-  res.json({ ok: true, received: true });
-      
+    // --- Normalise phone into E.164 for Twilio (+44...) ---
+    let to = String(FullPhone || '').trim();
+
+    // remove spaces, brackets, dashes etc
+    to = to.replace(/[^\d+]/g, '');
+
+    // 0044… → +44…
+    if (to.startsWith('00')) to = '+' + to.slice(2);
+
+    // 0XXXXXXXXXX (UK 11-digit) → +44XXXXXXXXXX
+    if (/^0\d{10}$/.test(to)) {
+      to = '+44' + to.slice(1);
+    }
+
+    // 44XXXXXXXXXX → +44XXXXXXXXXX
+    if (/^44\d{10}$/.test(to)) {
+      to = '+' + to;
+    }
+
+    if (!to.startsWith('+')) {
+      console.error('❌ Not calling – invalid phone format:', to);
+    } else {
+      // --- Trigger outbound call to your AI IVR ---
+      const call = await twilioClient.calls.create({
+        to,
+        from: TWILIO_NUMBER,                         // your Twilio number from env
+        url: `https://${req.headers.host}/twilio/voice`, // entrypoint of your IVR
+      });
+
+      console.log('📞 Outbound call created:', call.sid, '→', to);
+    }
+
+    // Respond to Zapier so it’s happy
+    res.json({ ok: true, received: true });
   } catch (err) {
     console.error('❌ Error in /start-call:', err);
     return res.status(500).json({ ok: false, error: err.message });
