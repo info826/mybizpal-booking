@@ -863,32 +863,22 @@ app.get('/debug/env', (req, res) => {
   });
 });
 
-/* ================================
-   WEBSITE DEMO FORM → START CALL
-   (Zapier POSTs here)
-================================ */
-app.post('/start-call', async (req, res) => {
-  try {
-    // These keys must match what you send from Zapier
-    const { name, email, phone, message } = req.body;
+/* ==========================================
+   WEBSITE → START CALL (Zapier Webhook)
+   ========================================== */
+app.post('/start-call', (req, res) => {
+  const { Name, Email, Message, "Full Phone Number": Phone } = req.body || {};
 
-    console.log('🔔 New website lead from /start-call:', {
-      name,
-      email,
-      phone,
-      message,
-    });
+  console.log("⚠️ New website lead from /start-call:", {
+    name: Name,
+    email: Email,
+    phone: Phone,
+    message: Message,
+  });
 
-    // TODO: here you’ll later:
-    // - trigger Twilio to call the lead
-    // - send them an email
-    // - save lead to a DB / Google Sheet / Notion, etc.
-
-    // For now, just confirm to Zapier that it worked
-    return res.status(200).json({
-      ok: true,
-      received: { name, email, phone, message },
-    });
+  // Respond to Zapier
+  res.json({ ok: true, received: true });
+});
   } catch (err) {
     console.error('❌ Error in /start-call:', err);
     return res.status(500).json({ ok: false, error: err.message });
