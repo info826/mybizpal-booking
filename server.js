@@ -1,981 +1,104 @@
-// server.js — MyBizPal v2 + Realtime Media Streams
-// Name in title + single active booking + warmer UX + faster TTS + low-latency WS pipeline
+// server.js
+// Low-latency Twilio voice server with pre-greeting, barge-in & streaming STT/TTS.
 
-import 'dotenv/config';
 import express from 'express';
-import axios from 'axios';
 import bodyParser from 'body-parser';
+import twilio from 'twilio';
 import http from 'http';
 import WebSocket, { WebSocketServer } from 'ws';
-
-import OpenAI from 'openai';
-import * as chrono from 'chrono-node';
-import { toZonedTime, fromZonedTime, formatInTimeZone } from 'date-fns-tz';
-
-import twilio from 'twilio';
-import { google } from 'googleapis';
-
+import dotenv from 'dotenv';
 import { handleTurn } from './logic.js';
 
-/* ================================
-   APP
-================================ */
+dotenv.config();
+
+const {
+  TWILIO_AUTH_TOKEN,
+  TWILIO_ACCOUNT_SID,
+  PUBLIC_BASE_URL, // e.g. "https://mybizpal-booking.onrender.com"
+  DEEPGRAM_API_KEY,
+  ELEVENLABS_API_KEY,
+  ELEVENLABS_VOICE_ID,
+  ELEVENLABS_MODEL_ID,
+} = process.env;
+
+if (!TWILIO_AUTH_TOKEN || !TWILIO_ACCOUNT_SID || !PUBLIC_BASE_URL) {
+  console.error(
+    'Missing required env vars. Check TWILIO_AUTH_TOKEN, TWILIO_ACCOUNT_SID, PUBLIC_BASE_URL'
+  );
+  process.exit(1);
+}
+
+if (!DEEPGRAM_API_KEY) {
+  console.warn('⚠️ No DEEPGRAM_API_KEY set – STT will NOT work.');
+}
+if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+  console.warn('⚠️ ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID missing – TTS will NOT work.');
+}
+
+const ELEVEN_MODEL = ELEVENLABS_MODEL_ID || 'eleven_flash_v2_5';
+
 const app = express();
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-const PORT = process.env.PORT || 3000;
-const TZ   = process.env.BUSINESS_TIMEZONE || 'Europe/London';
-
-// Attendee invites stay OFF unless you enable DWD + set the env
-const CALENDAR_ALLOW_ATTENDEE_INVITES =
-  String(process.env.CALENDAR_ALLOW_ATTENDEE_INVITES || 'false').toLowerCase() === 'true';
-
-/* ================================
-   TWILIO (SMS / TWIML)
-================================ */
-const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN } = process.env;
-if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
-  throw new Error('Missing TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN');
-}
-const twilioClient  = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-const TWILIO_NUMBER = process.env.TWILIO_NUMBER || process.env.SMS_FROM; // +447...
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-/* ================================
-   OPENAI
-================================ */
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-
-/* ================================
-   ELEVENLABS (TTS) — a touch faster & livelier
-================================ */
-const EL_KEY   = process.env.ELEVENLABS_API_KEY;
-const VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
-
-/* ================================
-   GOOGLE CALENDAR (Service Account)
-================================ */
-const jwt = new google.auth.JWT(
-  process.env.GOOGLE_CLIENT_EMAIL,
-  null,
-  (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'),
-  ['https://www.googleapis.com/auth/calendar']
-);
-const calendar = google.calendar({ version: 'v3', auth: jwt });
-const CALENDAR_ID =
-  process.env.GOOGLE_CALENDAR_ID ||
-  process.env.CALENDAR_ID ||
-  'primary';
-
-let googleReady = false;
-async function ensureGoogleAuth() {
-  if (!googleReady) {
-    await jwt.authorize();
-    googleReady = true;
-    console.log('✅ Google service account authorized');
-  }
-}
-
-/* ================================
-   ZOOM
-================================ */
-const ZOOM_LINK       = process.env.ZOOM_LINK
-  || 'https://us05web.zoom.us/j/4708110348?pwd=rAU8aqWDKK2COXKHXzEhYwiDmhPSsc.1&omn=88292946669';
-const ZOOM_MEETING_ID = process.env.ZOOM_MEETING_ID || '470 811 0348';
-const ZOOM_PASSCODE   = process.env.ZOOM_PASSCODE   || 'jcJx8M';
-
-/* ================================
-   Formatting
-================================ */
-function formatDateForSms(iso) {
-  return formatInTimeZone(new Date(iso), TZ, "eee dd MMM yyyy, h:mmaaa '('zzzz')'");
-}
-function formatSpokenDateTime(iso) {
-  const d = new Date(iso);
-  const day  = formatInTimeZone(d, TZ, 'eeee');
-  const date = formatInTimeZone(d, TZ, 'd');
-  const month= formatInTimeZone(d, TZ, 'LLLL');
-  const mins = formatInTimeZone(d, TZ, 'mm');
-  const hour = formatInTimeZone(d, TZ, 'h');
-  const mer  = formatInTimeZone(d, TZ, 'a').toLowerCase();
-  const time = mins === '00' ? `${hour} ${mer}` : `${hour}:${mins} ${mer}`;
-  return `${day} ${date} ${month} at ${time}`;
-}
-function timeOfDay() {
-  const h = Number(formatInTimeZone(new Date(), TZ, 'H'));
-  if (h < 12) return 'morning';
-  if (h < 18) return 'afternoon';
-  return 'evening';
-}
-
-/* Dynamic closings */
-const CLOSERS = {
-  morning: [
-    "Have a great morning!",
-    "Wishing you a smooth morning ahead.",
-    "Enjoy the rest of your morning!"
-  ],
-  afternoon: [
-    "Have a great afternoon!",
-    "Enjoy the rest of your afternoon.",
-    "Hope your afternoon goes brilliantly."
-  ],
-  evening: [
-    "Have a great evening!",
-    "Enjoy the rest of your evening.",
-    "Wishing you a relaxing evening."
-  ]
-};
-function randomCloser() {
-  const tod = timeOfDay();
-  const list = CLOSERS[tod] || CLOSERS.afternoon;
-  return list[Math.floor(Math.random() * list.length)];
-}
-
-/* ================================
-   SMS builders
-================================ */
-function buildConfirmationSms({ startISO, name }) {
-  const when = formatDateForSms(startISO);
-  const who  = name ? `(${name}) ` : '';
-  return [
-    `✅ ${who}MyBizPal — Business Consultation (15–30 min)`,
-    `Date: ${when}`,
-    `Zoom: ${ZOOM_LINK}`,
-    `ID: ${ZOOM_MEETING_ID}  Passcode: ${ZOOM_PASSCODE}`,
-    'Reply CHANGE to reschedule.'
-  ].join('\n');
-}
-function buildReminderSms({ startISO }) {
-  const when = formatDateForSms(startISO);
-  return [
-    '⏰ Reminder: your MyBizPal consultation',
-    `Starts: ${when}`,
-    `Zoom: ${ZOOM_LINK}`,
-    `ID: ${ZOOM_MEETING_ID} | Passcode: ${ZOOM_PASSCODE}`
-  ].join('\n');
-}
-function buildCancellationSms({ startISO }) {
-  const when = formatDateForSms(startISO);
-  return [
-    '❌ Your previous MyBizPal consultation has been cancelled',
-    `Was: ${when}`,
-    'We’ll send a new confirmation with the updated time.'
-  ].join('\n');
-}
-
-/* ================================
-   Persona
-================================ */
-function buildSystemPreamble(state) {
-  const niceNow = formatInTimeZone(new Date(), TZ, "eeee dd MMMM yyyy, h:mmaaa");
-  return `
-You are Gabriel — calm, friendly, confident consultant for MyBizPal.ai.
-Sound human: natural pace, warm energy, light humour, brief pauses. Add tiny affirmations like “got it,” “perfect,” “no worries.”
-Short spoken sentences. Slow read-backs for numbers/emails.
-Do NOT suggest third-party tools. Qualify lightly and steer to a Zoom with our team.
-Timezone: ${TZ}. Now: ${niceNow}. Language: ${state.lang || 'en'}.
-
-Close with a time-appropriate, friendly sign-off (randomized). No re-greeting loops.
-Our code is proprietary — say that if asked about internal details.
-`;}
-
-/* ================================
-   TWIML helpers
-================================ */
-const twiml = (xmlInner) =>
-  `<?xml version="1.0" encoding="UTF-8"?><Response>${xmlInner}</Response>`;
-
-function gatherWithPlay({ host, text, action = '/twilio/handle' }) {
-  const enc    = encodeURIComponent((text || '').trim());
-  const ttsUrl = `https://${host}/tts?text=${enc}`;
-  return `
-<Gather input="speech dtmf"
-        language="en-GB"
-        bargeIn="true"
-        actionOnEmptyResult="true"
-        action="${action}"
-        method="POST"
-        partialResultCallback="/twilio/partial"
-        partialResultCallbackMethod="POST"
-        timeout="8"
-        speechTimeout="auto">
-  <Play>${ttsUrl}</Play>
-</Gather>`;
-}
-function silentGather({ action = '/twilio/handle' }) {
-  return `
-<Gather input="speech dtmf"
-        language="en-GB"
-        bargeIn="true"
-        actionOnEmptyResult="true"
-        action="${action}"
-        method="POST"
-        timeout="8"
-        speechTimeout="auto">
-</Gather>`;
-}
-function playOnly({ host, text }) {
-  const enc    = encodeURIComponent((text || '').trim());
-  const ttsUrl = `https://${host}/tts?text=${enc}`;
-  return `<Play>${ttsUrl}</Play>`;
-}
-
-/* ================================
-   TTS — faster & friendlier
-================================ */
-app.get('/tts', async (req, res) => {
-  try {
-    const text = (req.query.text || 'Hello').toString().slice(0, 480);
-    const url  = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream?optimize_streaming_latency=1`;
-    const payload = {
-      text,
-      model_id: 'eleven_multilingual_v2',
-      voice_settings: {
-        stability: 0.3,            // a bit more expressive
-        similarity_boost: 0.92,
-        speaking_rate: 0.92,       // slightly quicker
-        style: 0.35,               // subtle style
-        use_speaker_boost: true
-      }
-    };
-    const r = await axios.post(url, payload, {
-      responseType: 'arraybuffer',
-      headers: { 'xi-api-key': EL_KEY, 'Content-Type': 'application/json' }
-    });
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Cache-Control', 'no-store');
-    res.send(Buffer.from(r.data));
-  } catch (e) {
-    console.error('TTS error:', e?.response?.status, e?.response?.data?.toString?.() || e.message);
-    res.status(500).end();
-  }
-});
-
-/* ================================
-   SIMPLE HEALTH CHECK (for pings / uptime)
-================================ */
+// ───────────────────────────────────────────────────────────
+//  Health check – use this for keep-alive pings
+// ───────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.status(200).json({ ok: true, time: new Date().toISOString() });
 });
 
-/* ================================
-   State
-================================ */
-const CALL_MEMORY = new Map();  // CallSid -> [{role, content}]
-const CALL_STATE  = new Map();  // CallSid -> state
+// ───────────────────────────────────────────────────────────
+//  Twilio entrypoint – keep this EXTREMELY light
+// ───────────────────────────────────────────────────────────
+app.post('/twilio/voice', (req, res) => {
+  const twiml = new VoiceResponse();
 
-const memFor = (sid) => {
-  if (!CALL_MEMORY.has(sid)) CALL_MEMORY.set(sid, []);
-  return CALL_MEMORY.get(sid);
-};
-const stateFor = (sid) => {
-  if (!CALL_STATE.has(sid)) CALL_STATE.set(sid, {
-    silenceStartAt: null,
-    nudgeCount: 0, lastNudgeAt: null, agentWaitUntil: 0,
-    takeYourTimeSaid: false, wrapPrompted: false,
-
-    lang: 'en', lastPrompt: '',
-
-    // Contact + identity
-    name: null, pendingName: false, confirmingName: false,
-    phone_nat: null, phone_e164: null, phone: null,
-    pendingPhone: false, confirmingPhone: false,
-    email: null, pendingEmail: false, confirmingEmail: false, askingToSpellEmail: false,
-
-    // Booking time
-    pendingBookingISO: null, pendingBookingSpoken: null, awaitingTimeConfirm: false,
-
-    // SMS status
-    smsConfirmSent: false, awaitingSmsReceipt: false
+  // Start media stream FIRST so Twilio connects WebSocket immediately
+  const start = twiml.start();
+  start.stream({
+    url: `${PUBLIC_BASE_URL.replace(/\/$/, '')}/media-stream`,
   });
-  return CALL_STATE.get(sid);
-};
 
-/* ================================
-   Helpers — name, phone, email, dates
-================================ */
-function extractName(text) {
-  // very light heuristic: catch “I’m X”, “This is X”, “My name is X”
-  const t = (text || '').trim();
-  let m = t.match(/\b(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z '-]{1,30})\b/i);
-  if (m) return m[1].trim().replace(/\s+/g, ' ').split(' ')[0]; // first name
-  // fallback: single token that looks like a first name
-  m = t.match(/\b([A-Za-z][A-Za-z'-]{1,30})\b/);
-  return m ? m[1] : null;
-}
-function parseUkPhone(spoken) {
-  if (!spoken) return null;
-  let s = ` ${spoken.toLowerCase()} `;
-  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, '');
-  s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
-  s = s.replace(/\bone\b/g, '1').replace(/\btwo\b/g,'2').replace(/\bthree\b/g,'3')
-       .replace(/\bfour\b/g,'4').replace(/\bfive\b/g,'5').replace(/\bsix\b/g,'6')
-       .replace(/\bseven\b/g,'7').replace(/\beight\b/g,'8').replace(/\bnine\b/g,'9');
-  s = s.replace(/[^\d+]/g, '');
-  if (s.startsWith('+44')) {
-    const rest = s.slice(3);
-    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
-  } else if (s.startsWith('44')) {
-    const rest = s.slice(2);
-    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
-  } else if (s.startsWith('0') && /^\d{11}$/.test(s)) {
-    return { e164: `+44${s.slice(1)}`, national: s };
-  } else if (/^\d{10}$/.test(s)) {
-    return { e164: `+44${s}`, national: `0${s}` };
-  }
-  return null;
-}
-function isLikelyUkNumberPair(p) {
-  return !!(p && /^0\d{10}$/.test(p.national) && /^\+44\d{10}$/.test(p.e164));
-}
-function slowPhoneSpeak(nat07) { return nat07 ? nat07.split('').join(', ') : ''; }
-
-function extractEmail(spoken) {
-  if (!spoken) return null;
-  let s = ` ${spoken.toLowerCase()} `;
-  s = s.replace(/\bat(-|\s)?sign\b/g, '@').replace(/\bat symbol\b/g, '@')
-       .replace(/\barroba\b/g, '@').replace(/\bat\b/g, '@');
-  s = s.replace(/\bdot\b/g, '.').replace(/\bpunto\b/g, '.')
-       .replace(/\bponto\b/g, '.').replace(/\bpoint\b/g, '.');
-  s = s.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
-  s = s.replace(/\s+/g, ' ').trim();
-  const m = s.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
-  return m ? m[0] : null;
-}
-function userAskedToWait(text) {
-  const t = (text || '').toLowerCase();
-  return /(one (sec|second|moment)|just a sec|give me a (sec|second)|wait|hold on|let me check)/i.test(t);
-}
-function parseNaturalDate(utterance, tz = TZ) {
-  if (!utterance) return null;
-  const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
-  if (!parsed) return null;
-  const zoned  = toZonedTime(parsed, tz);
-  const iso    = fromZonedTime(zoned, tz).toISOString();
-  const spoken = formatSpokenDateTime(iso);
-  return { iso, spoken };
-}
-
-/* YES/NO */
-function yesInAnyLang(text) {
-  const t = (text || '').toLowerCase().trim();
-  return /\b(yes|yeah|yep|sure|ok|okay|si|sí|sim|oui)\b/.test(t)
-      || /^(mm+|mhm+|uh-?huh|uhu|ah['’]?a|uhhu)$/i.test(t);
-}
-function noInAnyLang(text) {
-  const t = (text || '').toLowerCase().trim();
-  return /\b(no|nope|nah|pas maintenant|não|nao)\b/.test(t) || /^(nn)$/i.test(t);
-}
-
-/* ================================
-   Calendar helpers: find/cancel prev booking; conflict; insert
-================================ */
-async function hasConflict({ startISO, durationMin = 30 }) {
-  await ensureGoogleAuth();
-  const start = new Date(startISO).toISOString();
-  const end   = new Date(new Date(startISO).getTime() + durationMin * 60000).toISOString();
-
-  const r = await calendar.events.list({
-    calendarId: CALENDAR_ID,
-    timeMin: start,
-    timeMax: end,
-    maxResults: 1,
-    singleEvents: true,
-    orderBy: 'startTime'
-  });
-  return (r.data.items || []).length > 0;
-}
-
-async function findExistingBooking({ phone, email }) {
-  await ensureGoogleAuth();
-  const nowISO = new Date().toISOString();
-  const untilISO = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString(); // next 60 days
-  const r = await calendar.events.list({
-    calendarId: CALENDAR_ID,
-    timeMin: nowISO,
-    timeMax: untilISO,
-    singleEvents: true,
-    maxResults: 50,
-    orderBy: 'startTime'
-  });
-  const items = r.data.items || [];
-  return items.find(ev => {
-    const desc = (ev.description || '').toLowerCase();
-    const sum  = (ev.summary || '').toLowerCase();
-    const tag  = 'booked by mybizpal (gabriel)';
-    const hasTag = desc.includes(tag);
-    const hasContact = (phone && desc.includes(phone.replace('+', ''))) || (email && desc.includes((email||'').toLowerCase()));
-    const isOurMeeting = sum.includes('mybizpal');
-    return hasTag && isOurMeeting && hasContact;
-  }) || null;
-}
-
-async function cancelEventById(id) {
-  await ensureGoogleAuth();
-  await calendar.events.delete({ calendarId: CALENDAR_ID, eventId: id });
-}
-
-async function insertEventBase({ startISO, durationMin = 30, email, name, phone, withAttendee = false }) {
-  await ensureGoogleAuth();
-  const endISO = new Date(new Date(startISO).getTime() + durationMin * 60000).toISOString();
-  const who  = name ? `(${name}) ` : '';
-  const event = {
-    summary: `${who}MyBizPal — Business Consultation (15–30 min)`,
-    start: { dateTime: startISO, timeZone: TZ },
-    end:   { dateTime: endISO,   timeZone: TZ },
-    description:
-`Booked by MyBizPal (Gabriel).
-Caller name: ${name || 'Prospect'}
-Caller phone: ${phone || 'n/a'}
-Caller email: ${email || 'n/a'}`
-  };
-  if (withAttendee && email) event.attendees = [{ email }];
-  const created = await calendar.events.insert({
-    calendarId: CALENDAR_ID,
-    requestBody: event,
-    sendUpdates: withAttendee ? 'all' : 'none'
-  });
-  return created.data;
-}
-
-async function insertEvent({ startISO, durationMin = 30, email, name, phone }) {
-  const wantAttendee = CALENDAR_ALLOW_ATTENDEE_INVITES && !!email;
-  try {
-    return await insertEventBase({ startISO, durationMin, email, name, phone, withAttendee: wantAttendee });
-  } catch (e) {
-    const msg = String(e?.message || '');
-    const isDwdError =
-      msg.includes('Service accounts cannot invite attendees') ||
-      msg.includes('Forbidden') || e?.code === 403;
-    if (wantAttendee && isDwdError) {
-      console.warn('⚠️ Attendee invite blocked — retrying without attendees…');
-      return await insertEventBase({ startISO, durationMin, email, name, phone, withAttendee: false });
-    }
-    throw e;
-  }
-}
-
-/* ================================
-   LLM (for small talk/qualifying, not tools)
-================================ */
-async function llm({ history, latestText, state }) {
-  const messages = [];
-  messages.push({ role: 'system', content: buildSystemPreamble(state) });
-  for (const h of history.slice(-14)) if (h.role !== 'system') messages.push(h);
-  messages.push({ role: 'user', content: latestText });
-
-  const resp = await openai.chat.completions.create({
-    model: OPENAI_MODEL,
-    temperature: 0.45,
-    max_tokens: 130,
-    messages
-  });
-  return resp.choices?.[0]?.message?.content?.trim() || 'Alright—how can I help?';
-}
-
-/* ================================
-   Booking continuation: cancel old, book new, SMS flows
-================================ */
-async function continueBookingIfReady({ req, res, state }) {
-  if (state.pendingBookingISO && state.phone && state.email) {
-    try {
-      // If user already has a booked slot with us, cancel it and notify
-      const existing = await findExistingBooking({ phone: state.phone, email: state.email });
-      const to = state.phone || state.phone_e164 || req.body.From || null;
-
-      if (existing) {
-        try {
-          await cancelEventById(existing.id);
-          if (to && TWILIO_NUMBER && to !== TWILIO_NUMBER) {
-            await twilioClient.messages.create({
-              to, from: TWILIO_NUMBER, body: buildCancellationSms({ startISO: existing.start.dateTime })
-            });
-          }
-        } catch (ce) {
-          console.warn('Cancel previous failed:', ce?.message || ce);
-        }
-      }
-
-      // Avoid overlap
-      const conflict = await hasConflict({ startISO: state.pendingBookingISO, durationMin: 30 });
-      if (conflict) {
-        const msg = 'That time just got taken. Want me to check the next closest slot?';
-        state.lastPrompt = msg;
-        res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: msg })));
-        return true;
-      }
-
-      // Create event
-      const event = await insertEvent({
-        startISO: state.pendingBookingISO,
-        durationMin: 30,
-        email: state.email,
-        name: state.name,
-        phone: (state.phone || '').replace('+', '')
-      });
-
-      // Confirmation SMS
-      if (to && TWILIO_NUMBER && to !== TWILIO_NUMBER) {
-        await twilioClient.messages.create({
-          to, from: TWILIO_NUMBER, body: buildConfirmationSms({ startISO: event.start.dateTime, name: state.name })
-        });
-        state.smsConfirmSent = true;
-        state.awaitingSmsReceipt = true;
-      }
-
-      // Auto reminders: 24h & 60m
-      const startMs = new Date(event.start.dateTime).getTime();
-      const nowMs   = Date.now();
-      for (const fireAt of [ startMs - 24*60*60*1000, startMs - 60*60*1000 ]) {
-        const delay = fireAt - nowMs;
-        if (to && TWILIO_NUMBER && delay > 0 && delay < 7*24*60*60*1000) {
-          setTimeout(async () => {
-            try {
-              await twilioClient.messages.create({
-                to, from: TWILIO_NUMBER, body: buildReminderSms({ startISO: event.start.dateTime })
-              });
-            } catch (e) { console.error('Reminder SMS error:', e?.message || e); }
-          }, delay);
-        }
-      }
-
-      // clear pending time
-      state.pendingBookingISO = null;
-      state.pendingBookingSpoken = null;
-
-      const askReceipt = 'I’ve sent your text confirmation—did you receive it?';
-      state.lastPrompt = askReceipt;
-      res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: askReceipt })));
-      return true;
-    } catch (e) {
-      console.error('Booking failed:', e?.message || e);
-      const fail = 'Hmm — I couldn’t finalize that just now. I’ll note your details and follow up.';
-      state.lastPrompt = fail;
-      res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: fail })));
-      return true;
-    }
-  }
-  return false;
-}
-
-/* ================================
-   REALTIME VOICE ENTRY (Media Streams)
-   Use this URL on a Twilio number for low-latency streaming:
-   https://your-domain/twilio/voice-stream
-================================ */
-app.post('/twilio/voice-stream', (req, res) => {
-  const vr = new VoiceResponse();
-
-  const base =
-    process.env.PUBLIC_BASE_URL?.replace(/\/$/, '') ||
-    `https://${req.headers.host}`;
-
-  const start = vr.start();
-  start.stream({ url: `${base}/media-stream` });
-
-  vr.say(
-    { voice: 'alice', language: 'en-GB' },
+  // Short, cached greeting – doesn't block anything
+  twiml.say(
+    {
+      voice: 'alice',
+      language: 'en-GB',
+    },
     "Hi, this is your MyBizPal AI concierge. One moment while I get set up."
   );
 
-  res.type('text/xml').send(vr.toString());
+  res.type('text/xml');
+  res.send(twiml.toString());
 });
 
-/* ================================
-   ENTRY (existing Gather IVR)
-================================ */
-app.post('/twilio/voice', (req, res) => {
-  const sid = req.body.CallSid || '';
-  const memory = memFor(sid); memory.length = 0;
-  const state = stateFor(sid);
-
-  state.silenceStartAt = null; state.nudgeCount = 0; state.lastNudgeAt = null;
-  state.takeYourTimeSaid = false;
-
-  memory.push({ role: 'system', content: buildSystemPreamble(state) });
-
-  const greet = `Good ${timeOfDay()}, you’re speaking with Gabriel from MyBizPal. How can I help you today?`;
-  state.lastPrompt = greet;
-  res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: greet })));
-});
-
-/* ================================
-   PARTIAL (debug)
-================================ */
-app.post('/twilio/partial', (req, res) => {
-  const partial = req.body.UnstableSpeechResult || req.body.SpeechResult || '';
-  if (partial) console.log('PARTIAL:', partial);
-  res.sendStatus(200);
-});
-
-/* ================================
-   MAIN HANDLER
-================================ */
-app.post('/twilio/handle', async (req, res) => {
-  try {
-    const saidRaw = (req.body.SpeechResult || '');
-    const said    = saidRaw.trim();
-    const sid     = req.body.CallSid || 'unknown';
-    const memory  = memFor(sid);
-    const state   = stateFor(sid);
-    const now     = Date.now();
-
-    // Silence handling (no re-greeting loops)
-    if (!said) {
-      if (state.silenceStartAt == null) state.silenceStartAt = now;
-      if (state.agentWaitUntil && now < state.agentWaitUntil) {
-        return res.type('text/xml').send(twiml(silentGather({})));
-      }
-      const ms = now - state.silenceStartAt;
-      if (ms < 30000) return res.type('text/xml').send(twiml(silentGather({})));
-
-      if (state.nudgeCount === 0) {
-        state.nudgeCount = 1; state.lastNudgeAt = now;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: 'Are you still there?' })));
-      }
-      if (state.nudgeCount === 1 && (now - state.lastNudgeAt) >= 7000) {
-        state.nudgeCount = 2; state.lastNudgeAt = now;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: 'Are you still there?' })));
-      }
-      if (state.nudgeCount >= 2 && (now - state.lastNudgeAt) >= 7000) {
-        const bye = `${randomCloser()} Thanks for calling MyBizPal.`;
-        return res.type('text/xml').send(twiml(`${playOnly({ host: req.headers.host, text: bye })}<Hangup/>`));
-      }
-      return res.type('text/xml').send(twiml(silentGather({})));
-    } else {
-      state.silenceStartAt = null; state.nudgeCount = 0; state.lastNudgeAt = null;
-      state.takeYourTimeSaid = false;
-    }
-
-    // Wait request
-    if (userAskedToWait(said)) {
-      if (!state.takeYourTimeSaid) {
-        state.takeYourTimeSaid = true;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: 'No rush — take your time.' })));
-      }
-      return res.type('text/xml').send(twiml(silentGather({})));
-    }
-
-    // Opportunistic captures
-    if (!state.name) {
-      const n = extractName(said);
-      if (n && /^[A-Za-z][A-Za-z '-]{1,30}$/.test(n)) state.name = n;
-    }
-    if (!state.phone) {
-      const pair = parseUkPhone(said);
-      if (isLikelyUkNumberPair(pair)) {
-        state.phone_e164 = pair.e164;
-        state.phone_nat  = pair.national;
-        state.phone      = pair.e164;
-        state.pendingPhone = false; state.confirmingPhone = false;
-        console.log('[FLOW] phone set:', state.phone, '(nat:', state.phone_nat, ')');
-      }
-    }
-    if (!state.email) {
-      const e = extractEmail(said);
-      if (e) {
-        state.email = e; state.pendingEmail = false; state.confirmingEmail = false;
-        console.log('[FLOW] email set:', state.email);
-      }
-    }
-
-    // Natural date
-    const nat = parseNaturalDate(said, TZ);
-    if (nat && !state.pendingBookingISO && !state.awaitingTimeConfirm) {
-      state.pendingBookingISO    = nat.iso;
-      state.pendingBookingSpoken = nat.spoken;
-      state.awaitingTimeConfirm  = true;
-      const ask = `Great — shall I book ${nat.spoken}?`;
-      state.lastPrompt = ask;
-      return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-    }
-    if (state.awaitingTimeConfirm) {
-      if (yesInAnyLang(said)) {
-        state.awaitingTimeConfirm = false;
-      } else if (noInAnyLang(said)) {
-        state.awaitingTimeConfirm = false;
-        state.pendingBookingISO = null; state.pendingBookingSpoken = null;
-        const ask = 'No problem — what time works better?';
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-    }
-
-    // If we have a time, gather: name → phone → email → book
-    if (state.pendingBookingISO) {
-      if (!state.name) {
-        state.pendingName = true;
-        const ask = 'What’s your first name?';
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-      if (!state.phone) {
-        state.pendingPhone = true;
-        const ask = 'What’s the best mobile number for the confirmation text?';
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-      if (!state.email) {
-        state.pendingEmail = true;
-        state.askingToSpellEmail = false;
-        const ask = 'What email should I send the calendar invite to?';
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-      // once email captured, ask to spell clearly one time
-      if (!state.askingToSpellEmail && state.email) {
-        state.askingToSpellEmail = true;
-        const ask = 'Could you spell that email clearly to make sure I’ve got it right?';
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-      console.log('[FLOW] continueBookingIfReady? time:', state.pendingBookingISO, 'phone:', state.phone, 'email:', state.email, 'name:', state.name);
-      const handled = await continueBookingIfReady({ req, res, state });
-      if (handled) return;
-    }
-
-    // Handle pending captures
-    if (state.pendingName) {
-      const n = extractName(said);
-      if (n && /^[A-Za-z][A-Za-z '-]{1,30}$/.test(n)) {
-        state.name = n; state.pendingName = false;
-        const rb = `Thanks ${n}.`;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: rb })));
-      } else {
-        const ask = 'Sorry — what’s your first name?';
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-    }
-
-    if (state.pendingPhone) {
-      const pair = parseUkPhone(said);
-      if (isLikelyUkNumberPair(pair)) {
-        state.phone_e164 = pair.e164;
-        state.phone_nat  = pair.national;
-        state.phone      = pair.e164;
-        state.pendingPhone = false;
-        const rb = `Let me read that back: ${slowPhoneSpeak(state.phone_nat)}. Is that correct?`;
-        state.confirmingPhone = true;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: rb })));
-      } else {
-        const ask = 'I didn’t catch that — could you say the full mobile number again?';
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-    }
-    if (state.confirmingPhone) {
-      if (yesInAnyLang(said)) {
-        state.confirmingPhone = false;
-      } else if (noInAnyLang(said)) {
-        state.phone_e164 = null; state.phone_nat = null; state.phone = null;
-        state.confirmingPhone = false; state.pendingPhone = true;
-        const ask = 'Okay — what’s the correct mobile number?';
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-    }
-
-    if (state.pendingEmail) {
-      const e = extractEmail(said);
-      if (e) {
-        state.email = e; state.pendingEmail = false;
-        const rb = `Perfect — here’s how I heard it: ${e}. We’ll double-check the spelling next.`;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: rb })));
-      } else {
-        const ask = "Could you share the email address?";
-        state.lastPrompt = ask;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-    }
-
-    if (state.askingToSpellEmail && !state.confirmingEmail) {
-      // take whatever they spell and run extraction again
-      const spelled = extractEmail(said) || state.email;
-      state.email = spelled;
-      const rb = `Thanks — just to confirm: ${state.email}. Is that right?`;
-      state.confirmingEmail = true;
-      return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: rb })));
-    }
-    if (state.confirmingEmail) {
-      if (yesInAnyLang(said)) {
-        state.confirmingEmail = false;
-      } else if (noInAnyLang(said)) {
-        state.email = null; state.confirmingEmail = false; state.pendingEmail = true; state.askingToSpellEmail = false;
-        const ask = 'No worries — what’s the correct email?';
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: ask })));
-      }
-    }
-
-    // Awaiting SMS receipt
-    if (state.awaitingSmsReceipt) {
-      if (yesInAnyLang(said)) {
-        state.awaitingSmsReceipt = false;
-        const wrap = 'Is there anything else I can help you with?';
-        state.wrapPrompted = true;
-        state.lastPrompt = wrap;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: wrap })));
-      } else if (noInAnyLang(said)) {
-        const to = state.phone || req.body.From;
-        if (to && TWILIO_NUMBER && to !== TWILIO_NUMBER) {
-          const body = `Re-sent: your MyBizPal confirmation.\nZoom: ${ZOOM_LINK}\nID: ${ZOOM_MEETING_ID} | Passcode: ${ZOOM_PASSCODE}`;
-          await twilioClient.messages.create({ to, from: TWILIO_NUMBER, body });
-        }
-        const msg = 'Done — I’ve resent it. Anything else I can help with?';
-        state.wrapPrompted = true;
-        state.lastPrompt = msg;
-        return res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: msg })));
-      }
-    }
-
-    // Small talk / qualifying via LLM (kept human & brief)
-    const reply = await llm({ history: memory, latestText: said, state });
-    let final = reply;
-    if (/(one moment|just a sec|give me a (sec|second)|let me check|hang on)/i.test(final)) {
-      state.agentWaitUntil = Date.now() + 12000;
-    }
-
-    state.lastPrompt = final;
-    res.type('text/xml').send(twiml(gatherWithPlay({ host: req.headers.host, text: final })));
-
-    memory.push({ role: 'user', content: said });
-    memory.push({ role: 'assistant', content: final });
-
-  } catch (err) {
-    console.error('handle error', err);
-    res.type('text/xml').send(twiml('<Hangup/>'));
-  }
-});
-
-/* ================================
-   REPROMPT
-================================ */
-app.post('/twilio/reprompt', (req, res) => {
-  const state = stateFor(req.body.CallSid || 'unknown');
-  const text  = state.lastPrompt || 'I didn’t catch that—how can I help?';
-  const xml   = twiml(gatherWithPlay({ host: req.headers.host, text }));
-  res.type('text/xml').send(xml);
-});
-
-/* ================================
-   CLEANUP
-================================ */
-app.post('/hangup', (req, res) => {
-  const sid = req.body.CallSid;
-  if (sid) { CALL_MEMORY.delete(sid); CALL_STATE.delete(sid); }
-  const bye = `${randomCloser()} Thanks for calling MyBizPal.`;
-  res.type('text/xml').send(twiml(`${playOnly({ host: req.headers.host, text: bye })}<Hangup/>`));
-});
-
-/* ================================
-   DEBUG
-================================ */
-app.get('/debug/google', async (req, res) => {
-  try {
-    await ensureGoogleAuth();
-    const startISO = new Date(Date.now() + 10 * 60000).toISOString();
-    const ev = await insertEvent({ startISO, durationMin: 15, email: null, name: 'Test', phone: '000' });
-    res.json({ ok: true, id: ev.id, calendarId: CALENDAR_ID });
-  } catch (e) { res.json({ ok: false, error: e?.message || e }); }
-});
-app.get('/debug/sms', async (req, res) => {
-  try {
-    const to = req.query.to;
-    if (!to) return res.json({ ok: false, error: 'Missing to' });
-    if (!TWILIO_NUMBER) return res.json({ ok: false, error: 'No TWILIO_NUMBER' });
-    if (to === TWILIO_NUMBER) return res.json({ ok: false, error: "'To' and 'From' cannot be the same" });
-    await twilioClient.messages.create({ to, from: TWILIO_NUMBER, body: 'MyBizPal debug SMS ✅' });
-    res.json({ ok: true, to, from: TWILIO_NUMBER });
-  } catch (e) { res.json({ ok: false, error: e?.message || e }); }
-});
-app.get('/debug/env', (req, res) => {
-  res.json({
-    TZ, CALENDAR_ID,
-    TWILIO_NUMBER,
-    GOOGLE_CLIENT_EMAIL: !!process.env.GOOGLE_CLIENT_EMAIL,
-    GOOGLE_PRIVATE_KEY: !!process.env.GOOGLE_PRIVATE_KEY,
-    CALENDAR_ALLOW_ATTENDEE_INVITES
-  });
-});
-
-/* ================================
-   WEBSITE → START CALL (Zapier Webhook)
-================================ */
-app.post('/start-call', async (req, res) => {
-  try {
-    const { Name, Email, Message, "Full Phone Number": FullPhone } = req.body || {};
-
-    console.log("▲ New website lead from /start-call:", {
-      name: Name,
-      email: Email,
-      phone: FullPhone,
-      message: Message,
-    });
-
-    // --- Normalise phone into E.164 for Twilio (+44...) ---
-    let to = String(FullPhone || '').trim();
-
-    // remove spaces, brackets, dashes etc
-    to = to.replace(/[^\d+]/g, '');
-
-    // 0044… → +44…
-    if (to.startsWith('00')) to = '+' + to.slice(2);
-
-    // 0XXXXXXXXXX (UK 11-digit) → +44XXXXXXXXXX
-    if (/^0\d{10}$/.test(to)) {
-      to = '+44' + to.slice(1);
-    }
-
-    // 44XXXXXXXXXX → +44XXXXXXXXXX
-    if (/^44\d{10}$/.test(to)) {
-      to = '+' + to;
-    }
-
-    if (!to.startsWith('+')) {
-      console.error('❌ Not calling – invalid phone format:', to);
-    } else {
-      // --- Trigger outbound call to your AI IVR ---
-      const call = await twilioClient.calls.create({
-        to,
-        from: TWILIO_NUMBER,
-        url: `https://${req.headers.host}/twilio/voice`, // entrypoint of your IVR (Gather version)
-      });
-
-      console.log('📞 Outbound call created:', call.sid, '→', to);
-    }
-
-    // Respond to Zapier so it’s happy
-    res.json({ ok: true, received: true });
-  } catch (err) {
-    console.error('❌ Error in /start-call:', err);
-    return res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-/* ================================
-   REALTIME MEDIA STREAM WS PIPELINE
-   (separate from your Gather IVR)
-================================ */
+// ───────────────────────────────────────────────────────────
+//  HTTP server + WebSocket server
+// ───────────────────────────────────────────────────────────
 const server = http.createServer(app);
 
 // Twilio will connect here as a media stream
 const wss = new WebSocketServer({ noServer: true });
 
-// Map callSid -> per-call realtime state
-const REALTIME_CALLS = new Map();
+// Map callSid -> per-call state
+const calls = new Map();
 
-/** Helper: safe send via WS */
+/**
+ * Helper: safe send via WS (Twilio side)
+ */
 function wsSend(ws, obj) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(obj));
   }
 }
 
-// Upgrade handler for WebSocket endpoint
+// Handle upgrade for WebSocket endpoint
 server.on('upgrade', (request, socket, head) => {
   const { url } = request;
+
   if (url === '/media-stream') {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
@@ -985,18 +108,23 @@ server.on('upgrade', (request, socket, head) => {
   }
 });
 
-/* WebSocket connection for a single realtime call */
+// ───────────────────────────────────────────────────────────
+//  WebSocket connection for a single call
+// ───────────────────────────────────────────────────────────
 wss.on('connection', (ws) => {
   let callSid = null;
 
+  // Per-call state – kept minimal for speed
   const state = {
     lastUserText: '',
     partialUserText: '',
-    isTalking: false,
-    lastBotUtteranceId: 0,
-    history: [],
-    summary: '',
-    _callSid: null,
+    isTalking: false, // Is bot currently speaking
+    lastBotUtteranceId: 0, // For cancelling TTS on barge-in
+
+    // STT / TTS streams
+    deepgramWs: null,
+    ttsWs: null,
+    sttReady: false,
   };
 
   ws.on('message', async (message) => {
@@ -1008,34 +136,53 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // Twilio media stream events
     switch (data.event) {
       case 'connected':
+        // nothing heavy here
         break;
 
       case 'start':
         callSid = data.start.callSid;
-        state._callSid = callSid;
-        REALTIME_CALLS.set(callSid, { ws, state });
+        calls.set(callSid, { ws, state });
+        console.log('🔗 Media stream started for call', callSid);
         break;
 
       case 'media':
-        // base64 μ-law 8kHz audio frame → STT
-        handleIncomingAudio(data.media, state).catch(console.error);
+        // Here you receive base64-encoded audio chunks (8kHz μ-law).
+        // Feed into streaming STT.
+        handleIncomingAudio(data.media, state).catch((err) =>
+          console.error('handleIncomingAudio error', err)
+        );
         break;
 
       case 'stop':
-        if (callSid && REALTIME_CALLS.has(callSid)) {
-          REALTIME_CALLS.delete(callSid);
+        console.log('⛔ Media stream stopped for call', callSid);
+        if (callSid && calls.has(callSid)) {
+          calls.delete(callSid);
         }
+        // Clean up external websockets
+        try {
+          if (state.deepgramWs) state.deepgramWs.close();
+        } catch (e) {}
+        try {
+          if (state.ttsWs) state.ttsWs.close();
+        } catch (e) {}
         ws.close();
         break;
     }
   });
 
   ws.on('close', () => {
-    if (callSid && REALTIME_CALLS.has(callSid)) {
-      REALTIME_CALLS.delete(callSid);
+    if (callSid && calls.has(callSid)) {
+      calls.delete(callSid);
     }
+    try {
+      if (state.deepgramWs) state.deepgramWs.close();
+    } catch (e) {}
+    try {
+      if (state.ttsWs) state.ttsWs.close();
+    } catch (e) {}
   });
 
   ws.on('error', (err) => {
@@ -1043,62 +190,243 @@ wss.on('connection', (ws) => {
   });
 });
 
+// ───────────────────────────────────────────────────────────
+//  STT + Conversation handling
+// ───────────────────────────────────────────────────────────
+
 /**
- * STT hook – implement your streaming STT here.
- * For now it's a no-op; when you wire STT, call handleUserText()
- * once you have a final transcription.
+ * Ensure we have a live Deepgram WebSocket for this call.
+ * Twilio sends 8kHz μ-law, so we set encoding/sample_rate to match.
  */
-async function handleIncomingAudio(media, state) {
-  // media.payload is base64 μ-law audio.
-  // Decode + feed to your STT stream.
-  // On final text:
-  //   await handleUserText(finalText, state);
+function ensureDeepgram(state) {
+  if (!DEEPGRAM_API_KEY) return null;
+
+  if (state.deepgramWs && state.deepgramWs.readyState === WebSocket.OPEN) {
+    return state.deepgramWs;
+  }
+
+  const params = new URLSearchParams({
+    encoding: 'mulaw',
+    sample_rate: '8000',
+    channels: '1',
+    interim_results: 'true',
+    vad_events: 'true',
+    smart_format: 'true',
+  });
+
+  const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
+
+  const dgWs = new WebSocket(url, {
+    headers: {
+      Authorization: `Token ${DEEPGRAM_API_KEY}`,
+    },
+    protocol: `token, ${DEEPGRAM_API_KEY}`,
+  });
+
+  dgWs.on('open', () => {
+    console.log('🎧 Deepgram stream opened');
+    state.sttReady = true;
+  });
+
+  dgWs.on('message', (msg) => {
+    try {
+      const dgData = JSON.parse(msg.toString('utf8'));
+
+      // We care about transcription Results
+      if (dgData.type === 'Results' && dgData.channel?.alternatives?.length) {
+        const alt = dgData.channel.alternatives[0];
+        const transcript = (alt.transcript || '').trim();
+        const isFinal = !!dgData.is_final;
+
+        if (!transcript) return;
+
+        if (!isFinal) {
+          // partial – handy if you ever want to stream partials back
+          state.partialUserText = transcript;
+        } else {
+          // final utterance – this is one "turn"
+          state.partialUserText = '';
+          console.log('👂 Final user text:', transcript);
+          handleUserText(transcript, state).catch((err) =>
+            console.error('handleUserText error', err)
+          );
+        }
+      }
+    } catch (err) {
+      console.error('Deepgram message parse error', err);
+    }
+  });
+
+  dgWs.on('error', (err) => {
+    console.error('Deepgram WS error', err);
+    state.sttReady = false;
+  });
+
+  dgWs.on('close', () => {
+    console.log('🔒 Deepgram stream closed');
+    state.deepgramWs = null;
+    state.sttReady = false;
+  });
+
+  state.deepgramWs = dgWs;
+  return dgWs;
 }
 
-/** Called when STT has a final user utterance */
+/**
+ * This function is called with audio frames from Twilio.
+ *  - We forward μ-law audio frames to Deepgram over WS
+ */
+async function handleIncomingAudio(media, state) {
+  const payload = media?.payload;
+  if (!payload) return;
+
+  const dgWs = ensureDeepgram(state);
+  if (!dgWs) return;
+
+  // Twilio sends base64-encoded μ-law 8kHz audio; Deepgram accepts raw bytes.
+  const audioBuffer = Buffer.from(payload, 'base64');
+
+  if (dgWs.readyState === WebSocket.OPEN) {
+    dgWs.send(audioBuffer);
+  } else if (dgWs.readyState === WebSocket.CONNECTING) {
+    // 'ws' will buffer sends during CONNECTING, so this is okay
+    dgWs.send(audioBuffer);
+  }
+}
+
+/**
+ * Called once STT has produced a final transcription for the user utterance.
+ *  - stop any ongoing TTS (barge-in)
+ *  - pass text to LLM logic
+ *  - stream TTS back to Twilio
+ */
 async function handleUserText(text, state) {
   if (!text || !text.trim()) return;
 
+  // Barge-in: stop current TTS stream, if any
   state.isTalking = false;
+  if (state.ttsWs && state.ttsWs.readyState === WebSocket.OPEN) {
+    try {
+      state.ttsWs.close();
+    } catch (e) {}
+  }
+  state.ttsWs = null;
+
   state.lastUserText = text;
 
-  const reply = await handleTurn({ userText: text, callState: state });
+  // Ask your logic/LLM what to say next.
+  // handleTurn is imported from logic.js and MUST be fast + streaming-friendly.
+  const reply = await handleTurn({
+    userText: text,
+    callState: state,
+  });
 
+  // reply: { text, ssml?, endCall? }
   if (reply && reply.text) {
     await speakToCaller(reply.text, state);
   }
 }
 
-/** Stream bot speech back to Twilio via WS */
+// ───────────────────────────────────────────────────────────
+//  TTS: ElevenLabs WebSocket → Twilio media stream
+// ───────────────────────────────────────────────────────────
+
 async function speakToCaller(text, state) {
   if (!text) return;
+  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+    console.warn('No ElevenLabs API key or voice ID – cannot speak.');
+    return;
+  }
 
   state.isTalking = true;
   state.lastBotUtteranceId += 1;
   const utteranceId = state.lastBotUtteranceId;
 
-  const entry = REALTIME_CALLS.get(state._callSid);
+  // Get the Twilio WS for this call from `calls` map
+  const entry = [...calls.values()].find((e) => e.state === state);
   if (!entry) return;
   const { ws } = entry;
 
-  // Here you plug in your streaming TTS (e.g. ElevenLabs/RT)
-  // and send audio chunks as Twilio "media" events.
-  //
-  // Example pseudo-code:
-  //
-  // const ttsStream = yourTtsClient.stream({ text });
-  // for await (const chunk of ttsStream) {
-  //   if (!state.isTalking || utteranceId !== state.lastBotUtteranceId) break;
-  //   const base64Audio = chunk.toString('base64');
-  //   wsSend(ws, { event: 'media', media: { payload: base64Audio } });
-  // }
-  //
-  state.isTalking = false;
+  const uri = `wss://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream-input?model_id=${ELEVEN_MODEL}&output_format=ulaw_8000`;
+
+  const ttsWs = new WebSocket(uri);
+
+  state.ttsWs = ttsWs;
+
+  ttsWs.on('open', () => {
+    // Initial settings + auth message
+    const initMsg = {
+      text: ' ', // keep connection alive
+      voice_settings: {
+        stability: 0.3,
+        similarity_boost: 0.9,
+        use_speaker_boost: true,
+      },
+      generation_config: {
+        // shorter chunks = lower latency
+        chunk_length_schedule: [50, 120, 200],
+      },
+      xi_api_key: ELEVENLABS_API_KEY,
+    };
+    ttsWs.send(JSON.stringify(initMsg));
+
+    // Actual text, flushed so it speaks immediately
+    ttsWs.send(
+      JSON.stringify({
+        text,
+        flush: true,
+      })
+    );
+
+    // Empty text closes out the generation when done
+    ttsWs.send(JSON.stringify({ text: '' }));
+  });
+
+  ttsWs.on('message', (msg) => {
+    // If user barged in and a newer utterance started, drop this audio
+    if (!state.isTalking || utteranceId !== state.lastBotUtteranceId) {
+      return;
+    }
+
+    try {
+      const data = JSON.parse(msg.toString('utf8'));
+
+      if (data.audio) {
+        // ElevenLabs sends base64-encoded audio (ulaw_8000 now) – perfect for Twilio.
+        wsSend(ws, {
+          event: 'media',
+          media: { payload: data.audio },
+        });
+      }
+
+      if (data.isFinal) {
+        state.isTalking = false;
+      }
+    } catch (err) {
+      console.error('ElevenLabs message error', err);
+    }
+  });
+
+  ttsWs.on('close', () => {
+    if (state.ttsWs === ttsWs) {
+      state.ttsWs = null;
+    }
+    state.isTalking = false;
+  });
+
+  ttsWs.on('error', (err) => {
+    console.error('ElevenLabs WS error', err);
+    if (state.ttsWs === ttsWs) {
+      state.ttsWs = null;
+    }
+    state.isTalking = false;
+  });
 }
 
-/* ================================
-   START
-================================ */
+// ───────────────────────────────────────────────────────────
+//  Start server
+// ───────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`✅ IVR + realtime server running on ${PORT}`);
+  console.log(`✅ Voice server listening on port ${PORT}`);
 });
