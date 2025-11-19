@@ -1,5 +1,5 @@
 // server.js
-// Realtime Twilio voice server: Deepgram STT + GPT-5.1 + ElevenLabs TTS + outbound /start-call
+// Low-latency Twilio voice server with pre-greeting, barge-in & streaming STT/TTS.
 
 import express from 'express';
 import bodyParser from 'body-parser';
@@ -8,7 +8,6 @@ import http from 'http';
 import WebSocket, { WebSocketServer } from 'ws';
 import dotenv from 'dotenv';
 import { handleTurn } from './logic.js';
-import { registerOutboundRoutes } from './outbound.js';
 
 dotenv.config();
 
@@ -52,32 +51,19 @@ app.get('/health', (_req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────
-//  Twilio entrypoint – keep this EXTREMELY light
+//  Twilio entrypoint – REALTIME, NO TWILIO VOICE GREETING
 // ───────────────────────────────────────────────────────────
 app.post('/twilio/voice', (req, res) => {
   const twiml = new VoiceResponse();
 
-  const fromNumber = req.body.From || req.body.Caller || '';
-
-  // Start media stream FIRST so Twilio connects WebSocket immediately
+  // Start media stream so Twilio connects WebSocket immediately
   const start = twiml.start();
-  const stream = start.stream({
+  start.stream({
     url: `${PUBLIC_BASE_URL.replace(/\/$/, '')}/media-stream`,
   });
 
-  // Pass caller number into the media stream as a custom parameter
-  if (fromNumber) {
-    stream.parameter({ name: 'from_number', value: fromNumber });
-  }
-
-  // Short, cached greeting – doesn't block anything
-  twiml.say(
-    {
-      voice: 'alice',
-      language: 'en-GB',
-    },
-    "Hi, this is your MyBizPal AI concierge. One moment while I get set up."
-  );
+  // IMPORTANT: No <Say> here.
+  // Gabriel (ElevenLabs) will greet the caller as soon as the media stream "start" event fires.
 
   res.type('text/xml');
   res.send(twiml.toString());
@@ -126,22 +112,13 @@ wss.on('connection', (ws) => {
   const state = {
     lastUserText: '',
     partialUserText: '',
-    isTalking: false, // Is bot currently speaking
-    lastBotUtteranceId: 0, // For cancelling TTS on barge-in
+    isTalking: false,         // Is bot currently speaking
+    lastBotUtteranceId: 0,    // For cancelling TTS on barge-in
 
     // STT / TTS streams
     deepgramWs: null,
     ttsWs: null,
     sttReady: false,
-
-    // Caller identity (for SMS)
-    callerNumber: null,
-
-    // Booking state will live here: state.booking = { ... }
-    booking: null,
-
-    // Simple memory
-    history: [],
   };
 
   ws.on('message', async (message) => {
@@ -161,19 +138,20 @@ wss.on('connection', (ws) => {
 
       case 'start':
         callSid = data.start.callSid;
-        const fromNumber =
-          data.start?.customParameters?.from_number ||
-          data.start?.custom_parameters?.from_number ||
-          null;
-        if (fromNumber) {
-          state.callerNumber = fromNumber;
-        }
         calls.set(callSid, { ws, state });
-        console.log('🔗 Media stream started for call', callSid, 'from', fromNumber);
+        console.log('🔗 Media stream started for call', callSid);
+
+        // 👉 Gabriel’s greeting via ElevenLabs as soon as the stream starts
+        // This replaces the old Twilio <Say> woman voice.
+        speakToCaller(
+          "Hi, you’re speaking with Gabriel at MyBizPal. How can I help you today?",
+          state
+        ).catch((err) => console.error('Initial greeting error', err));
         break;
 
       case 'media':
-        // base64-encoded audio chunks (8kHz μ-law) → streaming STT.
+        // Here you receive base64-encoded audio chunks (8kHz μ-law).
+        // Feed into streaming STT.
         handleIncomingAudio(data.media, state).catch((err) =>
           console.error('handleIncomingAudio error', err)
         );
@@ -343,6 +321,7 @@ async function handleUserText(text, state) {
     callState: state,
   });
 
+  // reply: { text, ssml?, endCall? }
   if (reply && reply.text) {
     await speakToCaller(reply.text, state);
   }
@@ -413,7 +392,7 @@ async function speakToCaller(text, state) {
       const data = JSON.parse(msg.toString('utf8'));
 
       if (data.audio) {
-        // ElevenLabs sends base64-encoded audio (ulaw_8000) – perfect for Twilio.
+        // ElevenLabs sends base64-encoded audio (ulaw_8000 now) – perfect for Twilio.
         wsSend(ws, {
           event: 'media',
           media: { payload: data.audio },
@@ -443,11 +422,6 @@ async function speakToCaller(text, state) {
     state.isTalking = false;
   });
 }
-
-// ───────────────────────────────────────────────────────────
-//  Outbound /start-call route (website → outbound call)
-// ───────────────────────────────────────────────────────────
-registerOutboundRoutes(app);
 
 // ───────────────────────────────────────────────────────────
 //  Start server
