@@ -21,10 +21,7 @@
     "googleapis": "^140.0.0",
     "openai": "^4.58.1",
     "twilio": "^5.2.4",
-
-    "ws": "^8.18.0",                       // ✅ REQUIRED for Twilio Media Stream WebSocket
-    "@deepgram/sdk": "^3.4.0",             // (optional but required for realtime STT)
-    "elevenlabs-node": "^1.0.0"            // (optional but required for realtime TTS)
+    "ws": "^8.18.0"
   },
   "author": "MyBizPal.ai",
   "license": "MIT"
