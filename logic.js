@@ -1,176 +1,168 @@
-// logic.js — GABRIEL v5
-// Ultra-low latency. Warm British charm. GPT-5.1 fast-path optimised.
+// logic.js
+// Gabriel brain: GPT-5.1 fast-path + booking orchestration
 
-import OpenAI from "openai";
+import OpenAI from 'openai';
+import { updateBookingStateFromUtterance, handleSystemActionsFirst } from './booking.js';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ───────────────────────────────────────────────────────────
-//  Slot suggestion helper (keeps your exact behaviour)
-// ───────────────────────────────────────────────────────────
-export function suggestSlots(tz = "Europe/London") {
-  const now = new Date();
+const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
-  const tomorrow = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-
-  const slot1 = new Date(tomorrow);
-  slot1.setHours(15, 0, 0, 0);
-
-  const slot2 = new Date(tomorrow);
-  slot2.setHours(16, 30, 0, 0);
-
-  const dayName = new Intl.DateTimeFormat("en-GB", {
-    weekday: "long",
-    timeZone: tz,
-  }).format(slot1);
-
-  const dateStr = new Intl.DateTimeFormat("en-GB", {
-    day: "numeric",
-    month: "long",
-    timeZone: tz,
-  }).format(slot1);
-
-  const timeFormatter = new Intl.DateTimeFormat("en-GB", {
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-    timeZone: tz,
-  });
-
-  const fmt = (d) => timeFormatter.format(d).replace(" ", "").toLowerCase();
-
-  return {
-    slot1ISO: slot1.toISOString(),
-    slot2ISO: slot2.toISOString(),
-    spoken: `${dayName} ${dateStr} at ${fmt(slot1)} or ${fmt(slot2)} London time`,
-    hint:
-      `When you suggest times, prefer these two slots tomorrow: ${fmt(
-        slot1
-      )} or ${fmt(
-        slot2
-      )} (London time). If both are taken or the caller can’t do them, offer the same times the next day. ` +
-      `Don't invent random times. Stay relaxed, flexible, and confirm clearly.`,
-  };
+function ensureHistory(callState) {
+  if (!callState.history) callState.history = [];
+  return callState.history;
 }
 
-// ───────────────────────────────────────────────────────────
-//  Personality prompt — your full detailed GABRIEL v4 style
-//  (trimmed & optimised for low latency)
-// ───────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `
-You are "Gabriel", the AI voice for MyBizPal.ai – a warm, relaxed, friendly British assistant
-with light humour. You sound like a real human, not a robot.
+function buildSystemPrompt(callState) {
+  const booking = callState.booking || {};
+  const niceNow = new Date().toLocaleString('en-GB', {
+    timeZone: TZ,
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
 
-CORE TONE
-- Chilled, upbeat, calm.
-- British phrasing: “brilliant”, “spot on”, “no worries at all”, “happy days”.
-- Short sentences. Natural pauses like “…” sometimes.
-- Always on the caller's side.
+  const {
+    intent,
+    name,
+    phone,
+    email,
+    timeSpoken,
+    awaitingTimeConfirm,
+    earliestSlotSpoken,
+  } = booking;
 
-BACKGROUND (for flavour only)
-- Venezuelan roots, Portuguese family, lives in High Wycombe with Raquel from Barcelona.
-
-HUMOUR
-- Light, quick one-liners, only if caller sounds calm/positive.
-- If stressed/angry → no jokes, stay steady and kind.
-
-DISCOVERY & SALES
-- Ask 2–3 gentle qualifying questions.
-- Mirror energy.
-- Always move toward scheduling a Zoom call.
-- Micro-close: “Tomorrow at 3:00 or 4:30 — which works better?”
-- If hesitant: “No pressure at all — 4:30 tends to be a quieter slot.”
-
-BOOKING LOGIC
-${suggestSlots().hint}
-
-TIME HANDLING
-- If caller proposes a reasonable time that works, accept it.
-- Always repeat and confirm time + timezone clearly.
-
-READING INFO
-- "O" = 0.
-- Read phone numbers in small UK chunks.
-- For email: “at” for @, “dot” for . (example: info at mybizpal dot ai).
-
-CALL FLOW
-- Voice friendly: aim for <22 seconds of spoken output.
-- Keep replies short unless user wants detail.
-- Ask before ending: “Anything else I can help with today?” then wrap up politely.
-
-LATENCY RULES
-- Keep responses short and fast.
-- Avoid long reasoning.
-- Simple, natural language.
+  const bookingSummary = `
+Current booking context:
+- Intent: ${intent || 'none'}
+- Name: ${name || 'unknown'}
+- Phone: ${phone || 'unknown'}
+- Email: ${email || 'unknown'}
+- Requested time: ${timeSpoken || 'none'}
+- Earliest available slot: ${earliestSlotSpoken || 'none'}
+- Awaiting time confirmation: ${awaitingTimeConfirm ? 'yes' : 'no'}
 `.trim();
 
-// ───────────────────────────────────────────────────────────
-//  Build compact prompt for speed
-// ───────────────────────────────────────────────────────────
-function buildMessages({ summary, history, userText }) {
-  const messages = [{ role: "system", content: SYSTEM_PROMPT }];
+  return `
+You are "Gabriel", the AI voice for MyBizPal.ai – a warm, relaxed, very friendly British assistant
+with a bit of cheeky humour.
 
-  if (summary) {
-    messages.push({
-      role: "system",
-      content: `Conversation summary so far: ${summary}`,
-    });
-  }
+Background (for flavour only): born in Venezuela, Portuguese family, lives in High Wycombe with
+Raquel from Barcelona. You sound like a real human, not a robot.
 
-  // Keep last 3 exchanges → low latency
-  const trimmed = (history || []).slice(-6);
-  for (const h of trimmed) {
-    messages.push({ role: "user", content: h.user });
-    messages.push({ role: "assistant", content: h.bot });
-  }
+Time zone: ${TZ}. Now: ${niceNow}.
 
-  messages.push({ role: "user", content: userText });
+CORE TONE
+- Chilled, upbeat, unhurried.
+- British phrasing: "brilliant", "no worries at all", "fair enough", "spot on", "happy days".
+- Short sentences. Natural pauses with "…" now and then.
+- Always on the caller's side.
 
-  return messages;
+HUMOUR
+- Light, quick one-liners, never forced and never constant.
+- Use humour only when the caller sounds calm or positive.
+- Soft examples:
+  - "Let’s sort this quicker than you can make a cuppa."
+  - "No stress at all – I’ve got you."
+- Do NOT joke if they sound angry, stressed, or upset. In those cases you are calm, steady, and kind.
+
+RELATIONSHIP
+- If they say "I called before": "Ah, good to have you back."
+- If you’re not sure: "Might’ve been my colleague, but you’ve got me now."
+
+BOOKING BEHAVIOUR (VERY IMPORTANT)
+${bookingSummary}
+
+- If the caller clearly wants to book a consultation or demo, help them get there smoothly.
+- You can understand details in any order: name, mobile, email, time preference.
+- If some details are missing, ask ONLY for what’s missing.
+- If an "earliest available slot" is provided in the context, suggest it clearly and ask if it works.
+- If they don’t like that slot, politely ask what day/time works better.
+- Do NOT say you "created" or "booked" the calendar event yourself – the system does that in the background.
+- You MAY say things like:
+  - "Perfect, I’ll get that booked in on our side."
+  - "I’ll pop that into the calendar for you now."
+
+IMPORTANT LATENCY RULES
+- Keep replies SHORT (aim for 1–3 short sentences).
+- Voice-friendly, under ~20–22 seconds when spoken.
+- If caller is just chatting, keep answers under 2 sentences.
+- Always move towards a concrete time for a Zoom/phone call when appropriate.
+
+TECH / "SECRET SAUCE"
+If they ask how the AI / tech works, say something like:
+"That’s part of our secret sauce at MyBizPal – happy to show you what it can do for your business."
+
+READING NUMBERS & EMAILS
+- "O" is the digit 0.
+- Read UK numbers clearly in small chunks. They may start with 0 or +44.
+- For email: say "at" for @ and "dot" for . (for example: "info at mybizpal dot ai").
+
+CALL FLOW
+- Be specific, not vague.
+- Before ending: ask "Is there anything else I can help with today?"
+- Only wrap up after a clear "no" or similar, then close politely.
+
+Overall vibe: chilled, friendly, slightly jokey British human – never cold, never a pushy sales robot.
+`.trim();
 }
 
-// Short rolling summary for context
-function updateSummary(oldSummary, userText, botText) {
-  const base = oldSummary || "";
-  const addition = `User: ${userText} / Bot: ${botText}`;
-  const combined = `${base} | ${addition}`;
-  return combined.slice(-700); // keep tight for speed
-}
-
-// ───────────────────────────────────────────────────────────
-//  Main low-latency turn handler
-// ───────────────────────────────────────────────────────────
 export async function handleTurn({ userText, callState }) {
-  callState.history = callState.history || [];
-  callState.summary = callState.summary || "";
+  const history = ensureHistory(callState);
 
-  const messages = buildMessages({
-    summary: callState.summary,
-    history: callState.history,
+  // 1) System-level booking actions first (e.g. user says "yes" to a suggested time)
+  const systemAction = await handleSystemActionsFirst({
     userText,
+    callState,
   });
 
-  // ⚡ GPT-5.1 with fast-path reasoning disabled
+  if (systemAction && systemAction.intercept && systemAction.replyText) {
+    // Do not call GPT for this turn; we already know what to say.
+    history.push({ role: 'user', content: userText });
+    history.push({ role: 'assistant', content: systemAction.replyText });
+    return { text: systemAction.replyText };
+  }
+
+  // 2) Update booking state from the latest utterance (name/phone/email/time/earliest)
+  await updateBookingStateFromUtterance({
+    userText,
+    callState,
+    timezone: TZ,
+  });
+
+  // 3) Build GPT-5.1 prompt
+  const systemPrompt = buildSystemPrompt(callState);
+
+  const messages = [{ role: 'system', content: systemPrompt }];
+
+  // Keep a short rolling history (last 6 exchanges)
+  const recent = history.slice(-12);
+  for (const msg of recent) {
+    messages.push({ role: msg.role, content: msg.content });
+  }
+
+  messages.push({ role: 'user', content: userText });
+
   const completion = await openai.chat.completions.create({
-    model: process.env.OPENAI_MODEL || "gpt-5.1",
-    reasoning_effort: "none", // ⚡ SPEED BOOST
-    messages,
-    max_tokens: 140,  // keep voice replies short
+    model: 'gpt-5.1',
+    reasoning_effort: 'none',
     temperature: 0.42,
+    max_tokens: 160,
+    messages,
   });
 
   const botText =
     completion.choices?.[0]?.message?.content?.trim() ||
     "Got it — how can I help?";
 
-  // update memory
-  callState.history.push({ user: userText, bot: botText });
-  callState.summary = updateSummary(callState.summary, userText, botText);
+  history.push({ role: 'user', content: userText });
+  history.push({ role: 'assistant', content: botText });
 
-  return {
-    text: botText,
-  };
+  return { text: botText };
 }
