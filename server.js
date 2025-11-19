@@ -56,15 +56,20 @@ app.get('/health', (_req, res) => {
 app.post('/twilio/voice', (req, res) => {
   const twiml = new VoiceResponse();
 
-  // Start media stream so Twilio connects WebSocket immediately
+  // PUBLIC_BASE_URL should be like: https://mybizpal-booking.onrender.com
+  const base = PUBLIC_BASE_URL.replace(/\/$/, '');
+
+  // Convert https://... -> wss://... for WebSocket streaming
+  const wsUrl = base.replace(/^http/, 'ws') + '/media-stream';
+
+  console.log('👉 Twilio will stream media to', wsUrl);
+
   const start = twiml.start();
   start.stream({
-    url: `${PUBLIC_BASE_URL.replace(/\/$/, '')}/media-stream`,
+    url: wsUrl,
   });
 
-  // IMPORTANT: No <Say> here.
-  // Gabriel (ElevenLabs) will greet the caller as soon as the media stream "start" event fires.
-
+  // No <Say> here – Gabriel (ElevenLabs) will greet on "start" event
   res.type('text/xml');
   res.send(twiml.toString());
 });
