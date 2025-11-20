@@ -11,6 +11,7 @@ import {
   noInAnyLang,
   formatSpokenDateTime,
 } from './parsing.js';
+
 import {
   findEarliestAvailableSlot,
   createBookingEvent,
@@ -18,6 +19,7 @@ import {
   cancelEventById,
   hasConflict,
 } from './calendar.js';
+
 import { sendConfirmationAndReminders } from './sms.js';
 
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Europe/London';
@@ -65,10 +67,8 @@ function detectBookingIntent(text) {
 
 function detectEarliestRequest(text) {
   const t = (text || '').toLowerCase();
-  return (
-    /earliest|soonest|asap|as soon as possible|first available|next available/.test(
-      t
-    )
+  return /earliest|soonest|asap|as soon as possible|first available|next available/.test(
+    t
   );
 }
 
@@ -76,7 +76,7 @@ function detectEarliestRequest(text) {
  * Step 1: update booking state from the latest user utterance.
  *  - Fill in name / phone / email / time if found
  *  - If user wants "earliest" and we don't have a slot yet, look up earliest available
- *  - If user gives a specific time that clashes, suggest the earliest free slot after it
+ *  - If user gives a specific time that conflicts, compute the earliest free slot after that time
  */
 export async function updateBookingStateFromUtterance({
   userText,
@@ -116,7 +116,7 @@ export async function updateBookingStateFromUtterance({
     if (e) booking.email = e;
   }
 
-  // Try parse natural date/time (e.g. "tomorrow at 3pm")
+  // Try parse natural date/time for an explicit requested time
   if (!booking.timeISO) {
     const nat = parseNaturalDate(raw, timezone);
     if (nat) {
@@ -127,45 +127,7 @@ export async function updateBookingStateFromUtterance({
     }
   }
 
-  // If we have a requested time, check for conflicts in the calendar.
-  // If there is a conflict, find the earliest slot AFTER that time instead.
-  if (booking.timeISO) {
-    try {
-      const conflict = await hasConflict({
-        startISO: booking.timeISO,
-        durationMin: 30,
-      });
-
-      if (conflict) {
-        // Find earliest free slot starting from the requested time
-        const earliest = await findEarliestAvailableSlot({
-          timezone,
-          durationMinutes: 30,
-          daysAhead: 7,
-          startFromISO: booking.timeISO,
-        });
-
-        if (earliest && earliest.iso) {
-          booking.earliestSlotISO = earliest.iso;
-          booking.earliestSlotSpoken =
-            earliest.spoken ||
-            formatSpokenDateTime(earliest.iso, timezone);
-
-          // Clear the conflicting time; we’ll talk about the suggestion instead
-          booking.timeISO = null;
-          booking.timeSpoken = null;
-
-          booking.awaitingTimeConfirm = true;
-          booking.lastPromptWasTimeSuggestion = true;
-          booking.wantsEarliest = true;
-        }
-      }
-    } catch (err) {
-      console.warn('Conflict check failed:', err?.message || err);
-    }
-  }
-
-  // If user wants earliest and we don't yet have a candidate, look it up
+  // If user wants "earliest" and we don't yet have a candidate, look it up from now
   if (
     booking.intent === 'wants_booking' &&
     booking.wantsEarliest &&
@@ -175,16 +137,49 @@ export async function updateBookingStateFromUtterance({
       timezone,
       durationMinutes: 30,
       daysAhead: 7,
-      // If they already hinted at a time, search from there; otherwise from "now"
-      startFromISO: booking.timeISO || null,
+      startFromISO: null, // from now
     });
     if (earliest && earliest.iso) {
       booking.earliestSlotISO = earliest.iso;
       booking.earliestSlotSpoken =
-        earliest.spoken ||
-        formatSpokenDateTime(earliest.iso, timezone);
+        earliest.spoken || formatSpokenDateTime(earliest.iso, timezone);
       booking.awaitingTimeConfirm = true;
       booking.lastPromptWasTimeSuggestion = true;
+    }
+  }
+
+  // If we have an explicit requested time, check for conflict
+  if (
+    booking.intent === 'wants_booking' &&
+    booking.timeISO &&
+    !booking.earliestSlotISO // don't override an existing earliest suggestion
+  ) {
+    try {
+      const conflict = await hasConflict({
+        startISO: booking.timeISO,
+        durationMin: 30,
+      });
+
+      if (conflict) {
+        // Find earliest free slot AFTER the requested time
+        const earliestAfter = await findEarliestAvailableSlot({
+          timezone,
+          durationMinutes: 30,
+          daysAhead: 7,
+          startFromISO: booking.timeISO,
+        });
+
+        if (earliestAfter && earliestAfter.iso) {
+          booking.earliestSlotISO = earliestAfter.iso;
+          booking.earliestSlotSpoken =
+            earliestAfter.spoken ||
+            formatSpokenDateTime(earliestAfter.iso, timezone);
+          booking.awaitingTimeConfirm = true;
+          booking.lastPromptWasTimeSuggestion = true;
+        }
+      }
+    } catch (e) {
+      console.warn('Conflict / earliest-after check failed:', e?.message || e);
     }
   }
 
@@ -204,8 +199,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
   if (booking.awaitingTimeConfirm && (yesInAnyLang(t) || noInAnyLang(t))) {
     if (yesInAnyLang(t)) {
       // Decide which time to book: explicit requested time > earliest suggestion
-      const timeISO =
-        booking.timeISO || booking.earliestSlotISO || null;
+      const timeISO = booking.timeISO || booking.earliestSlotISO || null;
 
       if (!timeISO) {
         // No actual time stored; reset and let GPT re-ask
@@ -269,10 +263,9 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
         const spoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
 
-        const replyText =
-          name
-            ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get a text with the Zoom details in a moment. Anything else I can help with today?`
-            : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a text with the Zoom details in a moment. Anything else I can help with today?`;
+        const replyText = name
+          ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get a text with the Zoom details in a moment. Anything else I can help with today?`
+          : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a text with the Zoom details in a moment. Anything else I can help with today?`;
 
         return {
           intercept: true,
@@ -285,7 +278,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
         return {
           intercept: true,
           replyText:
-            "Hmm, something didn’t quite go through on my side. I’ll note your details and follow up, but is there anything else I can help with for now?",
+            'Hmm, something didn’t quite go through on my side. I’ll note your details and follow up, but is there anything else I can help with for now?',
         };
       }
     } else if (noInAnyLang(t)) {
