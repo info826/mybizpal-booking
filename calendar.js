@@ -51,9 +51,13 @@ export function formatSpokenDateTime(iso, timezone = TZ) {
 }
 
 /**
- * Find earliest available 30-min slot within the next N days.
+ * Find earliest available 30-min slot starting from a given moment.
+ *
+ * - startFromISO: if provided, search from there; otherwise from "now".
+ * - daysAhead: how far ahead to look from the starting point.
+ *
  * Simple algorithm:
- *  - list events from now to now+daysAhead
+ *  - list events from startFrom to startFrom+daysAhead
  *  - walk from "cursor" time forward, skipping over busy blocks
  *  - respect basic working hours (9–18 local)
  */
@@ -61,13 +65,14 @@ export async function findEarliestAvailableSlot({
   timezone = TZ,
   durationMinutes = 30,
   daysAhead = 7,
+  startFromISO = null,
 }) {
   await ensureGoogleAuth();
 
-  const now = new Date();
-  const windowEnd = addDays(now, daysAhead);
+  const base = startFromISO ? new Date(startFromISO) : new Date();
+  const windowEnd = addDays(base, daysAhead);
 
-  const timeMin = now.toISOString();
+  const timeMin = base.toISOString();
   const timeMax = windowEnd.toISOString();
 
   const res = await calendar.events.list({
@@ -83,8 +88,8 @@ export async function findEarliestAvailableSlot({
     (ev) => ev.start?.dateTime && ev.end?.dateTime
   );
 
-  // Start cursor: now rounded up to next 5 minutes
-  let cursor = new Date(now.getTime());
+  // Start cursor: base rounded up to next 5 minutes
+  let cursor = new Date(base.getTime());
   cursor.setSeconds(0, 0);
   const extraMins = cursor.getMinutes() % 5;
   if (extraMins !== 0) {
@@ -169,11 +174,13 @@ export async function findEarliestAvailableSlot({
   return null;
 }
 
-// Basic conflict checker (not used by earliest, but useful)
+// Basic conflict checker
 export async function hasConflict({ startISO, durationMin = 30 }) {
   await ensureGoogleAuth();
   const start = new Date(startISO).toISOString();
-  const end = new Date(new Date(startISO).getTime() + durationMin * 60000).toISOString();
+  const end = new Date(
+    new Date(startISO).getTime() + durationMin * 60000
+  ).toISOString();
 
   const r = await calendar.events.list({
     calendarId: CALENDAR_ID,
