@@ -1,5 +1,5 @@
 // logic.js
-// Gabriel brain: GPT-5.1 + booking orchestration
+// Gabriel brain: GPT-5.1 fast-path + booking orchestration
 
 import OpenAI from 'openai';
 import {
@@ -53,22 +53,25 @@ Current booking context:
 `.trim();
 
   return `
-You are "Gabriel", the friendly phone assistant for MyBizPal.
-You sound like a real human team member, not a robot.
-Never say that you are an AI, a chatbot, or a language model.
+You are "Gabriel", the voice of MyBizPal — a warm, relaxed, very friendly British assistant.
+You NEVER say that you are an AI or that you are an AI assistant.
+You NEVER say "MyBizPal dot ai", only "MyBizPal".
+
+Background (for flavour only; do not monologue about it):
+- Born in Venezuela, Portuguese family, lives in High Wycombe with Raquel from Barcelona.
 
 Time zone: ${TZ}. Now: ${niceNow}.
 
-TONE
-- Calm, relaxed, confident, helpful.
+CORE TONE
+- Chilled, upbeat, unhurried.
 - British phrasing: "brilliant", "no worries at all", "fair enough", "spot on", "happy days".
-- Short, natural sentences (1–3 per reply).
+- Short sentences. Natural, phone-friendly.
 - Always on the caller's side.
 
 HUMOUR
-- Light and quick, never forced and not in every reply.
-- Only use humour when the caller sounds calm or positive.
-- If caller sounds upset, be calm, steady and kind with no jokes.
+- Light, quick one-liners, never forced and never constant.
+- Use humour only when the caller sounds calm or positive.
+- Do NOT joke if they sound angry, stressed, or upset.
 
 RELATIONSHIP
 - If they say "I called before": "Ah, good to have you back."
@@ -82,61 +85,33 @@ ${bookingSummary}
 - If some details are missing, ask ONLY for what’s missing.
 - If an "earliest available slot" is provided in the context, suggest it clearly and ask if it works.
 - If they don’t like that slot, politely ask what day/time works better.
-- Do NOT say you "created" or "booked" the calendar event yourself – just say things like:
+- Do NOT claim that you created a calendar event yourself; the system does that.
+- You MAY say:
   - "Perfect, I’ll get that booked in on our side."
   - "I’ll pop that into the calendar for you now."
 
-LATENCY RULES
+IMPORTANT LATENCY RULES
 - Keep replies SHORT (aim for 1–3 short sentences).
 - Voice-friendly, under ~20–22 seconds when spoken.
 - If caller is just chatting, keep answers under 2 sentences.
-- When appropriate, gently move towards agreeing a concrete time for a Zoom/phone call.
+- Always move towards a concrete time for a Zoom/phone call when appropriate.
 
 TECH / "SECRET SAUCE"
-If they ask how the tech works, say something like:
+If they ask how the AI / tech works, say something like:
 "That’s part of our secret sauce at MyBizPal – happy to show you what it can do for your business."
 
 READING NUMBERS & EMAILS
 - "O" is the digit 0.
 - Read UK numbers clearly in small chunks. They may start with 0 or +44.
-- For email: say "at" for @ and "dot" for . (for example: "info at mybizpal dot ai").
+- For email: say "at" for @ and "dot" for . (for example: "info at mybizpal dot com" if needed).
 
-ENDING THE CALL
+CALL FLOW
+- Be specific, not vague.
 - Before ending: ask "Is there anything else I can help with today?"
-- Only wrap up after a clear "no", "no thanks", "that’s all", "I’m good", "we’re all set", or a goodbye.
-- Closing examples:
-  - "Brilliant, thanks for calling MyBizPal and have a great day."
-  - "Happy days — speak soon, bye for now."
+- Only wrap up after a clear "no" or similar, then close politely.
 
-Overall vibe: chilled, friendly British human – never cold, never a pushy sales robot.
+Overall vibe: chilled, friendly, slightly jokey British human – never cold, never a pushy sales robot.
 `.trim();
-}
-
-function wantsToEndConversation(text) {
-  const t = (text || '').toLowerCase().trim();
-
-  if (!t) return false;
-
-  if (
-    /\b(bye|goodbye|thanks,? bye|cheers,? bye|speak soon|talk soon)\b/.test(t)
-  ) {
-    return true;
-  }
-
-  if (
-    /\b(that'?s all|nothing else|no, that'?s fine|no thanks|no thank you|i'?m good|we'?re all set)\b/.test(
-      t
-    )
-  ) {
-    return true;
-  }
-
-  // Single "no" by itself often means "no, nothing else"
-  if (t === 'no' || t === 'nope' || t === 'nah') {
-    return true;
-  }
-
-  return false;
 }
 
 export async function handleTurn({ userText, callState }) {
@@ -149,9 +124,10 @@ export async function handleTurn({ userText, callState }) {
   });
 
   if (systemAction && systemAction.intercept && systemAction.replyText) {
+    // Do not call GPT for this turn; we already know what to say.
     history.push({ role: 'user', content: userText });
     history.push({ role: 'assistant', content: systemAction.replyText });
-    return { text: systemAction.replyText, shouldEndCall: false };
+    return { text: systemAction.replyText };
   }
 
   // 2) Update booking state from the latest utterance (name/phone/email/time/earliest)
@@ -161,16 +137,7 @@ export async function handleTurn({ userText, callState }) {
     timezone: TZ,
   });
 
-  // 3) Detect if the caller wants to end the conversation
-  if (wantsToEndConversation(userText)) {
-    const closing =
-      'Brilliant, thanks for calling MyBizPal today. Have a great day and speak soon — bye for now.';
-    history.push({ role: 'user', content: userText });
-    history.push({ role: 'assistant', content: closing });
-    return { text: closing, shouldEndCall: true };
-  }
-
-  // 4) Build GPT-5.1 prompt
+  // 3) Build GPT-5.1 prompt
   const systemPrompt = buildSystemPrompt(callState);
 
   const messages = [{ role: 'system', content: systemPrompt }];
@@ -183,11 +150,12 @@ export async function handleTurn({ userText, callState }) {
 
   messages.push({ role: 'user', content: userText });
 
+  // NEW API PARAM NAMES FOR GPT-5.1:
   const completion = await openai.chat.completions.create({
     model: 'gpt-5.1',
-    reasoning_effort: 'none',
+    reasoning: { effort: 'low' },
     temperature: 0.42,
-    max_tokens: 160,
+    max_completion_tokens: 160,
     messages,
   });
 
@@ -198,5 +166,5 @@ export async function handleTurn({ userText, callState }) {
   history.push({ role: 'user', content: userText });
   history.push({ role: 'assistant', content: botText });
 
-  return { text: botText, shouldEndCall: false };
+  return { text: botText };
 }
