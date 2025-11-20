@@ -1,227 +1,236 @@
-// server.js
-// MyBizPal booking voice server – Twilio <-> WebSocket <-> Deepgram
-
+import 'dotenv/config';
 import express from 'express';
 import http from 'http';
-import { urlencoded } from 'body-parser';
-import { WebSocketServer } from 'ws';
-import Twilio from 'twilio';
-import dotenv from 'dotenv';
-import fetch from 'node-fetch';
+import WebSocket, { WebSocketServer } from 'ws';
+import twilio from 'twilio';
+import cors from 'cors';
 
-dotenv.config();
-
-// ===== ENV =====
+// ---- Env helpers ----
 const {
   PORT = 3000,
   PUBLIC_BASE_URL,
+  TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
   DEEPGRAM_API_KEY,
 } = process.env;
 
 if (!PUBLIC_BASE_URL) {
-  console.warn('⚠️ PUBLIC_BASE_URL is not set – Twilio <Stream> URL may be wrong.');
+  console.warn('⚠️  PUBLIC_BASE_URL is not set – Twilio <Stream> URL logs will be generic.');
 }
+
+if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+  console.warn('⚠️  Missing Twilio credentials in env.');
+}
+
 if (!DEEPGRAM_API_KEY) {
-  console.warn('⚠️ DEEPGRAM_API_KEY is not set – Deepgram streaming will be disabled.');
+  console.warn(
+    '⚠️  Missing DEEPGRAM_API_KEY – calls will answer but speech recognition will be disabled.'
+  );
 }
 
-// ===== APP / SERVER SETUP =====
 const app = express();
-app.use(urlencoded({ extended: false }));
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
-const server = http.createServer(app);
+// Twilio REST client (keep for SMS / future features)
+const twilioClient =
+  TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
+    ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    : null;
 
-// Twilio helper (only for webhook signature if we enable it)
-const twilio = Twilio('', TWILIO_AUTH_TOKEN);
-const { VoiceResponse } = Twilio.twiml;
-
-// ===== SIMPLE HEALTH CHECK =====
+// Basic health check for Render
 app.get('/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
-// ===== (OPTIONAL) CRON STUB – so existing Render cron URL keeps working =====
+// Optional cron endpoint so your existing Render cron jobs stop 404-ing
 app.post('/cron/reminders', (req, res) => {
-  console.log('⏰ /cron/reminders called');
+  console.log('⏰ /cron/reminders ping received');
+  // You can import and call your outbound reminder logic here.
   res.json({ ok: true });
 });
 
-// ===== TWILIO VOICE WEBHOOK =====
-//
-// This answers the call, plays your intro, then opens a media stream to /media-stream.
-// NO hangup here – Twilio keeps the stream open until the caller or your code closes it.
-app.post('/twilio/voice', (req, res) => {
-  try {
-    const twiml = new VoiceResponse();
+// ---------- Twilio <Stream> entrypoint ----------
 
-    twiml.say(
-      {
-        voice: 'Polly.Brian', // UK-ish male; change if you like
-      },
-      "Hi, you're speaking with Gabriel from MyBizPal. One moment while I get set up."
-    );
+// Twilio hits this when a call comes in
+app.post('/twilio/voice', express.urlencoded({ extended: false }), (req, res) => {
+  const VoiceResponse = twilio.twiml.VoiceResponse;
+  const twiml = new VoiceResponse();
 
-    const baseUrl = PUBLIC_BASE_URL?.replace(/\/$/, '') || `https://${req.headers.host}`;
+  const baseUrl = PUBLIC_BASE_URL || `https://example.com`;
+  const streamUrl = new URL('/media-stream', baseUrl).toString();
+  console.log('📞 Incoming call from', req.body.From, '– streaming to', streamUrl);
 
-    twiml.connect().stream({
-      url: `${baseUrl.replace('http://', 'wss://').replace('https://', 'wss://')}/media-stream`,
-      track: 'inbound_track',
-    });
+  // Greeting via Twilio itself, then hand over to media stream
+  twiml.say(
+    {
+      voice: 'Polly.Brian',
+      language: 'en-GB',
+    },
+    "Hi, you're speaking with Gabriel from MyBizPal. One moment while I get set up."
+  );
 
-    console.log('📞 /twilio/voice answering call, streaming to /media-stream');
+  const connect = twiml.connect();
+  connect.stream({
+    url: streamUrl,
+    track: 'inbound_track',
+  });
 
-    res.type('text/xml').send(twiml.toString());
-  } catch (err) {
-    console.error('Error in /twilio/voice handler', err);
-    const twiml = new VoiceResponse();
-    twiml.say(
-      {
-        voice: 'Polly.Brian',
-      },
-      'Sorry, something went wrong setting up the assistant. Please try again later.'
-    );
-    twiml.hangup();
-    res.type('text/xml').send(twiml.toString());
-  }
+  res.type('text/xml');
+  res.send(twiml.toString());
 });
 
-// ===== MEDIA STREAM <-> DEEPGRAM BRIDGE =====
+// ---------- WebSocket plumbing ----------
 
-/**
- * For each Twilio media WebSocket we maintain a single Deepgram WS.
- * We avoid the 429 storm by:
- *  - creating at most 1 DG connection per Twilio connection
- *  - never reconnecting in a tight loop
- */
-
-const calls = new Map(); // key: streamSid, value: { callSid, twilioWs, dgWs, createdAt }
-
-function openDeepgramStream(streamSid) {
-  if (!DEEPGRAM_API_KEY) {
-    console.warn('🚫 No DEEPGRAM_API_KEY – skipping Deepgram connection');
-    return null;
-  }
-
-  const dgUrl =
-    'wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&interim_results=true&vad_events=true';
-
-  const headers = {
-    Authorization: `Token ${DEEPGRAM_API_KEY}`,
-  };
-
-  const ws = new WebSocket(dgUrl, { headers });
-
-  ws.on('open', () => {
-    console.log(`🎧 Deepgram stream opened for streamSid=${streamSid}`);
-  });
-
-  ws.on('close', () => {
-    console.log(`🔒 Deepgram stream closed for streamSid=${streamSid}`);
-  });
-
-  ws.on('error', (err) => {
-    console.error('Deepgram WS error', err?.message || err);
-  });
-
-  ws.on('message', (data) => {
-    try {
-      const msg = JSON.parse(data.toString());
-      const transcript =
-        msg.channel?.alternatives?.[0]?.transcript || msg.alt?.[0]?.transcript;
-      const isFinal = msg.is_final || msg.type === 'final';
-
-      if (transcript && transcript.trim()) {
-        console.log(
-          `🗣️  Deepgram transcript (${isFinal ? 'final' : 'partial'}):`,
-          transcript
-        );
-        // TODO: here is where you can call your logic.js -> handleTurn()
-        // to drive AI responses + calendar + SMS.
-      }
-    } catch (err) {
-      console.error('Error parsing Deepgram message', err);
-    }
-  });
-
-  return ws;
-}
-
-// WebSocket server bound to HTTP server
+const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/media-stream' });
 
-wss.on('connection', (ws) => {
+// Per-call state: callSid -> { deepgramWs, twilioWs, streamSid }
+const calls = new Map();
+
+function safeClose(ws, code = 1000, reason = '') {
+  try {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.close(code, reason);
+    }
+  } catch (err) {
+    console.error('safeClose error', err);
+  }
+}
+
+// When Twilio opens the media WebSocket
+wss.on('connection', (twilioWs, req) => {
   console.log('🔌 Twilio media WebSocket connected');
 
-  let streamSid = null;
   let callSid = null;
-  let dgWs = null;
+  let streamSid = null;
+  let deepgramWs = null;
 
-  ws.on('message', (msg) => {
+  function attachDeepgramHandlers() {
+    if (!deepgramWs) return;
+
+    deepgramWs.on('open', () => {
+      console.log(`🎧 Deepgram stream opened for ${callSid}`);
+    });
+
+    deepgramWs.on('message', (message) => {
+      try {
+        const dg = JSON.parse(message.toString());
+        if (dg.type !== 'results') return;
+
+        const channel = dg.channel;
+        if (!channel || !channel.alternatives?.length) return;
+
+        const alt = channel.alternatives[0];
+        const transcript = alt.transcript?.trim();
+        const isFinal = dg.is_final;
+
+        if (!transcript) return;
+
+        console.log(`📝 Deepgram (${callSid})${isFinal ? ' [final]' : ''}:`, transcript);
+
+        // TODO: plug transcript into your AI agent + TTS and send audio back to Twilio.
+      } catch (err) {
+        console.error('Error parsing Deepgram message', err);
+      }
+    });
+
+    deepgramWs.on('error', (err) => {
+      console.error('Deepgram WS error', err);
+    });
+
+    deepgramWs.on('close', (code, reason) => {
+      console.log(`🔒 Deepgram stream closed for ${callSid}`, code, reason.toString());
+    });
+  }
+
+  twilioWs.on('message', async (msg) => {
+    let data;
     try {
-      const data = JSON.parse(msg.toString());
-      const event = data.event;
-
-      if (event === 'start') {
-        streamSid = data.start.streamSid;
-        callSid = data.start.callSid;
-        console.log(
-          `▶️  Media stream started: callSid=${callSid}, streamSid=${streamSid}`
-        );
-
-        // Create & store Deepgram WS (single instance per Twilio stream)
-        dgWs = openDeepgramStream(streamSid);
-        calls.set(streamSid, { callSid, twilioWs: ws, dgWs, createdAt: Date.now() });
-
-        return;
-      }
-
-      if (event === 'media') {
-        if (dgWs && dgWs.readyState === WebSocket.OPEN) {
-          const payload = data.media.payload;
-          if (payload) {
-            const audio = Buffer.from(payload, 'base64');
-            dgWs.send(audio);
-          }
-        }
-        return;
-      }
-
-      if (event === 'stop') {
-        console.log(`⏹️  Media stream stopped: streamSid=${streamSid}`);
-        if (dgWs && dgWs.readyState === WebSocket.OPEN) {
-          dgWs.close();
-        }
-        calls.delete(streamSid);
-        return;
-      }
+      data = JSON.parse(msg.toString());
     } catch (err) {
-      console.error('Error handling Twilio media message', err);
+      console.error('Failed to parse WS message from Twilio', err);
+      return;
     }
-  });
 
-  ws.on('close', () => {
-    console.log('🧹 WS closed');
-    if (streamSid && calls.has(streamSid)) {
-      const info = calls.get(streamSid);
-      if (info.dgWs && info.dgWs.readyState === WebSocket.OPEN) {
-        info.dgWs.close();
+    const { event } = data;
+
+    if (event === 'start') {
+      callSid = data.start.callSid;
+      streamSid = data.start.streamSid;
+      console.log('▶️ Call started', callSid, 'streamSid', streamSid);
+
+      if (!DEEPGRAM_API_KEY) {
+        console.warn('Deepgram key missing – will not create STT stream.');
+      } else {
+        const url =
+          'wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&interim_results=true&vad_events=true';
+
+        deepgramWs = new WebSocket(url, {
+          headers: {
+            Authorization: `Token ${DEEPGRAM_API_KEY}`,
+          },
+        });
+
+        calls.set(callSid, { deepgramWs, twilioWs, streamSid });
+        attachDeepgramHandlers();
       }
-      calls.delete(streamSid);
+
+      return;
+    }
+
+    if (event === 'media') {
+      if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) {
+        // Drop audio if Deepgram is not ready to avoid 429 spam
+        return;
+      }
+
+      const payload = data.media.payload; // base64 mu-law
+      try {
+        deepgramWs.send(Buffer.from(payload, 'base64'));
+      } catch (err) {
+        console.error('Error forwarding audio to Deepgram', err.message);
+      }
+      return;
+    }
+
+    if (event === 'stop') {
+      console.log('⏹️ Call stopped', callSid);
+      if (callSid && calls.has(callSid)) {
+        const st = calls.get(callSid);
+        safeClose(st.deepgramWs, 1000, 'call ended');
+        calls.delete(callSid);
+      }
+      safeClose(twilioWs, 1000, 'call ended');
+      return;
     }
   });
 
-  ws.on('error', (err) => {
-    console.error('Twilio WS error', err?.message || err);
+  twilioWs.on('close', () => {
+    console.log('🧹 Twilio media WebSocket closed');
+    if (callSid && calls.has(callSid)) {
+      const st = calls.get(callSid);
+      safeClose(st.deepgramWs, 1000, 'twilio ws closed');
+      calls.delete(callSid);
+    }
+  });
+
+  twilioWs.on('error', (err) => {
+    console.error('Twilio WS error', err);
   });
 });
 
-// ===== START SERVER =====
+// ---------- Start server ----------
+
 server.listen(PORT, () => {
-  console.log('▶️  Running `node server.js`');
-  console.log(`📞 Voice server listening on port ${PORT}`);
-  console.log('✅ Your service is live 🎉');
-  console.log(
-    `==> Available at your primary URL ${PUBLIC_BASE_URL || 'http://localhost:' + PORT}`
-  );
+  const base = PUBLIC_BASE_URL || `http://localhost:${PORT}`;
+  console.log('==> Voice server listening on port', PORT);
+  console.log('==> Your service is live 🎉');
+  console.log('==> ');
+  console.log('==> ///////////////////////////////////////////////');
+  console.log('==> Available at your primary URL', base);
+  console.log('==> Twilio streaming to:', new URL('/media-stream', base).toString());
+  console.log('==> ///////////////////////////////////////////////');
 });
+v
