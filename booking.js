@@ -16,6 +16,7 @@ import {
   createBookingEvent,
   findExistingBooking,
   cancelEventById,
+  hasConflict,
 } from './calendar.js';
 import { sendConfirmationAndReminders } from './sms.js';
 
@@ -75,6 +76,7 @@ function detectEarliestRequest(text) {
  * Step 1: update booking state from the latest user utterance.
  *  - Fill in name / phone / email / time if found
  *  - If user wants "earliest" and we don't have a slot yet, look up earliest available
+ *  - If user gives a specific time that clashes, suggest the earliest free slot after it
  */
 export async function updateBookingStateFromUtterance({
   userText,
@@ -114,13 +116,52 @@ export async function updateBookingStateFromUtterance({
     if (e) booking.email = e;
   }
 
-  // Try parse natural date/time
+  // Try parse natural date/time (e.g. "tomorrow at 3pm")
   if (!booking.timeISO) {
     const nat = parseNaturalDate(raw, timezone);
     if (nat) {
       booking.timeISO = nat.iso;
       booking.timeSpoken = nat.spoken;
       booking.awaitingTimeConfirm = true;
+      booking.lastPromptWasTimeSuggestion = false;
+    }
+  }
+
+  // If we have a requested time, check for conflicts in the calendar.
+  // If there is a conflict, find the earliest slot AFTER that time instead.
+  if (booking.timeISO) {
+    try {
+      const conflict = await hasConflict({
+        startISO: booking.timeISO,
+        durationMin: 30,
+      });
+
+      if (conflict) {
+        // Find earliest free slot starting from the requested time
+        const earliest = await findEarliestAvailableSlot({
+          timezone,
+          durationMinutes: 30,
+          daysAhead: 7,
+          startFromISO: booking.timeISO,
+        });
+
+        if (earliest && earliest.iso) {
+          booking.earliestSlotISO = earliest.iso;
+          booking.earliestSlotSpoken =
+            earliest.spoken ||
+            formatSpokenDateTime(earliest.iso, timezone);
+
+          // Clear the conflicting time; we’ll talk about the suggestion instead
+          booking.timeISO = null;
+          booking.timeSpoken = null;
+
+          booking.awaitingTimeConfirm = true;
+          booking.lastPromptWasTimeSuggestion = true;
+          booking.wantsEarliest = true;
+        }
+      }
+    } catch (err) {
+      console.warn('Conflict check failed:', err?.message || err);
     }
   }
 
@@ -134,6 +175,8 @@ export async function updateBookingStateFromUtterance({
       timezone,
       durationMinutes: 30,
       daysAhead: 7,
+      // If they already hinted at a time, search from there; otherwise from "now"
+      startFromISO: booking.timeISO || null,
     });
     if (earliest && earliest.iso) {
       booking.earliestSlotISO = earliest.iso;
