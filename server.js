@@ -69,21 +69,20 @@ app.post('/twilio/voice', (req, res) => {
   const start = twiml.start();
   start.stream({ url: wsUrl });
 
-  // Keep the call open while media stream is active (10 mins)
+  // 👇 This is the audible greeting so the caller hears *something* immediately
+  twiml.say(
+    {
+      voice: 'alice',
+      language: 'en-GB',
+    },
+    "Hi, you’re speaking with Gabriel at MyBizPal. One moment while I get set up."
+  );
+
+  // Keep the call open while the WebSocket media stream runs
   twiml.pause({ length: 600 });
 
   res.type('text/xml');
   res.send(twiml.toString());
-});
-
-// Optional GET to quickly inspect TwiML in browser
-app.get('/twilio/voice', (req, res) => {
-  const twiml = new VoiceResponse();
-  const wsUrl = buildWsUrl();
-  const start = twiml.start();
-  start.stream({ url: wsUrl });
-  twiml.pause({ length: 600 });
-  res.type('text/xml').send(twiml.toString());
 });
 
 // ───────────────────────────────────────────────────────────
