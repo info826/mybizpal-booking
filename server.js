@@ -1,440 +1,227 @@
 // server.js
-// Low-latency Twilio voice server with pre-greeting, barge-in & streaming STT/TTS.
+// MyBizPal booking voice server – Twilio <-> WebSocket <-> Deepgram
 
 import express from 'express';
-import bodyParser from 'body-parser';
-import twilio from 'twilio';
 import http from 'http';
-import WebSocket, { WebSocketServer } from 'ws';
+import { urlencoded } from 'body-parser';
+import { WebSocketServer } from 'ws';
+import Twilio from 'twilio';
 import dotenv from 'dotenv';
-import { handleTurn } from './logic.js';
+import fetch from 'node-fetch';
 
 dotenv.config();
 
+// ===== ENV =====
 const {
+  PORT = 3000,
+  PUBLIC_BASE_URL,
   TWILIO_AUTH_TOKEN,
-  TWILIO_ACCOUNT_SID,
-  PUBLIC_BASE_URL, // e.g. "https://mybizpal-booking.onrender.com"
   DEEPGRAM_API_KEY,
-  ELEVENLABS_API_KEY,
-  ELEVENLABS_VOICE_ID,
-  ELEVENLABS_MODEL_ID,
 } = process.env;
 
-if (!TWILIO_AUTH_TOKEN || !TWILIO_ACCOUNT_SID || !PUBLIC_BASE_URL) {
-  console.error(
-    'Missing required env vars. Check TWILIO_AUTH_TOKEN, TWILIO_ACCOUNT_SID, PUBLIC_BASE_URL',
-  );
-  process.exit(1);
+if (!PUBLIC_BASE_URL) {
+  console.warn('⚠️ PUBLIC_BASE_URL is not set – Twilio <Stream> URL may be wrong.');
 }
-
 if (!DEEPGRAM_API_KEY) {
-  console.warn('⚠️ No DEEPGRAM_API_KEY set – STT will NOT work.');
-}
-if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
-  console.warn('⚠️ ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID missing – TTS will NOT work.');
+  console.warn('⚠️ DEEPGRAM_API_KEY is not set – Deepgram streaming will be disabled.');
 }
 
-const ELEVEN_MODEL = ELEVENLABS_MODEL_ID || 'eleven_flash_v2_5';
-
+// ===== APP / SERVER SETUP =====
 const app = express();
-app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+app.use(urlencoded({ extended: false }));
 
-const VoiceResponse = twilio.twiml.VoiceResponse;
-
-// ───────────────────────────────────────────────────────────
-//  Health check – use this for keep-alive pings
-// ───────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => {
-  res.status(200).json({ ok: true, time: new Date().toISOString() });
-});
-
-// ───────────────────────────────────────────────────────────
-//  Twilio entrypoint – keep this EXTREMELY light
-// ───────────────────────────────────────────────────────────
-app.post('/twilio/voice', (req, res) => {
-  const twiml = new VoiceResponse();
-
-  // Start media stream FIRST so Twilio connects WebSocket immediately
-  const start = twiml.start();
-  start.stream({
-    url: `${PUBLIC_BASE_URL.replace(/\/$/, '')}/media-stream`,
-  });
-
-  // Short greeting – this is the "human" voice that plays BEFORE the AI kicks in.
-  twiml.say(
-    {
-      voice: 'alice',
-      language: 'en-GB',
-    },
-    "Hi, you're speaking with Gabriel from MyBizPal. One moment while I get set up.",
-  );
-
-  res.type('text/xml');
-  res.send(twiml.toString());
-});
-
-// ───────────────────────────────────────────────────────────
-//  HTTP server + WebSocket server
-// ───────────────────────────────────────────────────────────
 const server = http.createServer(app);
 
-// Twilio will connect here as a media stream
-const wss = new WebSocketServer({ noServer: true });
+// Twilio helper (only for webhook signature if we enable it)
+const twilio = Twilio('', TWILIO_AUTH_TOKEN);
+const { VoiceResponse } = Twilio.twiml;
 
-// Map callSid -> per-call state
-const calls = new Map();
+// ===== SIMPLE HEALTH CHECK =====
+app.get('/health', (req, res) => {
+  res.json({ ok: true, time: new Date().toISOString() });
+});
 
-/**
- * Helper: safe send via WS (Twilio side)
- */
-function wsSend(ws, obj) {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(obj));
-  }
-}
+// ===== (OPTIONAL) CRON STUB – so existing Render cron URL keeps working =====
+app.post('/cron/reminders', (req, res) => {
+  console.log('⏰ /cron/reminders called');
+  res.json({ ok: true });
+});
 
-// Handle upgrade for WebSocket endpoint
-server.on('upgrade', (request, socket, head) => {
-  const { url } = request;
+// ===== TWILIO VOICE WEBHOOK =====
+//
+// This answers the call, plays your intro, then opens a media stream to /media-stream.
+// NO hangup here – Twilio keeps the stream open until the caller or your code closes it.
+app.post('/twilio/voice', (req, res) => {
+  try {
+    const twiml = new VoiceResponse();
 
-  if (url === '/media-stream') {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
+    twiml.say(
+      {
+        voice: 'Polly.Brian', // UK-ish male; change if you like
+      },
+      "Hi, you're speaking with Gabriel from MyBizPal. One moment while I get set up."
+    );
+
+    const baseUrl = PUBLIC_BASE_URL?.replace(/\/$/, '') || `https://${req.headers.host}`;
+
+    twiml.connect().stream({
+      url: `${baseUrl.replace('http://', 'wss://').replace('https://', 'wss://')}/media-stream`,
+      track: 'inbound_track',
     });
-  } else {
-    socket.destroy();
+
+    console.log('📞 /twilio/voice answering call, streaming to /media-stream');
+
+    res.type('text/xml').send(twiml.toString());
+  } catch (err) {
+    console.error('Error in /twilio/voice handler', err);
+    const twiml = new VoiceResponse();
+    twiml.say(
+      {
+        voice: 'Polly.Brian',
+      },
+      'Sorry, something went wrong setting up the assistant. Please try again later.'
+    );
+    twiml.hangup();
+    res.type('text/xml').send(twiml.toString());
   }
 });
 
-// ───────────────────────────────────────────────────────────
-//  WebSocket connection for a single call
-// ───────────────────────────────────────────────────────────
-wss.on('connection', (ws) => {
-  let callSid = null;
+// ===== MEDIA STREAM <-> DEEPGRAM BRIDGE =====
 
-  // Per-call state – kept minimal for speed
-  const state = {
-    lastUserText: '',
-    partialUserText: '',
-    isTalking: false, // Is bot currently speaking
-    lastBotUtteranceId: 0, // For cancelling TTS on barge-in
+/**
+ * For each Twilio media WebSocket we maintain a single Deepgram WS.
+ * We avoid the 429 storm by:
+ *  - creating at most 1 DG connection per Twilio connection
+ *  - never reconnecting in a tight loop
+ */
 
-    // STT / TTS streams
-    deepgramWs: null,
-    ttsWs: null,
-    sttReady: false,
-    sttDisabled: false, // set to true if Deepgram 429s
+const calls = new Map(); // key: streamSid, value: { callSid, twilioWs, dgWs, createdAt }
+
+function openDeepgramStream(streamSid) {
+  if (!DEEPGRAM_API_KEY) {
+    console.warn('🚫 No DEEPGRAM_API_KEY – skipping Deepgram connection');
+    return null;
+  }
+
+  const dgUrl =
+    'wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&interim_results=true&vad_events=true';
+
+  const headers = {
+    Authorization: `Token ${DEEPGRAM_API_KEY}`,
   };
 
-  ws.on('message', async (message) => {
-    let data;
+  const ws = new WebSocket(dgUrl, { headers });
+
+  ws.on('open', () => {
+    console.log(`🎧 Deepgram stream opened for streamSid=${streamSid}`);
+  });
+
+  ws.on('close', () => {
+    console.log(`🔒 Deepgram stream closed for streamSid=${streamSid}`);
+  });
+
+  ws.on('error', (err) => {
+    console.error('Deepgram WS error', err?.message || err);
+  });
+
+  ws.on('message', (data) => {
     try {
-      data = JSON.parse(message.toString());
-    } catch (err) {
-      console.error('Invalid WS message from Twilio', err);
-      return;
-    }
+      const msg = JSON.parse(data.toString());
+      const transcript =
+        msg.channel?.alternatives?.[0]?.transcript || msg.alt?.[0]?.transcript;
+      const isFinal = msg.is_final || msg.type === 'final';
 
-    switch (data.event) {
-      case 'connected':
-        console.log('🔌 Twilio media socket connected');
-        break;
-
-      case 'start':
-        callSid = data.start.callSid;
-        calls.set(callSid, { ws, state });
-        console.log('🔗 Media stream started for call', callSid);
-
-        // Create Deepgram stream ONCE per call
-        ensureDeepgram(state);
-        break;
-
-      case 'media':
-        // base64-encoded audio chunks (8kHz μ-law) from Twilio.
-        handleIncomingAudio(data.media, state).catch((err) =>
-          console.error('handleIncomingAudio error', err),
+      if (transcript && transcript.trim()) {
+        console.log(
+          `🗣️  Deepgram transcript (${isFinal ? 'final' : 'partial'}):`,
+          transcript
         );
-        break;
+        // TODO: here is where you can call your logic.js -> handleTurn()
+        // to drive AI responses + calendar + SMS.
+      }
+    } catch (err) {
+      console.error('Error parsing Deepgram message', err);
+    }
+  });
 
-      case 'stop':
-        console.log('⛔ Media stream stopped for call', callSid);
-        cleanupCall(callSid, state, ws);
-        break;
+  return ws;
+}
+
+// WebSocket server bound to HTTP server
+const wss = new WebSocketServer({ server, path: '/media-stream' });
+
+wss.on('connection', (ws) => {
+  console.log('🔌 Twilio media WebSocket connected');
+
+  let streamSid = null;
+  let callSid = null;
+  let dgWs = null;
+
+  ws.on('message', (msg) => {
+    try {
+      const data = JSON.parse(msg.toString());
+      const event = data.event;
+
+      if (event === 'start') {
+        streamSid = data.start.streamSid;
+        callSid = data.start.callSid;
+        console.log(
+          `▶️  Media stream started: callSid=${callSid}, streamSid=${streamSid}`
+        );
+
+        // Create & store Deepgram WS (single instance per Twilio stream)
+        dgWs = openDeepgramStream(streamSid);
+        calls.set(streamSid, { callSid, twilioWs: ws, dgWs, createdAt: Date.now() });
+
+        return;
+      }
+
+      if (event === 'media') {
+        if (dgWs && dgWs.readyState === WebSocket.OPEN) {
+          const payload = data.media.payload;
+          if (payload) {
+            const audio = Buffer.from(payload, 'base64');
+            dgWs.send(audio);
+          }
+        }
+        return;
+      }
+
+      if (event === 'stop') {
+        console.log(`⏹️  Media stream stopped: streamSid=${streamSid}`);
+        if (dgWs && dgWs.readyState === WebSocket.OPEN) {
+          dgWs.close();
+        }
+        calls.delete(streamSid);
+        return;
+      }
+    } catch (err) {
+      console.error('Error handling Twilio media message', err);
     }
   });
 
   ws.on('close', () => {
-    console.log('🧹 Twilio WS closed');
-    if (callSid) {
-      cleanupCall(callSid, state, ws);
+    console.log('🧹 WS closed');
+    if (streamSid && calls.has(streamSid)) {
+      const info = calls.get(streamSid);
+      if (info.dgWs && info.dgWs.readyState === WebSocket.OPEN) {
+        info.dgWs.close();
+      }
+      calls.delete(streamSid);
     }
   });
 
   ws.on('error', (err) => {
-    console.error('WebSocket error (Twilio side)', err);
+    console.error('Twilio WS error', err?.message || err);
   });
 });
 
-// Centralised cleanup
-function cleanupCall(callSid, state, ws) {
-  if (callSid && calls.has(callSid)) {
-    calls.delete(callSid);
-  }
-  try {
-    if (state.deepgramWs) state.deepgramWs.close();
-  } catch (e) {}
-  try {
-    if (state.ttsWs) state.ttsWs.close();
-  } catch (e) {}
-  try {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-  } catch (e) {}
-}
-
-// ───────────────────────────────────────────────────────────
-//  STT + Conversation handling
-// ───────────────────────────────────────────────────────────
-
-/**
- * Ensure we have a live Deepgram WebSocket for this call.
- * Twilio sends 8kHz μ-law, so we set encoding/sample_rate to match.
- * We call this once on "start" and then re-use the socket.
- */
-function ensureDeepgram(state) {
-  if (!DEEPGRAM_API_KEY) return null;
-  if (state.sttDisabled) return null;
-
-  if (state.deepgramWs && state.deepgramWs.readyState === WebSocket.OPEN) {
-    return state.deepgramWs;
-  }
-  if (state.deepgramWs && state.deepgramWs.readyState === WebSocket.CONNECTING) {
-    return state.deepgramWs;
-  }
-
-  const params = new URLSearchParams({
-    encoding: 'mulaw',
-    sample_rate: '8000',
-    channels: '1',
-    interim_results: 'true',
-    vad_events: 'true',
-    smart_format: 'true',
-  });
-
-  const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
-
-  console.log('🎧 Opening Deepgram stream…');
-
-  const dgWs = new WebSocket(url, {
-    headers: {
-      Authorization: `Token ${DEEPGRAM_API_KEY}`,
-    },
-  });
-
-  dgWs.on('open', () => {
-    console.log('🎧 Deepgram stream opened');
-    state.sttReady = true;
-  });
-
-  dgWs.on('message', (msg) => {
-    if (state.sttDisabled) return;
-
-    try {
-      const dgData = JSON.parse(msg.toString('utf8'));
-
-      // We care about transcription Results
-      if (dgData.type === 'Results' && dgData.channel?.alternatives?.length) {
-        const alt = dgData.channel.alternatives[0];
-        const transcript = (alt.transcript || '').trim();
-        const isFinal = !!dgData.is_final;
-
-        if (!transcript) return;
-
-        if (!isFinal) {
-          state.partialUserText = transcript;
-        } else {
-          state.partialUserText = '';
-          console.log('👂 Final user text:', transcript);
-          handleUserText(transcript, state).catch((err) =>
-            console.error('handleUserText error', err),
-          );
-        }
-      }
-    } catch (err) {
-      console.error('Deepgram message parse error', err);
-    }
-  });
-
-  dgWs.on('error', (err) => {
-    console.error('Deepgram WS error', err);
-
-    // If the error is a 429, disable STT for this call to avoid hammering their API.
-    if (String(err?.message || '').includes('429')) {
-      console.error(
-        '🚫 Deepgram is returning HTTP 429 (rate limited / blocked). Disabling STT for this call.',
-      );
-      state.sttDisabled = true;
-      state.sttReady = false;
-    }
-  });
-
-  dgWs.on('close', () => {
-    console.log('🔒 Deepgram stream closed');
-    state.deepgramWs = null;
-    state.sttReady = false;
-  });
-
-  state.deepgramWs = dgWs;
-  return dgWs;
-}
-
-/**
- * Called with audio frames from Twilio.
- *  - We forward μ-law audio frames to Deepgram over WS
- */
-async function handleIncomingAudio(media, state) {
-  if (state.sttDisabled) {
-    // We intentionally do nothing if Deepgram has 429’d this call.
-    return;
-  }
-
-  const payload = media?.payload;
-  if (!payload) return;
-
-  const dgWs = ensureDeepgram(state);
-  if (!dgWs) return;
-
-  const audioBuffer = Buffer.from(payload, 'base64');
-
-  if (dgWs.readyState === WebSocket.OPEN || dgWs.readyState === WebSocket.CONNECTING) {
-    dgWs.send(audioBuffer);
-  }
-}
-
-/**
- * Called once STT has produced a final transcription for the user utterance.
- *  - stop any ongoing TTS (barge-in)
- *  - pass text to LLM logic
- *  - stream TTS back to Twilio
- */
-async function handleUserText(text, state) {
-  if (!text || !text.trim()) return;
-
-  // Barge-in: stop current TTS stream, if any
-  state.isTalking = false;
-  if (state.ttsWs && state.ttsWs.readyState === WebSocket.OPEN) {
-    try {
-      state.ttsWs.close();
-    } catch (e) {}
-  }
-  state.ttsWs = null;
-
-  state.lastUserText = text;
-
-  const reply = await handleTurn({
-    userText: text,
-    callState: state,
-  });
-
-  if (reply && reply.text) {
-    await speakToCaller(reply.text, state);
-  }
-}
-
-// ───────────────────────────────────────────────────────────
-//  TTS: ElevenLabs WebSocket → Twilio media stream
-// ───────────────────────────────────────────────────────────
-
-async function speakToCaller(text, state) {
-  if (!text) return;
-  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
-    console.warn('No ElevenLabs API key or voice ID – cannot speak.');
-    return;
-  }
-
-  state.isTalking = true;
-  state.lastBotUtteranceId += 1;
-  const utteranceId = state.lastBotUtteranceId;
-
-  // Get the Twilio WS for this call from `calls` map
-  const entry = [...calls.values()].find((e) => e.state === state);
-  if (!entry) return;
-  const { ws } = entry;
-
-  const uri = `wss://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream-input?model_id=${ELEVEN_MODEL}&output_format=ulaw_8000`;
-
-  const ttsWs = new WebSocket(uri);
-  state.ttsWs = ttsWs;
-
-  ttsWs.on('open', () => {
-    const initMsg = {
-      text: ' ', // keep connection alive
-      voice_settings: {
-        stability: 0.3,
-        similarity_boost: 0.9,
-        use_speaker_boost: true,
-      },
-      generation_config: {
-        chunk_length_schedule: [50, 120, 200],
-      },
-      xi_api_key: ELEVENLABS_API_KEY,
-    };
-    ttsWs.send(JSON.stringify(initMsg));
-
-    ttsWs.send(
-      JSON.stringify({
-        text,
-        flush: true,
-      }),
-    );
-
-    ttsWs.send(JSON.stringify({ text: '' }));
-  });
-
-  ttsWs.on('message', (msg) => {
-    if (!state.isTalking || utteranceId !== state.lastBotUtteranceId) {
-      return;
-    }
-
-    try {
-      const data = JSON.parse(msg.toString('utf8'));
-
-      if (data.audio) {
-        wsSend(ws, {
-          event: 'media',
-          media: { payload: data.audio },
-        });
-      }
-
-      if (data.isFinal) {
-        state.isTalking = false;
-      }
-    } catch (err) {
-      console.error('ElevenLabs message error', err);
-    }
-  });
-
-  ttsWs.on('close', () => {
-    if (state.ttsWs === ttsWs) {
-      state.ttsWs = null;
-    }
-    state.isTalking = false;
-  });
-
-  ttsWs.on('error', (err) => {
-    console.error('ElevenLabs WS error', err);
-    if (state.ttsWs === ttsWs) {
-      state.ttsWs = null;
-    }
-    state.isTalking = false;
-  });
-}
-
-// ───────────────────────────────────────────────────────────
-//  Start server
-// ───────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
+// ===== START SERVER =====
 server.listen(PORT, () => {
-  console.log(`✅ Voice server listening on port ${PORT}`);
+  console.log('▶️  Running `node server.js`');
+  console.log(`📞 Voice server listening on port ${PORT}`);
+  console.log('✅ Your service is live 🎉');
+  console.log(
+    `==> Available at your primary URL ${PUBLIC_BASE_URL || 'http://localhost:' + PORT}`
+  );
 });
