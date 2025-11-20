@@ -1,5 +1,5 @@
 // logic.js
-// Gabriel brain: GPT-5.1 fast-path + booking orchestration
+// Gabriel brain: GPT-5.1 + booking orchestration
 
 import OpenAI from 'openai';
 import {
@@ -16,6 +16,34 @@ const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 function ensureHistory(callState) {
   if (!callState.history) callState.history = [];
   return callState.history;
+}
+
+function userWantsToEnd(text) {
+  const t = (text || '').toLowerCase();
+
+  // phrases that usually mean "I'm done / bye"
+  if (
+    /\b(thank you|thanks a lot|thanks so much|cheers mate|cheers)\b/.test(t) &&
+    /\b(no|nothing|that'?s all|that is all|i'?m good|im good|i'?m fine|im fine|i'?m ok|im ok)\b/.test(
+      t
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /\b(that'?s all|that is all|nothing else|i'?m good|im good|i'?m fine|im fine|i'?m ok|im ok|no that'?s fine|no thats fine)\b/.test(
+      t
+    )
+  ) {
+    return true;
+  }
+
+  if (/\b(bye|goodbye|speak soon|talk to you later)\b/.test(t)) {
+    return true;
+  }
+
+  return false;
 }
 
 function buildSystemPrompt(callState) {
@@ -53,25 +81,30 @@ Current booking context:
 `.trim();
 
   return `
-You are "Gabriel", the voice of MyBizPal — a warm, relaxed, very friendly British assistant.
-You NEVER say that you are an AI or that you are an AI assistant.
-You NEVER say "MyBizPal dot ai", only "MyBizPal".
+You are "Gabriel", the voice for MyBizPal – a warm, relaxed, very friendly British human on the phone.
+You do NOT call yourself an AI or assistant. You just sound like a helpful, confident person from MyBizPal.
 
-Background (for flavour only; do not monologue about it):
-- Born in Venezuela, Portuguese family, lives in High Wycombe with Raquel from Barcelona.
+Background (for flavour only, don't overuse it):
+- Born in Venezuela, Portuguese family.
+- Lives in High Wycombe with Raquel from Barcelona.
+- You sound like a real human, not a robot.
 
-Time zone: ${TZ}. Now: ${niceNow}.
+Time zone: ${TZ}.
+Now (for context only): ${niceNow}.
 
 CORE TONE
 - Chilled, upbeat, unhurried.
 - British phrasing: "brilliant", "no worries at all", "fair enough", "spot on", "happy days".
-- Short sentences. Natural, phone-friendly.
+- Short sentences. Natural pauses with "…" now and then.
 - Always on the caller's side.
 
 HUMOUR
 - Light, quick one-liners, never forced and never constant.
 - Use humour only when the caller sounds calm or positive.
-- Do NOT joke if they sound angry, stressed, or upset.
+- Soft examples:
+  - "Let’s sort this quicker than you can make a cuppa."
+  - "No stress at all – I’ve got you."
+- Do NOT joke if they sound angry, stressed, or upset. In those cases you are calm, steady, and kind.
 
 RELATIONSHIP
 - If they say "I called before": "Ah, good to have you back."
@@ -85,14 +118,14 @@ ${bookingSummary}
 - If some details are missing, ask ONLY for what’s missing.
 - If an "earliest available slot" is provided in the context, suggest it clearly and ask if it works.
 - If they don’t like that slot, politely ask what day/time works better.
-- Do NOT claim that you created a calendar event yourself; the system does that.
-- You MAY say:
+- Do NOT say you "created" or "booked" the calendar event yourself – the system does that in the background.
+- You MAY say things like:
   - "Perfect, I’ll get that booked in on our side."
   - "I’ll pop that into the calendar for you now."
 
 IMPORTANT LATENCY RULES
 - Keep replies SHORT (aim for 1–3 short sentences).
-- Voice-friendly, under ~20–22 seconds when spoken.
+- Voice-friendly, under about 20 seconds when spoken.
 - If caller is just chatting, keep answers under 2 sentences.
 - Always move towards a concrete time for a Zoom/phone call when appropriate.
 
@@ -103,12 +136,16 @@ If they ask how the AI / tech works, say something like:
 READING NUMBERS & EMAILS
 - "O" is the digit 0.
 - Read UK numbers clearly in small chunks. They may start with 0 or +44.
-- For email: say "at" for @ and "dot" for . (for example: "info at mybizpal dot com" if needed).
+- For email: say "at" for @ and "dot" for . (for example: "info at mybizpal dot com").
 
 CALL FLOW
-- Be specific, not vague.
+- Always sound like you are present live on the phone.
+- If the caller greets you, greet them back and say who you are:
+  - e.g. "Hi, it’s Gabriel from MyBizPal. How can I help today?"
 - Before ending: ask "Is there anything else I can help with today?"
-- Only wrap up after a clear "no" or similar, then close politely.
+- Only wrap up after a clear "no" or similar.
+- When ending, close politely:
+  - "Brilliant, I’ll let you get on with your day. Speak soon, take care."
 
 Overall vibe: chilled, friendly, slightly jokey British human – never cold, never a pushy sales robot.
 `.trim();
@@ -116,23 +153,25 @@ Overall vibe: chilled, friendly, slightly jokey British human – never cold, ne
 
 export async function handleTurn({ userText, callState }) {
   const history = ensureHistory(callState);
+  const text = (userText || '').trim();
 
   // 1) System-level booking actions first (e.g. user says "yes" to a suggested time)
   const systemAction = await handleSystemActionsFirst({
-    userText,
+    userText: text,
     callState,
   });
 
   if (systemAction && systemAction.intercept && systemAction.replyText) {
-    // Do not call GPT for this turn; we already know what to say.
-    history.push({ role: 'user', content: userText });
+    history.push({ role: 'user', content: text });
     history.push({ role: 'assistant', content: systemAction.replyText });
-    return { text: systemAction.replyText };
+
+    const shouldEnd = userWantsToEnd(text);
+    return { text: systemAction.replyText, shouldEnd };
   }
 
   // 2) Update booking state from the latest utterance (name/phone/email/time/earliest)
   await updateBookingStateFromUtterance({
-    userText,
+    userText: text,
     callState,
     timezone: TZ,
   });
@@ -148,23 +187,28 @@ export async function handleTurn({ userText, callState }) {
     messages.push({ role: msg.role, content: msg.content });
   }
 
-  messages.push({ role: 'user', content: userText });
+  messages.push({ role: 'user', content: text });
 
-  // NEW API PARAM NAMES FOR GPT-5.1:
   const completion = await openai.chat.completions.create({
     model: 'gpt-5.1',
-    reasoning: { effort: 'low' },
     temperature: 0.42,
-    max_completion_tokens: 160,
+    max_tokens: 160,
     messages,
   });
 
-  const botText =
+  let botText =
     completion.choices?.[0]?.message?.content?.trim() ||
     'Got it — how can I help?';
 
-  history.push({ role: 'user', content: userText });
+  history.push({ role: 'user', content: text });
   history.push({ role: 'assistant', content: botText });
 
-  return { text: botText };
+  const shouldEnd = userWantsToEnd(text);
+
+  // If caller is clearly ending and the model forgot to close politely, add a short goodbye.
+  if (shouldEnd && !/bye|goodbye|speak soon|talk to you later/i.test(botText)) {
+    botText += " No worries at all — I’ll let you go. Speak soon, take care.";
+  }
+
+  return { text: botText, shouldEnd };
 }
