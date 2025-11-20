@@ -56,24 +56,16 @@ app.get('/health', (_req, res) => {
 app.post('/twilio/voice', (req, res) => {
   const twiml = new VoiceResponse();
 
-  // PUBLIC_BASE_URL should be: https://mybizpal-booking.onrender.com
-  let base = PUBLIC_BASE_URL.replace(/\/$/, '');
-
-  // Convert http/https → ws/wss explicitly
-  if (base.startsWith('https://')) {
-    base = 'wss://' + base.slice('https://'.length);
-  } else if (base.startsWith('http://')) {
-    base = 'ws://' + base.slice('http://'.length);
-  }
-
-  const wsUrl = `${base}/media-stream`;
+  // HARD-CODE the WebSocket URL Twilio must use.
+  // This avoids any env / regex weirdness.
+  const wsUrl = 'wss://mybizpal-booking.onrender.com/media-stream';
 
   console.log('📡 Twilio streaming to:', wsUrl);
 
   const start = twiml.start();
   start.stream({ url: wsUrl });
 
-  // No <Say> — Gabriel (ElevenLabs) greets on the "start" event
+  // No <Say> here – Gabriel (ElevenLabs) will greet on "start"
   res.type('text/xml');
   res.send(twiml.toString());
 });
@@ -150,8 +142,7 @@ wss.on('connection', (ws) => {
         calls.set(callSid, { ws, state });
         console.log('🔗 Media stream started for call', callSid);
 
-        // 👉 Gabriel’s greeting via ElevenLabs as soon as the stream starts
-        // This replaces the old Twilio <Say> woman voice.
+        // Gabriel’s greeting via ElevenLabs as soon as the stream starts
         speakToCaller(
           "Hi, you’re speaking with Gabriel at MyBizPal. How can I help you today?",
           state
