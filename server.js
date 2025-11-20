@@ -43,6 +43,14 @@ app.use(bodyParser.json());
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
+// Helper: build ws URL from PUBLIC_BASE_URL
+function buildWsUrl() {
+  const base = (PUBLIC_BASE_URL || '').replace(/\/$/, '');
+  // https:// → wss://   http:// → ws://
+  const wsBase = base.replace(/^http/, 'ws');
+  return `${wsBase}/media-stream`;
+}
+
 // ───────────────────────────────────────────────────────────
 //  Health check – use this for keep-alive pings
 // ───────────────────────────────────────────────────────────
@@ -56,24 +64,27 @@ app.get('/health', (_req, res) => {
 app.post('/twilio/voice', (req, res) => {
   const twiml = new VoiceResponse();
 
-  // Hard-coded WebSocket URL for Twilio
-  const wsUrl = 'wss://mybizpal-booking.onrender.com/media-stream';
+  const wsUrl = buildWsUrl();
   console.log('📡 Twilio streaming to:', wsUrl);
 
   const start = twiml.start();
   start.stream({ url: wsUrl });
 
-  // No <Say> here – Gabriel (ElevenLabs) will greet on "start"
+  // 🔑 CRITICAL: keep the call open while the media stream is active
+  // 600 seconds = 10 minutes. Adjust if you like.
+  twiml.pause({ length: 600 });
+
   res.type('text/xml');
   res.send(twiml.toString());
 });
 
-// OPTIONAL: allow GET for quick debugging in browser
+// Optional GET for quick debugging in browser
 app.get('/twilio/voice', (req, res) => {
   const twiml = new VoiceResponse();
-  const wsUrl = 'wss://mybizpal-booking.onrender.com/media-stream';
+  const wsUrl = buildWsUrl();
   const start = twiml.start();
   start.stream({ url: wsUrl });
+  twiml.pause({ length: 600 });
   res.type('text/xml').send(twiml.toString());
 });
 
@@ -81,27 +92,22 @@ app.get('/twilio/voice', (req, res) => {
 //  HTTP server + WebSocket server
 // ───────────────────────────────────────────────────────────
 const server = http.createServer(app);
-
-// Twilio will connect here as a media stream
 const wss = new WebSocketServer({ noServer: true });
 
 // Map callSid -> per-call state
 const calls = new Map();
 
-/**
- * Helper: safe send via WS (Twilio side)
- */
 function wsSend(ws, obj) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(obj));
   }
 }
 
-// Handle upgrade for WebSocket endpoint
+// Upgrade HTTP → WebSocket for media stream
 server.on('upgrade', (request, socket, head) => {
   const url = request.url || '';
 
-  // 🔑 FIX: accept /media-stream *with* query params
+  // Accept /media-stream and /media-stream?StreamSid=...
   if (url.startsWith('/media-stream')) {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
@@ -117,14 +123,11 @@ server.on('upgrade', (request, socket, head) => {
 wss.on('connection', (ws) => {
   let callSid = null;
 
-  // Per-call state – kept minimal for speed
   const state = {
     lastUserText: '',
     partialUserText: '',
-    isTalking: false,         // Is bot currently speaking
-    lastBotUtteranceId: 0,    // For cancelling TTS on barge-in
-
-    // STT / TTS streams
+    isTalking: false,
+    lastBotUtteranceId: 0,
     deepgramWs: null,
     ttsWs: null,
     sttReady: false,
@@ -139,7 +142,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Twilio media stream events
     switch (data.event) {
       case 'connected':
         break;
@@ -149,7 +151,7 @@ wss.on('connection', (ws) => {
         calls.set(callSid, { ws, state });
         console.log('🔗 Media stream started for call', callSid);
 
-        // Initial greeting via ElevenLabs
+        // Initial ElevenLabs greeting from Gabriel
         speakToCaller(
           "Hi, you’re speaking with Gabriel at MyBizPal. How can I help you today?",
           state
@@ -196,9 +198,8 @@ wss.on('connection', (ws) => {
 });
 
 // ───────────────────────────────────────────────────────────
-//  STT + Conversation handling
+//  STT + Conversation handling (Deepgram + OpenAI)
 // ───────────────────────────────────────────────────────────
-
 function ensureDeepgram(state) {
   if (!DEEPGRAM_API_KEY) return null;
 
@@ -286,6 +287,7 @@ async function handleIncomingAudio(media, state) {
 async function handleUserText(text, state) {
   if (!text || !text.trim()) return;
 
+  // barge-in: stop current TTS
   state.isTalking = false;
   if (state.ttsWs && state.ttsWs.readyState === WebSocket.OPEN) {
     try {
@@ -309,7 +311,6 @@ async function handleUserText(text, state) {
 // ───────────────────────────────────────────────────────────
 //  TTS: ElevenLabs WebSocket → Twilio media stream
 // ───────────────────────────────────────────────────────────
-
 async function speakToCaller(text, state) {
   if (!text) return;
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
