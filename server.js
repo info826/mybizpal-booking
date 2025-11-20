@@ -46,13 +46,12 @@ const VoiceResponse = twilio.twiml.VoiceResponse;
 // Helper: build ws URL from PUBLIC_BASE_URL
 function buildWsUrl() {
   const base = (PUBLIC_BASE_URL || '').replace(/\/$/, '');
-  // https:// → wss://   http:// → ws://
-  const wsBase = base.replace(/^http/, 'ws');
+  const wsBase = base.replace(/^http/, 'ws'); // http→ws, https→wss
   return `${wsBase}/media-stream`;
 }
 
 // ───────────────────────────────────────────────────────────
-//  Health check – use this for keep-alive pings
+//  Health
 // ───────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.status(200).json({ ok: true, time: new Date().toISOString() });
@@ -70,15 +69,14 @@ app.post('/twilio/voice', (req, res) => {
   const start = twiml.start();
   start.stream({ url: wsUrl });
 
-  // 🔑 CRITICAL: keep the call open while the media stream is active
-  // 600 seconds = 10 minutes. Adjust if you like.
+  // Keep the call open while media stream is active (10 mins)
   twiml.pause({ length: 600 });
 
   res.type('text/xml');
   res.send(twiml.toString());
 });
 
-// Optional GET for quick debugging in browser
+// Optional GET to quickly inspect TwiML in browser
 app.get('/twilio/voice', (req, res) => {
   const twiml = new VoiceResponse();
   const wsUrl = buildWsUrl();
@@ -94,7 +92,6 @@ app.get('/twilio/voice', (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
-// Map callSid -> per-call state
 const calls = new Map();
 
 function wsSend(ws, obj) {
@@ -103,11 +100,8 @@ function wsSend(ws, obj) {
   }
 }
 
-// Upgrade HTTP → WebSocket for media stream
 server.on('upgrade', (request, socket, head) => {
   const url = request.url || '';
-
-  // Accept /media-stream and /media-stream?StreamSid=...
   if (url.startsWith('/media-stream')) {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
@@ -118,7 +112,7 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 // ───────────────────────────────────────────────────────────
-//  WebSocket connection for a single call
+//  WebSocket connection for one call
 // ───────────────────────────────────────────────────────────
 wss.on('connection', (ws) => {
   let callSid = null;
@@ -138,12 +132,13 @@ wss.on('connection', (ws) => {
     try {
       data = JSON.parse(message.toString());
     } catch (err) {
-      console.error('Invalid WS message', err);
+      console.error('Invalid WS message from Twilio', err);
       return;
     }
 
     switch (data.event) {
       case 'connected':
+        console.log('🔌 Twilio WS connected');
         break;
 
       case 'start':
@@ -151,7 +146,7 @@ wss.on('connection', (ws) => {
         calls.set(callSid, { ws, state });
         console.log('🔗 Media stream started for call', callSid);
 
-        // Initial ElevenLabs greeting from Gabriel
+        // Initial greeting from Gabriel
         speakToCaller(
           "Hi, you’re speaking with Gabriel at MyBizPal. How can I help you today?",
           state
@@ -181,6 +176,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    console.log('🧹 WS closed');
     if (callSid && calls.has(callSid)) {
       calls.delete(callSid);
     }
@@ -193,12 +189,12 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('error', (err) => {
-    console.error('WebSocket error', err);
+    console.error('WebSocket error (Twilio <-> server)', err);
   });
 });
 
 // ───────────────────────────────────────────────────────────
-//  STT + Conversation handling (Deepgram + OpenAI)
+//  STT (Deepgram) + Conversation
 // ───────────────────────────────────────────────────────────
 function ensureDeepgram(state) {
   if (!DEEPGRAM_API_KEY) return null;
@@ -287,7 +283,7 @@ async function handleIncomingAudio(media, state) {
 async function handleUserText(text, state) {
   if (!text || !text.trim()) return;
 
-  // barge-in: stop current TTS
+  // Barge-in: stop any ongoing TTS
   state.isTalking = false;
   if (state.ttsWs && state.ttsWs.readyState === WebSocket.OPEN) {
     try {
@@ -309,7 +305,7 @@ async function handleUserText(text, state) {
 }
 
 // ───────────────────────────────────────────────────────────
-//  TTS: ElevenLabs WebSocket → Twilio media stream
+//  TTS: ElevenLabs → Twilio
 // ───────────────────────────────────────────────────────────
 async function speakToCaller(text, state) {
   if (!text) return;
@@ -323,17 +319,29 @@ async function speakToCaller(text, state) {
   const utteranceId = state.lastBotUtteranceId;
 
   const entry = [...calls.values()].find((e) => e.state === state);
-  if (!entry) return;
+  if (!entry) {
+    console.warn('No WS entry found for state, cannot send audio');
+    return;
+  }
   const { ws } = entry;
 
   const uri = `wss://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream-input?model_id=${ELEVEN_MODEL}&output_format=ulaw_8000`;
 
-  const ttsWs = new WebSocket(uri);
+  // ✅ IMPORTANT: send API key as header so ElevenLabs accepts the connection
+  const ttsWs = new WebSocket(uri, {
+    headers: {
+      'xi-api-key': ELEVENLABS_API_KEY,
+    },
+  });
+
   state.ttsWs = ttsWs;
 
   ttsWs.on('open', () => {
+    console.log('🔊 ElevenLabs WS opened');
+
+    // initial settings
     const initMsg = {
-      text: ' ',
+      text: ' ', // keep connection alive
       voice_settings: {
         stability: 0.3,
         similarity_boost: 0.9,
@@ -342,10 +350,10 @@ async function speakToCaller(text, state) {
       generation_config: {
         chunk_length_schedule: [50, 120, 200],
       },
-      xi_api_key: ELEVENLABS_API_KEY,
     };
     ttsWs.send(JSON.stringify(initMsg));
 
+    // actual text
     ttsWs.send(JSON.stringify({ text, flush: true }));
     ttsWs.send(JSON.stringify({ text: '' }));
   });
@@ -370,6 +378,7 @@ async function speakToCaller(text, state) {
   });
 
   ttsWs.on('close', () => {
+    console.log('🔕 ElevenLabs WS closed');
     if (state.ttsWs === ttsWs) state.ttsWs = null;
     state.isTalking = false;
   });
