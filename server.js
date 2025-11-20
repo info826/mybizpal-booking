@@ -1,5 +1,5 @@
 // server.js
-// MyBizPal voice agent – Twilio <-> Deepgram <-> OpenAI <-> ElevenLabs
+// MyBizPal voice agent – Twilio <-> Deepgram <-> OpenAI (logic.js) <-> ElevenLabs
 
 import 'dotenv/config';
 import express from 'express';
@@ -7,6 +7,7 @@ import bodyParser from 'body-parser';
 import http from 'http';
 import WebSocket, { WebSocketServer } from 'ws';
 import twilio from 'twilio';
+import { handleTurn } from './logic.js';
 
 // ---------- CONFIG ----------
 
@@ -14,38 +15,25 @@ const {
   PORT = 3000,
   PUBLIC_BASE_URL,
   DEEPGRAM_API_KEY,
-  OPENAI_API_KEY,
-  // You can override this in Render env to use another model (e.g. gpt-5.1-mini)
-  OPENAI_MODEL = 'gpt-4o-mini',
   ELEVENLABS_API_KEY,
   ELEVENLABS_VOICE_ID,
+  TWILIO_ACCOUNT_SID,
+  TWILIO_AUTH_TOKEN,
 } = process.env;
 
 if (!PUBLIC_BASE_URL) {
   console.warn('⚠️  PUBLIC_BASE_URL not set – falling back to request Host header.');
 }
 if (!DEEPGRAM_API_KEY) console.warn('⚠️  DEEPGRAM_API_KEY is not set.');
-if (!OPENAI_API_KEY) console.warn('⚠️  OPENAI_API_KEY is not set.');
 if (!ELEVENLABS_API_KEY) console.warn('⚠️  ELEVENLABS_API_KEY is not set.');
 if (!ELEVENLABS_VOICE_ID) console.warn('⚠️  ELEVENLABS_VOICE_ID is not set.');
 
-const SYSTEM_PROMPT = `
-You are "Gabriel", the friendly AI assistant for MyBizPal.ai.
-
-Tone:
-- Calm, confident, helpful.
-- Short, natural sentences like a real person on the phone.
-- British-English spelling but neutral accent.
-
-Role:
-- Answer questions about MyBizPal.ai and AI automations for small businesses.
-- Book demo calls when the caller is interested (just talk about booking; the calendar logic is handled elsewhere).
-- Always keep answers concise: 1–3 sentences max.
-- If you need information you don't have, say you'll check with the team and follow up by email or text.
-`.trim();
-
-const OPENAI_FALLBACK_TEXT =
-  "I'm sorry, something went wrong when I tried to think about that.";
+let twilioClient = null;
+if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
+  twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+} else {
+  console.warn('⚠️  TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN missing — hangup control disabled.');
+}
 
 // ---------- EXPRESS APP ----------
 
@@ -57,18 +45,25 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
-// Twilio webhook – ONLY <Connect><Stream>, no Twilio voice greeting
+// Twilio <Connect><Stream> webhook
 app.post('/twilio/voice', (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
 
   const baseUrl =
     PUBLIC_BASE_URL ||
     `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers.host}`;
-
   const wsUrl = baseUrl.replace(/^http/, 'ws') + '/media-stream';
 
+  const fromNumber = req.body?.From || '';
+
   const connect = twiml.connect();
-  connect.stream({ url: wsUrl });
+  // Pass caller number into the media stream as a custom parameter
+  connect.stream({
+    url: wsUrl,
+    parameters: {
+      caller: fromNumber,
+    },
+  });
 
   res.type('text/xml');
   res.send(twiml.toString());
@@ -95,13 +90,14 @@ wss.on('connection', (ws, req) => {
 
   let streamSid = null;
   let callSid = null;
-  let hasGreeted = false;
 
-  // Per-call conversation state
-  const state = {
+  // Per-call state
+  const callState = {
     lastUserTranscript: '',
     isSpeaking: false,
-    lastAssistantReply: '',
+    callerNumber: null,
+    booking: null,
+    history: [],
   };
 
   // ---- Deepgram connection (STT) ----
@@ -141,57 +137,49 @@ wss.on('connection', (ws, req) => {
       console.log(`👤 Caller said: "${transcript}"`);
 
       // Avoid reacting twice to the same text
-      if (transcript === state.lastUserTranscript) return;
-      state.lastUserTranscript = transcript;
+      if (transcript === callState.lastUserTranscript) return;
+      callState.lastUserTranscript = transcript;
 
-      if (state.isSpeaking) {
+      if (callState.isSpeaking) {
         console.log('🤐 Ignoring because agent is currently speaking');
         return;
       }
 
-      // Get agent reply from OpenAI and speak it
-      const reply = await generateAssistantReply(transcript);
+      // Get agent reply from our "brain" (logic.js)
+      const { text: reply, shouldHangup } = await handleTurn({
+        userText: transcript,
+        callState,
+      });
       console.log(`🤖 Agent reply: "${reply}"`);
 
-      // If OpenAI keeps failing, avoid spamming the same fallback line
-      if (
-        reply === OPENAI_FALLBACK_TEXT &&
-        state.lastAssistantReply === OPENAI_FALLBACK_TEXT
-      ) {
-        console.log('⚠️ Repeated OpenAI fallback – sending shorter tech-issue message.');
-      }
-
-      state.isSpeaking = true;
-      state.lastAssistantReply = reply;
-
+      callState.isSpeaking = true;
       try {
         const audioBuffer = await synthesizeWithElevenLabs(reply);
         await sendAudioToTwilio(ws, streamSid, audioBuffer);
+
+        if (shouldHangup && twilioClient && callSid) {
+          console.log('☎️  Scheduling hangup for call', callSid);
+          // Small delay so last audio finishes playing before hangup
+          setTimeout(async () => {
+            try {
+              await twilioClient
+                .calls(callSid)
+                .update({ status: 'completed' });
+              console.log('☎️  Call hangup requested for', callSid);
+            } catch (err) {
+              console.error('Error hanging up call:', err);
+            }
+          }, 500);
+        }
       } catch (err) {
         console.error('Error during TTS or sendAudio:', err);
       } finally {
-        state.isSpeaking = false;
+        callState.isSpeaking = false;
       }
     } catch (err) {
       console.error('Error handling Deepgram message:', err);
     }
   });
-
-  // ---- helper: first-time greeting from ElevenLabs ----
-  async function playIntroGreeting() {
-    if (hasGreeted) return;
-    hasGreeted = true;
-
-    const introText =
-      "Hello! You've reached Gabriel, the AI assistant for MyBizPal.ai. How can I help you today?";
-    try {
-      console.log('📢 Playing intro greeting');
-      const audio = await synthesizeWithElevenLabs(introText);
-      await sendAudioToTwilio(ws, streamSid, audio);
-    } catch (err) {
-      console.error('Error sending intro greeting:', err);
-    }
-  }
 
   // ---- Twilio media messages ----
   ws.on('message', (msgBuf) => {
@@ -208,10 +196,9 @@ wss.on('connection', (ws, req) => {
     if (event === 'start') {
       streamSid = msg.start.streamSid;
       callSid = msg.start.callSid;
-      console.log('▶️  Twilio stream started', { streamSid, callSid });
-
-      // As soon as the stream starts, let the AI speak first
-      playIntroGreeting();
+      const caller = msg.start.customParameters?.caller || null;
+      callState.callerNumber = caller;
+      console.log('▶️  Twilio stream started', { streamSid, callSid, caller });
       return;
     }
 
@@ -255,44 +242,7 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// ---------- AI + TTS HELPERS ----------
-
-async function generateAssistantReply(userText) {
-  if (!OPENAI_API_KEY) {
-    console.warn('OPENAI_API_KEY missing, returning fallback text');
-    return "I'm having trouble accessing my brain right now, but normally I'd help you with MyBizPal and AI automations.";
-  }
-
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: userText },
-      ],
-      temperature: 0.5,
-      max_tokens: 200,
-    }),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    console.error('OpenAI error:', response.status, errText);
-    return OPENAI_FALLBACK_TEXT;
-  }
-
-  const json = await response.json();
-  const choice = json.choices?.[0]?.message?.content?.trim();
-  return (
-    choice ||
-    "I'm not sure, but I can connect you with a human from the MyBizPal team."
-  );
-}
+// ---------- ElevenLabs TTS ----------
 
 async function synthesizeWithElevenLabs(text) {
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
@@ -389,9 +339,7 @@ server.listen(PORT, () => {
   console.log(`==> MyBizPal voice server listening on port ${PORT}`);
   console.log(`==> Healthcheck: http://localhost:${PORT}/health`);
   const base = PUBLIC_BASE_URL || `http://localhost:${PORT}`;
-  console.log(
-    `==> Twilio WS endpoint: ${base.replace(/^http/, 'ws')}/media-stream`
-  );
+  console.log(`==> Twilio WS endpoint: ${base.replace(/^http/, 'ws')}/media-stream`);
   console.log('==> Your service is live 🎉');
   console.log('==> ///////////////////////////////////////////////////////////');
 });
