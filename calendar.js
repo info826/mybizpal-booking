@@ -51,15 +51,15 @@ export function formatSpokenDateTime(iso, timezone = TZ) {
 }
 
 /**
- * Find earliest available 30-min slot starting from a given moment.
- *
- * - startFromISO: if provided, search from there; otherwise from "now".
- * - daysAhead: how far ahead to look from the starting point.
- *
+ * Find earliest available 30-min slot within the next N days.
  * Simple algorithm:
- *  - list events from startFrom to startFrom+daysAhead
+ *  - list events from baseTime to baseTime+daysAhead
  *  - walk from "cursor" time forward, skipping over busy blocks
  *  - respect basic working hours (9–18 local)
+ *
+ *  startFromISO:
+ *   - if provided, earliest search cursor starts from that datetime
+ *   - otherwise starts from "now"
  */
 export async function findEarliestAvailableSlot({
   timezone = TZ,
@@ -69,10 +69,10 @@ export async function findEarliestAvailableSlot({
 }) {
   await ensureGoogleAuth();
 
-  const base = startFromISO ? new Date(startFromISO) : new Date();
-  const windowEnd = addDays(base, daysAhead);
+  const baseTime = startFromISO ? new Date(startFromISO) : new Date();
+  const windowEnd = addDays(baseTime, daysAhead);
 
-  const timeMin = base.toISOString();
+  const timeMin = baseTime.toISOString();
   const timeMax = windowEnd.toISOString();
 
   const res = await calendar.events.list({
@@ -88,8 +88,8 @@ export async function findEarliestAvailableSlot({
     (ev) => ev.start?.dateTime && ev.end?.dateTime
   );
 
-  // Start cursor: base rounded up to next 5 minutes
-  let cursor = new Date(base.getTime());
+  // Start cursor: baseTime rounded up to next 5 minutes
+  let cursor = new Date(baseTime.getTime());
   cursor.setSeconds(0, 0);
   const extraMins = cursor.getMinutes() % 5;
   if (extraMins !== 0) {
