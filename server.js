@@ -35,7 +35,7 @@ let twilioClient = null;
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 } else {
-  console.warn('⚠️  TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN missing — hang-up via API disabled.');
+  console.warn('⚠️ TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN missing — hang-up via API disabled.');
 }
 
 // ---------- EXPRESS APP ----------
@@ -97,6 +97,7 @@ wss.on('connection', (ws, req) => {
     callerNumber: null,
     callSid: null,
     history: [],
+    greeted: false,
   };
 
   // ---- Deepgram connection (STT) ----
@@ -121,7 +122,40 @@ wss.on('connection', (ws, req) => {
     console.error('Deepgram WS error', err);
   });
 
-  // Helper: respond with GPT+ElevenLabs + maybe hang up
+  // ---- HELPER: initial greeting (Gabriel speaks first) ----
+  async function sendInitialGreeting() {
+    if (callState.greeted) return;
+    if (!streamSid) return; // need streamSid set first
+
+    callState.greeted = true;
+
+    try {
+      const { text: reply } = await handleTurn({
+        userText:
+          'The caller has just joined the call. Please briefly introduce yourself as Gabriel from MyBizPal and ask how you can help them today.',
+        callState,
+      });
+
+      console.log('🤖 Gabriel (greeting):', `"${reply}"`);
+
+      callState.isSpeaking = true;
+      callState.cancelSpeaking = false;
+
+      try {
+        const audioBuffer = await synthesizeWithElevenLabs(reply);
+        await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
+      } catch (err) {
+        console.error('Error during greeting TTS or sendAudio:', err);
+      } finally {
+        callState.isSpeaking = false;
+        callState.cancelSpeaking = false;
+      }
+    } catch (err) {
+      console.error('Error in sendInitialGreeting:', err);
+    }
+  }
+
+  // ---- HELPER: normal replies after user speaks ----
   async function respondToUser(transcript) {
     if (!transcript) return;
 
@@ -162,8 +196,7 @@ wss.on('connection', (ws, req) => {
             console.log('📞 Call ended by Gabriel (hangupRequested=true)');
           } catch (e) {
             console.error('Error ending call via Twilio API:', e?.message || e);
-            // Fallback: close WS, Twilio will eventually hang up.
-            ws.close();
+            ws.close(); // fallback
           }
         } else {
           ws.close();
@@ -191,9 +224,7 @@ wss.on('connection', (ws, req) => {
       if (callState.isSpeaking) {
         console.log('🚫 Barge-in detected – cancelling current TTS');
         callState.cancelSpeaking = true;
-        // We ignore THIS transcript; the caller will usually repeat
-        // or keep talking, and once TTS has stopped the next transcript
-        // will be handled normally.
+        // Ignore THIS transcript; next utterance after TTS stops will be handled.
         return;
       }
 
@@ -222,6 +253,15 @@ wss.on('connection', (ws, req) => {
         streamSid,
         callSid: callState.callSid,
       });
+
+      // As soon as the stream starts, Gabriel greets first.
+      // Small delay just to be safe that everything is ready.
+      setTimeout(() => {
+        sendInitialGreeting().catch((e) =>
+          console.error('Greeting error (outer):', e)
+        );
+      }, 300);
+
       return;
     }
 
@@ -325,7 +365,8 @@ function sendAudioToTwilio(ws, streamSid, audioBuffer, callState) {
     }
 
     const chunkSize = 160; // 20ms of 8kHz μ-law
-    const usableLength = audioBuffer.length - (audioBuffer.length % chunkSize); // drop trailing partial frame
+    const usableLength =
+      audioBuffer.length - (audioBuffer.length % chunkSize); // drop trailing partial frame
     let offset = 0;
 
     const sendChunk = () => {
