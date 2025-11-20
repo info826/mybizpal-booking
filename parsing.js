@@ -20,19 +20,33 @@ export function extractName(text) {
 
 export function parseUkPhone(spoken) {
   if (!spoken) return null;
+
+  // Normalise speechy stuff into digits
   let s = ` ${spoken.toLowerCase()} `;
-  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, '');
-  s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
+
+  // Remove filler sounds
+  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/gi, '');
+
+  // Map "oh / o / zero / naught" to 0
+  s = s.replace(/\b(oh|o|zero|naught)\b/gi, '0');
+
+  // Map number words to digits
   s = s
-    .replace(/\bone\b/g, '1')
-    .replace(/\btwo\b/g, '2')
-    .replace(/\bthree\b/g, '3')
-    .replace(/\bfour\b/g, '4')
-    .replace(/\bfive\b/g, '5')
-    .replace(/\bsix\b/g, '6')
-    .replace(/\bseven\b/g, '7')
-    .replace(/\beight\b/g, '8')
-    .replace(/\bnine\b/g, '9');
+    .replace(/\bone\b/gi, '1')
+    .replace(/\btwo\b/gi, '2')
+    .replace(/\bthree\b/gi, '3')
+    .replace(/\bfour\b/gi, '4')
+    .replace(/\bfive\b/gi, '5')
+    .replace(/\bsix\b/gi, '6')
+    .replace(/\bseven\b/gi, '7')
+    .replace(/\beight\b/gi, '8')
+    .replace(/\bnine\b/gi, '9');
+
+  // Basic handling of "double three", "triple five" etc
+  s = s.replace(/\bdouble\s+(\d)\b/gi, '$1$1');
+  s = s.replace(/\btriple\s+(\d)\b/gi, '$1$1$1');
+
+  // Strip everything except digits and +
   s = s.replace(/[^\d+]/g, '');
 
   if (s.startsWith('+44')) {
@@ -46,6 +60,7 @@ export function parseUkPhone(spoken) {
   } else if (/^\d{10}$/.test(s)) {
     return { e164: `+44${s}`, national: `0${s}` };
   }
+
   return null;
 }
 
@@ -56,18 +71,22 @@ export function isLikelyUkNumberPair(p) {
 export function extractEmail(spoken) {
   if (!spoken) return null;
   let s = ` ${spoken.toLowerCase()} `;
+
   s = s
-    .replace(/\bat(-|\s)?sign\b/g, '@')
-    .replace(/\bat symbol\b/g, '@')
-    .replace(/\barroba\b/g, '@')
-    .replace(/\bat\b/g, '@');
+    .replace(/\bat(-|\s)?sign\b/gi, '@')
+    .replace(/\bat symbol\b/gi, '@')
+    .replace(/\barroba\b/gi, '@')
+    .replace(/\bat\b/gi, '@');
+
   s = s
-    .replace(/\bdot\b/g, '.')
-    .replace(/\bpunto\b/g, '.')
-    .replace(/\bponto\b/g, '.')
-    .replace(/\bpoint\b/g, '.');
+    .replace(/\bdot\b/gi, '.')
+    .replace(/\bpunto\b/gi, '.')
+    .replace(/\bponto\b/gi, '.')
+    .replace(/\bpoint\b/gi, '.');
+
   s = s.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
   s = s.replace(/\s+/g, ' ').trim();
+
   const m = s.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
   return m ? m[0] : null;
 }
