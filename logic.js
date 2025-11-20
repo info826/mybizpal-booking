@@ -18,10 +18,10 @@ function ensureHistory(callState) {
   return callState.history;
 }
 
+// Detect when caller is clearly done so we can hang up politely
 function userWantsToEnd(text) {
   const t = (text || '').toLowerCase();
 
-  // phrases that usually mean "I'm done / bye"
   if (
     /\b(thank you|thanks a lot|thanks so much|cheers mate|cheers)\b/.test(t) &&
     /\b(no|nothing|that'?s all|that is all|i'?m good|im good|i'?m fine|im fine|i'?m ok|im ok)\b/.test(
@@ -82,7 +82,7 @@ Current booking context:
 
   return `
 You are "Gabriel", the voice for MyBizPal – a warm, relaxed, very friendly British human on the phone.
-You do NOT call yourself an AI or assistant. You just sound like a helpful, confident person from MyBizPal.
+You do NOT call yourself an AI or an assistant. You just sound like a helpful, confident person from MyBizPal.
 
 Background (for flavour only, don't overuse it):
 - Born in Venezuela, Portuguese family.
@@ -130,7 +130,7 @@ IMPORTANT LATENCY RULES
 - Always move towards a concrete time for a Zoom/phone call when appropriate.
 
 TECH / "SECRET SAUCE"
-If they ask how the AI / tech works, say something like:
+If they ask how the tech works, say something like:
 "That’s part of our secret sauce at MyBizPal – happy to show you what it can do for your business."
 
 READING NUMBERS & EMAILS
@@ -192,7 +192,7 @@ export async function handleTurn({ userText, callState }) {
   const completion = await openai.chat.completions.create({
     model: 'gpt-5.1',
     temperature: 0.42,
-    max_tokens: 160,
+    max_completion_tokens: 160, // <— IMPORTANT: new param name
     messages,
   });
 
