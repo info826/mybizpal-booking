@@ -23,7 +23,7 @@ const {
 
 if (!TWILIO_AUTH_TOKEN || !TWILIO_ACCOUNT_SID || !PUBLIC_BASE_URL) {
   console.error(
-    'Missing required env vars. Check TWILIO_AUTH_TOKEN, TWILIO_ACCOUNT_SID, PUBLIC_BASE_URL'
+    'Missing required env vars. Check TWILIO_AUTH_TOKEN, TWILIO_ACCOUNT_SID, PUBLIC_BASE_URL',
   );
   process.exit(1);
 }
@@ -43,43 +43,33 @@ app.use(bodyParser.json());
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// Helper: build ws URL from PUBLIC_BASE_URL
-function buildWsUrl() {
-  const base = (PUBLIC_BASE_URL || '').replace(/\/$/, '');
-  const wsBase = base.replace(/^http/, 'ws'); // http→ws, https→wss
-  return `${wsBase}/media-stream`;
-}
-
 // ───────────────────────────────────────────────────────────
-//  Health
+//  Health check – use this for keep-alive pings
 // ───────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.status(200).json({ ok: true, time: new Date().toISOString() });
 });
 
 // ───────────────────────────────────────────────────────────
-//  Twilio entrypoint – REALTIME
+//  Twilio entrypoint – keep this EXTREMELY light
 // ───────────────────────────────────────────────────────────
 app.post('/twilio/voice', (req, res) => {
   const twiml = new VoiceResponse();
 
-  const wsUrl = buildWsUrl();
-  console.log('📡 Twilio streaming to:', wsUrl);
-
+  // Start media stream FIRST so Twilio connects WebSocket immediately
   const start = twiml.start();
-  start.stream({ url: wsUrl });
+  start.stream({
+    url: `${PUBLIC_BASE_URL.replace(/\/$/, '')}/media-stream`,
+  });
 
-  // 👇 This is the audible greeting so the caller hears *something* immediately
+  // Short greeting – this is the "human" voice that plays BEFORE the AI kicks in.
   twiml.say(
     {
       voice: 'alice',
       language: 'en-GB',
     },
-    "Hi, you’re speaking with Gabriel at MyBizPal. One moment while I get set up."
+    "Hi, you're speaking with Gabriel from MyBizPal. One moment while I get set up.",
   );
-
-  // Keep the call open while the WebSocket media stream runs
-  twiml.pause({ length: 600 });
 
   res.type('text/xml');
   res.send(twiml.toString());
@@ -89,19 +79,27 @@ app.post('/twilio/voice', (req, res) => {
 //  HTTP server + WebSocket server
 // ───────────────────────────────────────────────────────────
 const server = http.createServer(app);
+
+// Twilio will connect here as a media stream
 const wss = new WebSocketServer({ noServer: true });
 
+// Map callSid -> per-call state
 const calls = new Map();
 
+/**
+ * Helper: safe send via WS (Twilio side)
+ */
 function wsSend(ws, obj) {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(obj));
   }
 }
 
+// Handle upgrade for WebSocket endpoint
 server.on('upgrade', (request, socket, head) => {
-  const url = request.url || '';
-  if (url.startsWith('/media-stream')) {
+  const { url } = request;
+
+  if (url === '/media-stream') {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
     });
@@ -111,19 +109,23 @@ server.on('upgrade', (request, socket, head) => {
 });
 
 // ───────────────────────────────────────────────────────────
-//  WebSocket connection for one call
+//  WebSocket connection for a single call
 // ───────────────────────────────────────────────────────────
 wss.on('connection', (ws) => {
   let callSid = null;
 
+  // Per-call state – kept minimal for speed
   const state = {
     lastUserText: '',
     partialUserText: '',
-    isTalking: false,
-    lastBotUtteranceId: 0,
+    isTalking: false, // Is bot currently speaking
+    lastBotUtteranceId: 0, // For cancelling TTS on barge-in
+
+    // STT / TTS streams
     deepgramWs: null,
     ttsWs: null,
     sttReady: false,
+    sttDisabled: false, // set to true if Deepgram 429s
   };
 
   ws.on('message', async (message) => {
@@ -137,7 +139,7 @@ wss.on('connection', (ws) => {
 
     switch (data.event) {
       case 'connected':
-        console.log('🔌 Twilio WS connected');
+        console.log('🔌 Twilio media socket connected');
         break;
 
       case 'start':
@@ -145,60 +147,69 @@ wss.on('connection', (ws) => {
         calls.set(callSid, { ws, state });
         console.log('🔗 Media stream started for call', callSid);
 
-        // Initial greeting from Gabriel
-        speakToCaller(
-          "Hi, you’re speaking with Gabriel at MyBizPal. How can I help you today?",
-          state
-        ).catch((err) => console.error('Initial greeting error', err));
+        // Create Deepgram stream ONCE per call
+        ensureDeepgram(state);
         break;
 
       case 'media':
+        // base64-encoded audio chunks (8kHz μ-law) from Twilio.
         handleIncomingAudio(data.media, state).catch((err) =>
-          console.error('handleIncomingAudio error', err)
+          console.error('handleIncomingAudio error', err),
         );
         break;
 
       case 'stop':
         console.log('⛔ Media stream stopped for call', callSid);
-        if (callSid && calls.has(callSid)) {
-          calls.delete(callSid);
-        }
-        try {
-          if (state.deepgramWs) state.deepgramWs.close();
-        } catch (e) {}
-        try {
-          if (state.ttsWs) state.ttsWs.close();
-        } catch (e) {}
-        ws.close();
+        cleanupCall(callSid, state, ws);
         break;
     }
   });
 
   ws.on('close', () => {
-    console.log('🧹 WS closed');
-    if (callSid && calls.has(callSid)) {
-      calls.delete(callSid);
+    console.log('🧹 Twilio WS closed');
+    if (callSid) {
+      cleanupCall(callSid, state, ws);
     }
-    try {
-      if (state.deepgramWs) state.deepgramWs.close();
-    } catch (e) {}
-    try {
-      if (state.ttsWs) state.ttsWs.close();
-    } catch (e) {}
   });
 
   ws.on('error', (err) => {
-    console.error('WebSocket error (Twilio <-> server)', err);
+    console.error('WebSocket error (Twilio side)', err);
   });
 });
 
+// Centralised cleanup
+function cleanupCall(callSid, state, ws) {
+  if (callSid && calls.has(callSid)) {
+    calls.delete(callSid);
+  }
+  try {
+    if (state.deepgramWs) state.deepgramWs.close();
+  } catch (e) {}
+  try {
+    if (state.ttsWs) state.ttsWs.close();
+  } catch (e) {}
+  try {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  } catch (e) {}
+}
+
 // ───────────────────────────────────────────────────────────
-//  STT (Deepgram) + Conversation
+//  STT + Conversation handling
 // ───────────────────────────────────────────────────────────
+
+/**
+ * Ensure we have a live Deepgram WebSocket for this call.
+ * Twilio sends 8kHz μ-law, so we set encoding/sample_rate to match.
+ * We call this once on "start" and then re-use the socket.
+ */
 function ensureDeepgram(state) {
   if (!DEEPGRAM_API_KEY) return null;
+  if (state.sttDisabled) return null;
 
   if (state.deepgramWs && state.deepgramWs.readyState === WebSocket.OPEN) {
+    return state.deepgramWs;
+  }
+  if (state.deepgramWs && state.deepgramWs.readyState === WebSocket.CONNECTING) {
     return state.deepgramWs;
   }
 
@@ -213,9 +224,12 @@ function ensureDeepgram(state) {
 
   const url = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
 
+  console.log('🎧 Opening Deepgram stream…');
+
   const dgWs = new WebSocket(url, {
-    headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` },
-    protocol: `token, ${DEEPGRAM_API_KEY}`,
+    headers: {
+      Authorization: `Token ${DEEPGRAM_API_KEY}`,
+    },
   });
 
   dgWs.on('open', () => {
@@ -224,8 +238,12 @@ function ensureDeepgram(state) {
   });
 
   dgWs.on('message', (msg) => {
+    if (state.sttDisabled) return;
+
     try {
       const dgData = JSON.parse(msg.toString('utf8'));
+
+      // We care about transcription Results
       if (dgData.type === 'Results' && dgData.channel?.alternatives?.length) {
         const alt = dgData.channel.alternatives[0];
         const transcript = (alt.transcript || '').trim();
@@ -239,7 +257,7 @@ function ensureDeepgram(state) {
           state.partialUserText = '';
           console.log('👂 Final user text:', transcript);
           handleUserText(transcript, state).catch((err) =>
-            console.error('handleUserText error', err)
+            console.error('handleUserText error', err),
           );
         }
       }
@@ -250,7 +268,15 @@ function ensureDeepgram(state) {
 
   dgWs.on('error', (err) => {
     console.error('Deepgram WS error', err);
-    state.sttReady = false;
+
+    // If the error is a 429, disable STT for this call to avoid hammering their API.
+    if (String(err?.message || '').includes('429')) {
+      console.error(
+        '🚫 Deepgram is returning HTTP 429 (rate limited / blocked). Disabling STT for this call.',
+      );
+      state.sttDisabled = true;
+      state.sttReady = false;
+    }
   });
 
   dgWs.on('close', () => {
@@ -263,7 +289,16 @@ function ensureDeepgram(state) {
   return dgWs;
 }
 
+/**
+ * Called with audio frames from Twilio.
+ *  - We forward μ-law audio frames to Deepgram over WS
+ */
 async function handleIncomingAudio(media, state) {
+  if (state.sttDisabled) {
+    // We intentionally do nothing if Deepgram has 429’d this call.
+    return;
+  }
+
   const payload = media?.payload;
   if (!payload) return;
 
@@ -272,17 +307,21 @@ async function handleIncomingAudio(media, state) {
 
   const audioBuffer = Buffer.from(payload, 'base64');
 
-  if (dgWs.readyState === WebSocket.OPEN) {
-    dgWs.send(audioBuffer);
-  } else if (dgWs.readyState === WebSocket.CONNECTING) {
+  if (dgWs.readyState === WebSocket.OPEN || dgWs.readyState === WebSocket.CONNECTING) {
     dgWs.send(audioBuffer);
   }
 }
 
+/**
+ * Called once STT has produced a final transcription for the user utterance.
+ *  - stop any ongoing TTS (barge-in)
+ *  - pass text to LLM logic
+ *  - stream TTS back to Twilio
+ */
 async function handleUserText(text, state) {
   if (!text || !text.trim()) return;
 
-  // Barge-in: stop any ongoing TTS
+  // Barge-in: stop current TTS stream, if any
   state.isTalking = false;
   if (state.ttsWs && state.ttsWs.readyState === WebSocket.OPEN) {
     try {
@@ -304,8 +343,9 @@ async function handleUserText(text, state) {
 }
 
 // ───────────────────────────────────────────────────────────
-//  TTS: ElevenLabs → Twilio
+//  TTS: ElevenLabs WebSocket → Twilio media stream
 // ───────────────────────────────────────────────────────────
+
 async function speakToCaller(text, state) {
   if (!text) return;
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
@@ -317,28 +357,17 @@ async function speakToCaller(text, state) {
   state.lastBotUtteranceId += 1;
   const utteranceId = state.lastBotUtteranceId;
 
+  // Get the Twilio WS for this call from `calls` map
   const entry = [...calls.values()].find((e) => e.state === state);
-  if (!entry) {
-    console.warn('No WS entry found for state, cannot send audio');
-    return;
-  }
+  if (!entry) return;
   const { ws } = entry;
 
   const uri = `wss://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream-input?model_id=${ELEVEN_MODEL}&output_format=ulaw_8000`;
 
-  // ✅ IMPORTANT: send API key as header so ElevenLabs accepts the connection
-  const ttsWs = new WebSocket(uri, {
-    headers: {
-      'xi-api-key': ELEVENLABS_API_KEY,
-    },
-  });
-
+  const ttsWs = new WebSocket(uri);
   state.ttsWs = ttsWs;
 
   ttsWs.on('open', () => {
-    console.log('🔊 ElevenLabs WS opened');
-
-    // initial settings
     const initMsg = {
       text: ' ', // keep connection alive
       voice_settings: {
@@ -349,25 +378,35 @@ async function speakToCaller(text, state) {
       generation_config: {
         chunk_length_schedule: [50, 120, 200],
       },
+      xi_api_key: ELEVENLABS_API_KEY,
     };
     ttsWs.send(JSON.stringify(initMsg));
 
-    // actual text
-    ttsWs.send(JSON.stringify({ text, flush: true }));
+    ttsWs.send(
+      JSON.stringify({
+        text,
+        flush: true,
+      }),
+    );
+
     ttsWs.send(JSON.stringify({ text: '' }));
   });
 
   ttsWs.on('message', (msg) => {
-    if (!state.isTalking || utteranceId !== state.lastBotUtteranceId) return;
+    if (!state.isTalking || utteranceId !== state.lastBotUtteranceId) {
+      return;
+    }
 
     try {
       const data = JSON.parse(msg.toString('utf8'));
+
       if (data.audio) {
         wsSend(ws, {
           event: 'media',
           media: { payload: data.audio },
         });
       }
+
       if (data.isFinal) {
         state.isTalking = false;
       }
@@ -377,14 +416,17 @@ async function speakToCaller(text, state) {
   });
 
   ttsWs.on('close', () => {
-    console.log('🔕 ElevenLabs WS closed');
-    if (state.ttsWs === ttsWs) state.ttsWs = null;
+    if (state.ttsWs === ttsWs) {
+      state.ttsWs = null;
+    }
     state.isTalking = false;
   });
 
   ttsWs.on('error', (err) => {
     console.error('ElevenLabs WS error', err);
-    if (state.ttsWs === ttsWs) state.ttsWs = null;
+    if (state.ttsWs === ttsWs) {
+      state.ttsWs = null;
+    }
     state.isTalking = false;
   });
 }
