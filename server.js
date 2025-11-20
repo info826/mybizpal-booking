@@ -53,23 +53,22 @@ app.get('/health', (_req, res) => {
 // ───────────────────────────────────────────────────────────
 //  Twilio entrypoint – REALTIME, NO TWILIO VOICE GREETING
 // ───────────────────────────────────────────────────────────
+
 app.post('/twilio/voice', (req, res) => {
   const twiml = new VoiceResponse();
 
-  // PUBLIC_BASE_URL should be like: https://mybizpal-booking.onrender.com
+  // Clean base URL
   const base = PUBLIC_BASE_URL.replace(/\/$/, '');
 
-  // Convert https://... -> wss://... for WebSocket streaming
+  // Convert https:// → wss://
   const wsUrl = base.replace(/^http/, 'ws') + '/media-stream';
 
-  console.log('👉 Twilio will stream media to', wsUrl);
+  console.log('📡 Twilio streaming to:', wsUrl);
 
   const start = twiml.start();
-  start.stream({
-    url: wsUrl,
-  });
+  start.stream({ url: wsUrl });
 
-  // No <Say> here – Gabriel (ElevenLabs) will greet on "start" event
+  // No text-to-speech here — Gabriel will greet on 'start'
   res.type('text/xml');
   res.send(twiml.toString());
 });
