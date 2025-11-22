@@ -9,11 +9,16 @@ const DEFAULT_TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 export function extractName(text) {
   if (!text) return null;
   const t = text.trim();
+
+  // "I'm Gabriel", "my name is Raquel", "this is John"
   let m = t.match(
     /\b(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z '-]{1,30})\b/i
   );
-  if (m) return m[1].trim().replace(/\s+/g, ' ').split(' ')[0];
+  if (m) {
+    return m[1].trim().replace(/\s+/g, ' ').split(' ')[0];
+  }
 
+  // Fallback: first reasonable-looking word
   m = t.match(/\b([A-Za-z][A-Za-z'-]{1,30})\b/);
   return m ? m[1] : null;
 }
@@ -21,34 +26,32 @@ export function extractName(text) {
 export function parseUkPhone(spoken) {
   if (!spoken) return null;
 
-  // Normalise speechy stuff into digits
   let s = ` ${spoken.toLowerCase()} `;
 
-  // Remove filler sounds
-  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/gi, '');
+  // Strip filler sounds
+  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, '');
 
-  // Map "oh / o / zero / naught" to 0
-  s = s.replace(/\b(oh|o|zero|naught)\b/gi, '0');
+  // Handle "plus forty four"
+  s = s.replace(/\bplus\s*four\s*four\b/g, '+44');
+  s = s.replace(/\bplus\b/g, '+');
 
-  // Map number words to digits
+  // Map words → digits
+  s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
   s = s
-    .replace(/\bone\b/gi, '1')
-    .replace(/\btwo\b/gi, '2')
-    .replace(/\bthree\b/gi, '3')
-    .replace(/\bfour\b/gi, '4')
-    .replace(/\bfive\b/gi, '5')
-    .replace(/\bsix\b/gi, '6')
-    .replace(/\bseven\b/gi, '7')
-    .replace(/\beight\b/gi, '8')
-    .replace(/\bnine\b/gi, '9');
+    .replace(/\bone\b/g, '1')
+    .replace(/\btwo\b/g, '2')
+    .replace(/\bthree\b/g, '3')
+    .replace(/\bfour\b/g, '4')
+    .replace(/\bfive\b/g, '5')
+    .replace(/\bsix\b/g, '6')
+    .replace(/\bseven\b/g, '7')
+    .replace(/\beight\b/g, '8')
+    .replace(/\bnine\b/g, '9');
 
-  // Basic handling of "double three", "triple five" etc
-  s = s.replace(/\bdouble\s+(\d)\b/gi, '$1$1');
-  s = s.replace(/\btriple\s+(\d)\b/gi, '$1$1$1');
-
-  // Strip everything except digits and +
+  // Keep only digits and +
   s = s.replace(/[^\d+]/g, '');
 
+  // Normalise to E.164 +44…
   if (s.startsWith('+44')) {
     const rest = s.slice(3);
     if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
@@ -58,9 +61,11 @@ export function parseUkPhone(spoken) {
   } else if (s.startsWith('0') && /^\d{11}$/.test(s)) {
     return { e164: `+44${s.slice(1)}`, national: s };
   } else if (/^\d{10}$/.test(s)) {
+    // No leading 0 but 10 digits → assume UK, add 0
     return { e164: `+44${s}`, national: `0${s}` };
   }
 
+  // If it doesn't look like a UK mobile/landline, return null
   return null;
 }
 
@@ -70,31 +75,42 @@ export function isLikelyUkNumberPair(p) {
 
 export function extractEmail(spoken) {
   if (!spoken) return null;
+
   let s = ` ${spoken.toLowerCase()} `;
 
+  // Map how people say "@"
   s = s
-    .replace(/\bat(-|\s)?sign\b/gi, '@')
-    .replace(/\bat symbol\b/gi, '@')
-    .replace(/\barroba\b/gi, '@')
-    .replace(/\bat\b/gi, '@');
+    .replace(/\bat(-|\s)?sign\b/g, '@')
+    .replace(/\bat symbol\b/g, '@')
+    .replace(/\barroba\b/g, '@')
+    .replace(/\bat\b/g, '@');
 
+  // Map how people say "."
   s = s
-    .replace(/\bdot\b/gi, '.')
-    .replace(/\bpunto\b/gi, '.')
-    .replace(/\bponto\b/gi, '.')
-    .replace(/\bpoint\b/gi, '.');
+    .replace(/\bdot\b/g, '.')
+    .replace(/\bpunto\b/g, '.')
+    .replace(/\bponto\b/g, '.')
+    .replace(/\bpoint\b/g, '.');
 
+  // Normalise spaces around @ and .
   s = s.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
-  s = s.replace(/\s+/g, ' ').trim();
 
+  // VERY IMPORTANT:
+  // Remove ALL remaining spaces so "4 2 2 7 4 3 5 j w at gmail dot com"
+  // becomes "4227435jw@gmail.com"
+  s = s.replace(/\s+/g, '');
+
+  // Now extract classic email pattern
   const m = s.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
   return m ? m[0] : null;
 }
 
 export function parseNaturalDate(utterance, tz = DEFAULT_TZ) {
   if (!utterance) return null;
+
   const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
   if (!parsed) return null;
+
   const zoned = toZonedTime(parsed, tz);
   const iso = fromZonedTime(zoned, tz).toISOString();
   const spoken = formatSpokenDateTime(iso, tz);
