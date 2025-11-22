@@ -1,11 +1,16 @@
 // logic.js
-// Gabriel brain: GPT-5.1 + booking orchestration
+// Gabriel brain: GPT-5.1 + booking orchestration + careful phone/email capture
 
 import OpenAI from 'openai';
 import {
   updateBookingStateFromUtterance,
   handleSystemActionsFirst,
 } from './booking.js';
+import {
+  parseUkPhone,
+  isLikelyUkNumberPair,
+  extractEmail,
+} from './parsing.js';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -16,34 +21,6 @@ const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 function ensureHistory(callState) {
   if (!callState.history) callState.history = [];
   return callState.history;
-}
-
-// Detect when caller is clearly done so we can hang up politely
-function userWantsToEnd(text) {
-  const t = (text || '').toLowerCase();
-
-  if (
-    /\b(thank you|thanks a lot|thanks so much|cheers mate|cheers)\b/.test(t) &&
-    /\b(no|nothing|that'?s all|that is all|i'?m good|im good|i'?m fine|im fine|i'?m ok|im ok)\b/.test(
-      t
-    )
-  ) {
-    return true;
-  }
-
-  if (
-    /\b(that'?s all|that is all|nothing else|i'?m good|im good|i'?m fine|im fine|i'?m ok|im ok|no that'?s fine|no thats fine)\b/.test(
-      t
-    )
-  ) {
-    return true;
-  }
-
-  if (/\b(bye|goodbye|speak soon|talk to you later)\b/.test(t)) {
-    return true;
-  }
-
-  return false;
 }
 
 function buildSystemPrompt(callState) {
@@ -101,7 +78,7 @@ EARLY NAME CAPTURE (VERY IMPORTANT)
 - Ask for the caller’s name early — ideally within the first 1–2 turns.
 - ONLY ask for their name if the context shows the name is unknown.
 - If you already know their name in this call, NEVER ask for it again — just keep using it naturally.
-- If the system context ever provides a saved name for this caller (for example from their number), greet them by name without asking again.
+- If the system context ever provides a saved name for this caller, greet them by name without asking again.
 - Use a natural, human phrasing:
   - “By the way, what’s your name?”
   - “Before I dive in — who am I speaking with?”
@@ -119,7 +96,6 @@ CALLER LOCATION & SMALL TALK
   - “By the way, where are you calling from today?”
 - If they share a city/region/country, you can make ONE short friendly comment:
   - A light remark about the place, the weather, or time of day.
-  - Example: “Nice — I hear the weather’s been interesting there lately.” (keep it generic unless you’re sure).
 - You may ask one small-talk question if it feels natural:
   - “Got any plans for later today?” or “Busy day ahead?”
 - You may also mention your own ‘plans’ in a light, humorous way:
@@ -155,16 +131,17 @@ ${bookingSummary}
 CONTACT DETAILS (EXTREMELY IMPORTANT)
 - When asking for a phone number:
   - Say: “Can you give me your mobile, digit by digit please?”
-  - Allow them to finish completely before replying.
+  - Let them speak the ENTIRE number before you reply.
   - Understand “O” as zero.
-  - Repeat the full number back clearly.
-  - If it doesn’t sound like a full valid number, politely ask them to repeat or confirm.
+  - Only read it back once it sounds like a full UK number.
+  - Repeat the full number back clearly once, then move on if they confirm.
 
 - When asking for an email:
-  - Say: “Can I grab your best email, slowly?”
-  - DO NOT interrupt.
+  - Say: “Can I grab your best email, slowly, all in one go?”
+  - Let them finish the whole thing before replying.
   - Read it back using “at” and “dot”.
   - Confirm correctness before continuing.
+  - Do NOT keep asking again and again if the system already shows a valid email.
 
 HUMOUR & CHUCKLES
 - Use quick, light humour when appropriate:
@@ -197,62 +174,127 @@ and amazes callers with how human he sounds.
 
 export async function handleTurn({ userText, callState }) {
   const history = ensureHistory(callState);
-  const text = (userText || '').trim();
 
-  // 1) System-level booking actions first (e.g. user says "yes" to a suggested time)
+  // Ensure capture state for phone/email
+  if (!callState.capture) {
+    callState.capture = { mode: 'none', buffer: '' };
+  }
+  const capture = callState.capture;
+
+  // 1) If we are currently capturing phone digits, handle that WITHOUT GPT
+  if (capture.mode === 'phone') {
+    capture.buffer = (capture.buffer + ' ' + (userText || '')).trim();
+
+    const pair = parseUkPhone(capture.buffer);
+    if (pair && isLikelyUkNumberPair(pair)) {
+      if (!callState.booking) callState.booking = {};
+      callState.booking.phone = pair.e164;
+
+      const replyText = `Perfect, I’ve got ${pair.national}. Does that look right?`;
+
+      capture.mode = 'none';
+      capture.buffer = '';
+
+      history.push({ role: 'user', content: userText });
+      history.push({ role: 'assistant', content: replyText });
+      return { text: replyText };
+    }
+
+    // Not a valid full number yet – stay quiet and keep listening
+    history.push({ role: 'user', content: userText });
+    return { text: '' };
+  }
+
+  // 2) If we are currently capturing email, handle that WITHOUT GPT
+  if (capture.mode === 'email') {
+    capture.buffer = (capture.buffer + ' ' + (userText || '')).trim();
+
+    const email = extractEmail(capture.buffer);
+    if (email) {
+      if (!callState.booking) callState.booking = {};
+      callState.booking.email = email;
+
+      const replyText = `Brilliant, I’ve got ${email}. Does that look correct?`;
+
+      capture.mode = 'none';
+      capture.buffer = '';
+
+      history.push({ role: 'user', content: userText });
+      history.push({ role: 'assistant', content: replyText });
+      return { text: replyText };
+    }
+
+    // Still not a full email – stay quiet and keep listening
+    history.push({ role: 'user', content: userText });
+    return { text: '' };
+  }
+
+  // 3) System-level booking actions first (yes/no on suggested time, etc.)
   const systemAction = await handleSystemActionsFirst({
-    userText: text,
+    userText,
     callState,
   });
 
   if (systemAction && systemAction.intercept && systemAction.replyText) {
-    history.push({ role: 'user', content: text });
+    history.push({ role: 'user', content: userText });
     history.push({ role: 'assistant', content: systemAction.replyText });
-
-    const shouldEnd = userWantsToEnd(text);
-    return { text: systemAction.replyText, shouldEnd };
+    return { text: systemAction.replyText };
   }
 
-  // 2) Update booking state from the latest utterance (name/phone/email/time/earliest)
+  // 4) Update booking state with latest utterance (name/phone/email/time/earliest)
   await updateBookingStateFromUtterance({
-    userText: text,
+    userText,
     callState,
     timezone: TZ,
   });
 
-  // 3) Build GPT-5.1 prompt
+  // 5) Build GPT-5.1 prompt
   const systemPrompt = buildSystemPrompt(callState);
 
   const messages = [{ role: 'system', content: systemPrompt }];
 
-  // Keep a short rolling history (last 6 exchanges = 12 messages)
+  // Keep a short rolling history (last 6 exchanges)
   const recent = history.slice(-12);
   for (const msg of recent) {
     messages.push({ role: msg.role, content: msg.content });
   }
 
-  messages.push({ role: 'user', content: text });
+  messages.push({ role: 'user', content: userText });
 
   const completion = await openai.chat.completions.create({
     model: 'gpt-5.1',
+    reasoning_effort: 'none',
     temperature: 0.42,
-    max_completion_tokens: 160, // <— IMPORTANT: new param name
+    max_completion_tokens: 160,
     messages,
   });
 
-  let botText =
+  const botText =
     completion.choices?.[0]?.message?.content?.trim() ||
     'Got it — how can I help?';
 
-  history.push({ role: 'user', content: text });
+  history.push({ role: 'user', content: userText });
   history.push({ role: 'assistant', content: botText });
 
-  const shouldEnd = userWantsToEnd(text);
+  // 6) Detect if Gabriel just asked for phone or email → enable capture mode
+  const lower = botText.toLowerCase();
 
-  // If caller is clearly ending and the model forgot to close politely, add a short goodbye.
-  if (shouldEnd && !/bye|goodbye|speak soon|talk to you later/i.test(botText)) {
-    botText += " No worries at all — I’ll let you go. Speak soon, take care.";
+  if (
+    /(mobile|phone number|your number|best number|contact number|cell number)/.test(
+      lower
+    )
+  ) {
+    capture.mode = 'phone';
+    capture.buffer = '';
+  } else if (/(email|e-mail|e mail)/.test(lower)) {
+    capture.mode = 'email';
+    capture.buffer = '';
+  } else {
+    // No special capture request
+    capture.mode = 'none';
+    // keep buffer as-is or reset – we reset to be safe
+    capture.buffer = '';
   }
 
-  return { text: botText, shouldEnd };
+  return { text: botText };
 }
