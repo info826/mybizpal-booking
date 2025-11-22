@@ -240,7 +240,7 @@ wss.on('connection', (ws, req) => {
 
     const { event } = msg;
     
-if (event === 'start') {
+    if (event === 'start') {
       streamSid = msg.start.streamSid;
       callState.callSid = msg.start.callSid || null;
       console.log('▶️  Twilio stream started', {
@@ -254,7 +254,7 @@ if (event === 'start') {
       );
 
       return;
-} 
+    } 
 
     if (event === 'media') {
       if (dgSocket.readyState === WebSocket.OPEN) {
@@ -342,6 +342,7 @@ async function synthesizeWithElevenLabs(text) {
  * Send mulaw 8k audio back to Twilio over the media stream.
  * Twilio expects 20ms frames of 160 bytes each (PCMU).
  * We also support early cancellation via callState.cancelSpeaking (barge-in).
+ * This version uses a steady interval + a 'clear' event to avoid glitchy audio.
  */
 function sendAudioToTwilio(ws, streamSid, audioBuffer, callState) {
   return new Promise((resolve) => {
@@ -360,22 +361,42 @@ function sendAudioToTwilio(ws, streamSid, audioBuffer, callState) {
       audioBuffer.length - (audioBuffer.length % chunkSize); // drop trailing partial frame
     let offset = 0;
 
-    const sendChunk = () => {
+    // Clear any previous audio Twilio might still be buffering
+    try {
+      ws.send(
+        JSON.stringify({
+          event: 'clear',
+          streamSid,
+        })
+      );
+    } catch (err) {
+      console.warn('Error sending clear event to Twilio:', err);
+    }
+
+    const interval = setInterval(() => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
+        clearInterval(interval);
         return resolve();
       }
 
       // Barge-in cancellation
       if (callState && callState.cancelSpeaking) {
         console.log('🛑 Stopping TTS playback due to barge-in');
+        clearInterval(interval);
         return resolve();
       }
 
       if (offset >= usableLength) {
+        clearInterval(interval);
         return resolve();
       }
 
       const chunk = audioBuffer.slice(offset, offset + chunkSize);
+      if (!chunk.length) {
+        clearInterval(interval);
+        return resolve();
+      }
+
       offset += chunkSize;
 
       const payload = chunk.toString('base64');
@@ -388,14 +409,11 @@ function sendAudioToTwilio(ws, streamSid, audioBuffer, callState) {
       ws.send(JSON.stringify(msg), (err) => {
         if (err) {
           console.error('Error sending audio chunk to Twilio:', err);
+          clearInterval(interval);
           return resolve();
         }
-        // Slightly under 20ms to compensate for event-loop latency (avoids "slow robot" effect)
-        setTimeout(sendChunk, 15);
       });
-    };
-
-    sendChunk();
+    }, 20); // ~20ms per frame
   });
 }
 
