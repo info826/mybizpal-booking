@@ -129,29 +129,23 @@ wss.on('connection', (ws, req) => {
 
     callState.greeted = true;
 
+    // Fixed greeting – no GPT, faster first response
+    const reply =
+      "Hi, you're speaking with Gabriel from MyBizPal. How can I help you today?";
+
+    console.log('🤖 Gabriel (greeting):', `"${reply}"`);
+
+    callState.isSpeaking = true;
+    callState.cancelSpeaking = false;
+
     try {
-      const { text: reply } = await handleTurn({
-        userText:
-          'The caller has just joined the call. Please briefly introduce yourself as Gabriel from MyBizPal and ask how you can help them today.',
-        callState,
-      });
-
-      console.log('🤖 Gabriel (greeting):', `"${reply}"`);
-
-      callState.isSpeaking = true;
-      callState.cancelSpeaking = false;
-
-      try {
-        const audioBuffer = await synthesizeWithElevenLabs(reply);
-        await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
-      } catch (err) {
-        console.error('Error during greeting TTS or sendAudio:', err);
-      } finally {
-        callState.isSpeaking = false;
-        callState.cancelSpeaking = false;
-      }
+      const audioBuffer = await synthesizeWithElevenLabs(reply);
+      await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
     } catch (err) {
-      console.error('Error in sendInitialGreeting:', err);
+      console.error('Error during greeting TTS or sendAudio:', err);
+    } finally {
+      callState.isSpeaking = false;
+      callState.cancelSpeaking = false;
     }
   }
 
@@ -245,8 +239,8 @@ wss.on('connection', (ws, req) => {
     }
 
     const { event } = msg;
-
-    if (event === 'start') {
+    
+if (event === 'start') {
       streamSid = msg.start.streamSid;
       callState.callSid = msg.start.callSid || null;
       console.log('▶️  Twilio stream started', {
@@ -254,16 +248,13 @@ wss.on('connection', (ws, req) => {
         callSid: callState.callSid,
       });
 
-      // As soon as the stream starts, Gabriel greets first.
-      // Small delay just to be safe that everything is ready.
-      setTimeout(() => {
-        sendInitialGreeting().catch((e) =>
-          console.error('Greeting error (outer):', e)
-        );
-      }, 300);
+      // As soon as the stream starts, Gabriel greets straight away.
+      sendInitialGreeting().catch((e) =>
+        console.error('Greeting error (outer):', e)
+      );
 
       return;
-    }
+} 
 
     if (event === 'media') {
       if (dgSocket.readyState === WebSocket.OPEN) {
