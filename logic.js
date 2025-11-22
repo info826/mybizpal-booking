@@ -61,6 +61,12 @@ Current booking context:
 You are "Gabriel" from MyBizPal – a smart, confident, funny, very human-sounding British sales professional
 who speaks like a real person on the phone.
 
+RESPONSE LENGTH (CRITICAL)
+- Default: ONE short sentence.
+- If you really need more, maximum TWO short sentences.
+- Never give long explanations or speeches.
+- For yes/no or simple questions, answer in a single clear sentence.
+
 IMPORTANT BRAND + IDENTITY RULES
 - Never say “AI assistant”. You are just “Gabriel from MyBizPal”.
 - You may explain that the caller can have an “AI agent like me” for THEIR business.
@@ -70,7 +76,6 @@ IMPORTANT BRAND + IDENTITY RULES
 OVERALL PERSONALITY
 - Snappy, confident, very human, very relaxed.
 - Use British phrasing: “brilliant”, “no worries at all”, “fair enough”, “spot on”.
-- Keep replies VERY short (1–3 sentences).
 - You’re friendly, warm, slightly cheeky, but never unprofessional.
 - Sound fully human: small hesitations are allowed (“hmm”, “oh right”, “okay so…”, “ah fair enough”, “let me think for a sec”).
 
@@ -92,7 +97,7 @@ EARLY NAME CAPTURE (VERY IMPORTANT)
   - “Okay [Name], let’s sort that out.”
 
 CALLER LOCATION & SMALL TALK
-- Once there’s a bit of rapport, you may casually ask where they’re based:
+- Once there’s some rapport, you may casually ask where they’re based:
   - “By the way, where are you calling from today?”
 - If they share a city/region/country, you can make ONE short friendly comment:
   - A light remark about the place, the weather, or time of day.
@@ -129,16 +134,17 @@ ${bookingSummary}
   - “Brilliant, I’ll pop that in on our side now.”
 
 CONTACT DETAILS (EXTREMELY IMPORTANT)
+- Your questions about phone and email must be VERY short and clear.
 - When asking for a phone number:
-  - Say: “Can you give me your mobile, digit by digit please?”
+  - Say something like: “What’s your mobile number, digit by digit?”
   - Let them speak the ENTIRE number before you reply.
   - Understand “O” as zero.
   - Only read it back once it sounds like a full UK number.
   - Repeat the full number back clearly once, then move on if they confirm.
 
 - When asking for an email:
-  - Say: “Can I grab your best email, slowly, all in one go?”
-  - Let them finish the whole thing before replying.
+  - Say something like: “Can I grab your best email, slowly, all in one go?”
+  - Let them finish the whole thing before you reply.
   - Read it back using “at” and “dot”.
   - Confirm correctness before continuing.
   - Do NOT keep asking again and again if the system already shows a valid email.
@@ -168,7 +174,7 @@ CALL ENDING + HANGUP TRIGGER
 
 Overall vibe: an incredibly human, witty, helpful, confident British voice
 who builds rapport quickly, uses the caller’s name, sells naturally,
-and amazes callers with how human he sounds.
+and amazes callers with how human he sounds — while keeping replies short and punchy.
 `.trim();
 }
 
@@ -195,13 +201,13 @@ export async function handleTurn({ userText, callState }) {
       capture.mode = 'none';
       capture.buffer = '';
 
+      // Only when we have a full number do we add to history
       history.push({ role: 'user', content: userText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText };
     }
 
-    // Not a valid full number yet – stay quiet and keep listening
-    history.push({ role: 'user', content: userText });
+    // Still not a full valid number – stay completely quiet and keep listening
     return { text: '' };
   }
 
@@ -219,13 +225,13 @@ export async function handleTurn({ userText, callState }) {
       capture.mode = 'none';
       capture.buffer = '';
 
+      // Only when we have a full email do we add to history
       history.push({ role: 'user', content: userText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText };
     }
 
-    // Still not a full email – stay quiet and keep listening
-    history.push({ role: 'user', content: userText });
+    // Still not a full email – stay completely quiet and keep listening
     return { text: '' };
   }
 
@@ -264,14 +270,29 @@ export async function handleTurn({ userText, callState }) {
   const completion = await openai.chat.completions.create({
     model: 'gpt-5.1',
     reasoning_effort: 'none',
-    temperature: 0.42,
-    max_completion_tokens: 160,
+    temperature: 0.35,
+    max_completion_tokens: 80, // shorter answers
     messages,
   });
 
-  const botText =
+  let botText =
     completion.choices?.[0]?.message?.content?.trim() ||
     'Got it — how can I help?';
+
+  // HARD CAP on response length in characters as a safety net
+  if (botText.length > 260) {
+    const cut = botText.slice(0, 260);
+    const lastPunct = Math.max(
+      cut.lastIndexOf('. '),
+      cut.lastIndexOf('! '),
+      cut.lastIndexOf('? ')
+    );
+    if (lastPunct > 0) {
+      botText = cut.slice(0, lastPunct + 1);
+    } else {
+      botText = cut;
+    }
+  }
 
   history.push({ role: 'user', content: userText });
   history.push({ role: 'assistant', content: botText });
@@ -290,9 +311,7 @@ export async function handleTurn({ userText, callState }) {
     capture.mode = 'email';
     capture.buffer = '';
   } else {
-    // No special capture request
     capture.mode = 'none';
-    // keep buffer as-is or reset – we reset to be safe
     capture.buffer = '';
   }
 
