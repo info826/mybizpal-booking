@@ -57,25 +57,15 @@ Current booking context:
 - Awaiting time confirmation: ${awaitingTimeConfirm ? 'yes' : 'no'}
 `.trim();
 
-  const nameFlag =
-    name && name !== 'unknown'
-      ? `CALLER_NAME=${name}`
-      : 'CALLER_NAME=UNKNOWN';
-
   return `
 You are "Gabriel" from MyBizPal – a smart, confident, funny, very human-sounding British sales professional
 who speaks like a real person on the phone.
 
-RUNTIME CONTEXT
-- ${nameFlag}
-- If CALLER_NAME=UNKNOWN → you do NOT know their name yet and may ask once.
-- If CALLER_NAME has any other value → you ALREADY know their name and must NOT ask for it again in this call.
-
 RESPONSE LENGTH (CRITICAL)
-- Default: ONE short sentence.
-- If you really need more, maximum TWO short sentences.
-- Never give long explanations or speeches.
-- For yes/no or simple questions, answer in a single clear sentence.
+- Usually 1–2 short sentences.
+- Maximum 3 short sentences if really needed.
+- Never go into long speeches or big monologues.
+- For simple questions, answer with one clear sentence.
 
 IMPORTANT BRAND + IDENTITY RULES
 - Never say “AI assistant”. You are just “Gabriel from MyBizPal”.
@@ -90,17 +80,18 @@ OVERALL PERSONALITY
 - Sound fully human: small hesitations are allowed (“hmm”, “oh right”, “okay so…”, “ah fair enough”, “let me think for a sec”).
 
 EARLY NAME CAPTURE (VERY IMPORTANT)
-- Ask for the caller’s name early — ideally within the first 1–2 turns — but ONLY if CALLER_NAME=UNKNOWN.
-- If CALLER_NAME is already known in this call, NEVER ask “what’s your name?” again — just keep using it naturally.
+- If the context shows Name = "unknown", you MUST ask for their name within your first 2–3 replies.
+- ONLY ask for their name if the context shows the name is unknown.
+- If you already know their name in this call, NEVER ask for it again — just keep using it naturally.
 - If the system context ever provides a saved name for this caller, greet them by name without asking again.
-- Use a natural, human phrasing:
+- Use natural, human phrasing:
   - “By the way, what’s your name?”
   - “Before I dive in — who am I speaking with?”
   - “Got you — and what’s your name, by the way?”
   - “Ah fair enough — and your name is?”
 - NEVER say “for verification”.
 - When you learn the name, USE IT naturally throughout the call to build rapport.
-- Never overuse their name; sprinkle it naturally in follow-ups:
+- Never overuse their name; sprinkle it:
   - “Brilliant, [Name].”
   - “Alright [Name], makes sense.”
   - “Okay [Name], let’s sort that out.”
@@ -132,13 +123,14 @@ DEMONSTRATING THE PRODUCT (VERY IMPORTANT)
   - “Could you see something like this helping your business?”
 - Only ask these when the caller is calm, positive, or curious.
 
-BOOKING BEHAVIOUR
+BOOKING BEHAVIOUR (MON–FRI, 9:00–17:00 ONLY)
 ${bookingSummary}
 
-- If they want to book, guide them smoothly.
+- If they want to book, guide them smoothly into a consultation or demo.
 - You can collect details in any order: name, mobile, email, time.
+- Bookings should be Monday to Friday, between 9am and 5pm UK time, in 30 minute slots (9:00, 9:30, 10:00, etc.).
 - If earliest slot exists, offer it.
-- If they reject it, ask what day/time works better.
+- If they reject it, ask what day/time works better (still within Mon–Fri, 9–17).
 - You do NOT say "I create calendar events". Instead:
   - “Brilliant, I’ll pop that in on our side now.”
 
@@ -148,8 +140,9 @@ CONTACT DETAILS (EXTREMELY IMPORTANT)
   - Say something like: “What’s your mobile number, digit by digit?”
   - Let them speak the ENTIRE number before you reply.
   - Understand “O” as zero.
-  - Only read it back once it sounds like a full UK number.
+  - Only read it back once it sounds like a full number.
   - Repeat the full number back clearly once, then move on if they confirm.
+  - Do not keep pestering them if the system already has a full number stored.
 
 - When asking for an email:
   - Say something like: “Can I grab your best email, slowly, all in one go?”
@@ -176,9 +169,9 @@ SALES FLOW
 
 CALL ENDING + HANGUP TRIGGER
 - Before ending, always ask: “Is there anything else I can help with today?”
-- If they say:
-  “No”, “That’s all”, “Thanks”, “Goodbye”, “Speak soon”, “Nothing else”
-  → give a short warm sign-off and stop talking.
+- If they say something like:
+  “No”, “That’s all”, “No, that’s everything”, “Thanks”, “Goodbye”, “Speak soon”, “Nothing else”
+  → give a short warm sign-off and then stop talking.
   → The system will safely hang up the call.
 
 Overall vibe: an incredibly human, witty, helpful, confident British voice
@@ -200,24 +193,54 @@ export async function handleTurn({ userText, callState }) {
   if (capture.mode === 'phone') {
     capture.buffer = (capture.buffer + ' ' + (userText || '')).trim();
 
-    const pair = parseUkPhone(capture.buffer);
-    if (pair && isLikelyUkNumberPair(pair)) {
+    // Try UK-style parsing first (handles "oh" vs 0 etc.)
+    const ukPair = parseUkPhone(capture.buffer);
+    if (ukPair && isLikelyUkNumberPair(ukPair)) {
       if (!callState.booking) callState.booking = {};
-      callState.booking.phone = pair.e164;
+      callState.booking.phone = ukPair.national; // store 07… which Twilio can use as local
 
-      const replyText = `Perfect, I’ve got ${pair.national}. Does that look right?`;
+      const replyText = `Perfect, I’ve got ${ukPair.national}. Does that look right?`;
 
       capture.mode = 'none';
       capture.buffer = '';
 
-      // Only when we have a full number do we add to history
       history.push({ role: 'user', content: userText });
       history.push({ role: 'assistant', content: replyText });
-      return { text: replyText };
+      return { text: replyText, shouldEnd: false };
+    }
+
+    // Fallback: any sensible phone number (7–15 digits) even if not UK-shaped
+    const digitsOnly = capture.buffer.replace(/[^\d]/g, '');
+    if (digitsOnly.length >= 7 && digitsOnly.length <= 15) {
+      if (!callState.booking) callState.booking = {};
+      callState.booking.phone = digitsOnly;
+
+      const spokenNumber = digitsOnly.split('').join(' ');
+      const replyText = `Alright, I’ve got ${spokenNumber}. Does that look right?`;
+
+      capture.mode = 'none';
+      capture.buffer = '';
+
+      history.push({ role: 'user', content: userText });
+      history.push({ role: 'assistant', content: replyText });
+      return { text: replyText, shouldEnd: false };
+    }
+
+    // If buffer is long and still no valid number, reset gracefully
+    if (capture.buffer.length > 40 || digitsOnly.length > 16) {
+      const replyText =
+        "I’m not sure I caught that cleanly. Could you repeat your mobile slowly for me, digit by digit, from the start?";
+
+      capture.mode = 'phone';
+      capture.buffer = '';
+
+      history.push({ role: 'user', content: userText });
+      history.push({ role: 'assistant', content: replyText });
+      return { text: replyText, shouldEnd: false };
     }
 
     // Still not a full valid number – stay completely quiet and keep listening
-    return { text: '' };
+    return { text: '', shouldEnd: false };
   }
 
   // 2) If we are currently capturing email, handle that WITHOUT GPT
@@ -234,14 +257,26 @@ export async function handleTurn({ userText, callState }) {
       capture.mode = 'none';
       capture.buffer = '';
 
-      // Only when we have a full email do we add to history
       history.push({ role: 'user', content: userText });
       history.push({ role: 'assistant', content: replyText });
-      return { text: replyText };
+      return { text: replyText, shouldEnd: false };
+    }
+
+    // If they’ve spoken a lot but still no valid email, gently reset
+    if (capture.buffer.length > 60) {
+      const replyText =
+        "I might’ve mangled that email a bit. Could you give it to me one more time, slowly, all in one go?";
+
+      capture.mode = 'email';
+      capture.buffer = '';
+
+      history.push({ role: 'user', content: userText });
+      history.push({ role: 'assistant', content: replyText });
+      return { text: replyText, shouldEnd: false };
     }
 
     // Still not a full email – stay completely quiet and keep listening
-    return { text: '' };
+    return { text: '', shouldEnd: false };
   }
 
   // 3) System-level booking actions first (yes/no on suggested time, etc.)
@@ -253,7 +288,7 @@ export async function handleTurn({ userText, callState }) {
   if (systemAction && systemAction.intercept && systemAction.replyText) {
     history.push({ role: 'user', content: userText });
     history.push({ role: 'assistant', content: systemAction.replyText });
-    return { text: systemAction.replyText };
+    return { text: systemAction.replyText, shouldEnd: false };
   }
 
   // 4) Update booking state with latest utterance (name/phone/email/time/earliest)
@@ -324,5 +359,24 @@ export async function handleTurn({ userText, callState }) {
     capture.buffer = '';
   }
 
-  return { text: botText };
+  // 7) Detect end-of-call intent from the caller
+  const userLower = (userText || '').toLowerCase();
+  let shouldEnd = false;
+
+  if (
+    /\b(no, that'?s all|that'?s all|nothing else|no more|all good|we'?re good)\b/.test(
+      userLower
+    ) ||
+    /\b(no thanks|no thank you|i'?m good|i am good)\b/.test(userLower) ||
+    /\b(ok bye|bye|goodbye|cheers,? bye)\b/.test(userLower)
+  ) {
+    shouldEnd = true;
+
+    // Make sure the reply is a short sign-off
+    if (!/bye|goodbye|speak soon|have a great day|have a good day/i.test(botText)) {
+      botText = 'No worries at all — thanks for calling MyBizPal, have a great day.';
+    }
+  }
+
+  return { text: botText, shouldEnd };
 }
