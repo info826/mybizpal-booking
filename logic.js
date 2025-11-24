@@ -9,7 +9,7 @@ import {
 import {
   parseUkPhone,
   isLikelyUkNumberPair,
-  extractEmail,
+  extractEmailSmart,
 } from './parsing.js';
 
 const openai = new OpenAI({
@@ -247,7 +247,7 @@ export async function handleTurn({ userText, callState }) {
   if (capture.mode === 'email') {
     capture.buffer = (capture.buffer + ' ' + (userText || '')).trim();
 
-    const email = extractEmail(capture.buffer);
+    const email = extractEmailSmart(capture.buffer);
     if (email) {
       if (!callState.booking) callState.booking = {};
       callState.booking.email = email;
@@ -374,7 +374,8 @@ export async function handleTurn({ userText, callState }) {
 
     // Make sure the reply is a short sign-off
     if (!/bye|goodbye|speak soon|have a great day|have a good day/i.test(botText)) {
-      botText = 'No worries at all — thanks for calling MyBizPal, have a great day.';
+      botText =
+        'No worries at all — thanks for calling MyBizPal, have a great day.';
     }
   }
 
