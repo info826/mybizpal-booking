@@ -23,6 +23,30 @@ function ensureHistory(callState) {
   return callState.history;
 }
 
+// ---------- VERBALISERS FOR CLEAR READ-BACK ----------
+
+function verbalisePhone(number) {
+  if (!number) return '';
+  const digits = String(number).replace(/[^\d]/g, '');
+  if (!digits) return '';
+  return digits.split('').join(' ');
+}
+
+function verbaliseEmail(email) {
+  if (!email) return '';
+  const lower = email.toLowerCase();
+  const [local, domain] = lower.split('@');
+  if (!domain) return lower;
+
+  const localSpoken = local.split('').join(' ');
+  const parts = domain.split('.');
+  const host = parts.shift();
+  const rest = parts.join(' dot ');
+  const domainSpoken = rest ? `${host} dot ${rest}` : host;
+
+  return `${localSpoken} at ${domainSpoken}`;
+}
+
 function buildSystemPrompt(callState) {
   const booking = callState.booking || {};
   const niceNow = new Date().toLocaleString('en-GB', {
@@ -197,9 +221,10 @@ export async function handleTurn({ userText, callState }) {
     const ukPair = parseUkPhone(capture.buffer);
     if (ukPair && isLikelyUkNumberPair(ukPair)) {
       if (!callState.booking) callState.booking = {};
-      callState.booking.phone = ukPair.national; // store 07… which Twilio can use as local
+      callState.booking.phone = ukPair.national; // store 07…
 
-      const replyText = `Perfect, I’ve got ${ukPair.national}. Does that look right?`;
+      const spoken = verbalisePhone(ukPair.national);
+      const replyText = `Perfect, I’ve got ${spoken}. Does that look right?`;
 
       capture.mode = 'none';
       capture.buffer = '';
@@ -215,7 +240,7 @@ export async function handleTurn({ userText, callState }) {
       if (!callState.booking) callState.booking = {};
       callState.booking.phone = digitsOnly;
 
-      const spokenNumber = digitsOnly.split('').join(' ');
+      const spokenNumber = verbalisePhone(digitsOnly);
       const replyText = `Alright, I’ve got ${spokenNumber}. Does that look right?`;
 
       capture.mode = 'none';
@@ -252,7 +277,8 @@ export async function handleTurn({ userText, callState }) {
       if (!callState.booking) callState.booking = {};
       callState.booking.email = email;
 
-      const replyText = `Brilliant, I’ve got ${email}. Does that look correct?`;
+      const spokenEmail = verbaliseEmail(email);
+      const replyText = `Brilliant, let me just check I’ve got that right: ${spokenEmail}. Does that look correct?`;
 
       capture.mode = 'none';
       capture.buffer = '';
@@ -373,7 +399,9 @@ export async function handleTurn({ userText, callState }) {
     shouldEnd = true;
 
     // Make sure the reply is a short sign-off
-    if (!/bye|goodbye|speak soon|have a great day|have a good day/i.test(botText)) {
+    if (
+      !/bye|goodbye|speak soon|have a great day|have a good day/i.test(botText)
+    ) {
       botText =
         'No worries at all — thanks for calling MyBizPal, have a great day.';
     }
