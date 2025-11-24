@@ -79,6 +79,7 @@ Current booking context:
 - Requested time: ${timeSpoken || 'none'}
 - Earliest available slot: ${earliestSlotSpoken || 'none'}
 - Awaiting time confirmation: ${awaitingTimeConfirm ? 'yes' : 'no'}
+- Time now (agent reference, not to be read out): ${niceNow}
 `.trim();
 
   return `
@@ -153,7 +154,7 @@ ${bookingSummary}
 - If they want to book, guide them smoothly into a consultation or demo.
 - You can collect details in any order: name, mobile, email, time.
 - Bookings should be Monday to Friday, between 9am and 5pm UK time, in 30 minute slots (9:00, 9:30, 10:00, etc.).
-- If earliest slot exists, offer it.
+- If an earliest available slot exists, offer it clearly.
 - If they reject it, ask what day/time works better (still within Mon–Fri, 9–17).
 - You do NOT say "I create calendar events". Instead:
   - “Brilliant, I’ll pop that in on our side now.”
@@ -165,13 +166,15 @@ CONTACT DETAILS (EXTREMELY IMPORTANT)
   - Let them speak the ENTIRE number before you reply.
   - Understand “O” as zero.
   - Only read it back once it sounds like a full number.
+  - When repeating it, say the digits spaced out so it’s easy to follow: “0 7 9 9 9 …”.
   - Repeat the full number back clearly once, then move on if they confirm.
   - Do not keep pestering them if the system already has a full number stored.
 
 - When asking for an email:
   - Say something like: “Can I grab your best email, slowly, all in one go?”
   - Let them finish the whole thing before you reply.
-  - Read it back using “at” and “dot”.
+  - When repeating it, spell it out clearly with “at” and “dot”, and don’t rush:
+    - “So that’s four two two seven four three five j w at gmail dot com — is that right?”
   - Confirm correctness before continuing.
   - Do NOT keep asking again and again if the system already shows a valid email.
 
@@ -222,14 +225,18 @@ export async function handleTurn({ userText, callState }) {
   if (capture.mode === 'phone') {
     capture.buffer = (capture.buffer + ' ' + (userText || '')).trim();
 
-    // Try UK-style parsing first (handles "oh" vs 0 etc.)
+    // First try UK-style parsing (handles "oh" vs 0 etc.)
     const ukPair = parseUkPhone(capture.buffer);
+    const digitsOnly = capture.buffer.replace(/[^\d]/g, '');
+
     if (ukPair && isLikelyUkNumberPair(ukPair)) {
       if (!callState.booking) callState.booking = {};
-      callState.booking.phone = ukPair.national; // store 07…
+      // Store E.164 for APIs (WhatsApp/SMS/Calendar)
+      callState.booking.phone = ukPair.e164;
 
+      // Speak the national 07… number spaced out so it sounds clear
       const spoken = verbalisePhone(ukPair.national);
-      const replyText = `Perfect, I’ve got ${spoken}. Does that look right?`;
+      const replyText = `Perfect, I’ve got ${spoken}. Does that sound right?`;
 
       capture.mode = 'none';
       capture.buffer = '';
@@ -241,13 +248,12 @@ export async function handleTurn({ userText, callState }) {
     }
 
     // Fallback: any sensible phone number (7–15 digits) even if not UK-shaped
-    const digitsOnly = capture.buffer.replace(/[^\d]/g, '');
     if (digitsOnly.length >= 7 && digitsOnly.length <= 15) {
       if (!callState.booking) callState.booking = {};
       callState.booking.phone = digitsOnly;
 
       const spokenNumber = verbalisePhone(digitsOnly);
-      const replyText = `Alright, I’ve got ${spokenNumber}. Does that look right?`;
+      const replyText = `Alright, I’ve got ${spokenNumber}. Does that sound right?`;
 
       capture.mode = 'none';
       capture.buffer = '';
@@ -369,7 +375,7 @@ export async function handleTurn({ userText, callState }) {
 
   const messages = [{ role: 'system', content: systemPrompt }];
 
-  // Keep a short rolling history (last 6 exchanges)
+  // Keep a short rolling history (last 6 exchanges → 12 messages)
   const recent = history.slice(-12);
   for (const msg of recent) {
     messages.push({ role: msg.role, content: msg.content });
