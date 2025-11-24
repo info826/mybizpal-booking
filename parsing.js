@@ -6,6 +6,97 @@ import { toZonedTime, fromZonedTime, formatInTimeZone } from 'date-fns-tz';
 
 const DEFAULT_TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
+// ---------- SMART EMAIL NORMALISER ----------
+
+// Map spelled-out digits → actual digits
+const DIGIT_WORDS = {
+  zero: '0',
+  oh: '0',
+  o: '0',
+  one: '1',
+  two: '2',
+  to: '2',
+  too: '2',
+  three: '3',
+  four: '4',
+  for: '4',
+  five: '5',
+  six: '6',
+  seven: '7',
+  eight: '8',
+  ate: '8',
+  nine: '9',
+};
+
+// Filler words to remove
+const FILLERS = new Set([
+  'so',
+  'ok',
+  'okay',
+  'um',
+  'uh',
+  'eh',
+  'ah',
+  'right',
+  'like',
+  'well',
+  'yeah',
+  'you',
+  'know',
+  'just',
+]);
+
+// Converts sequences like “four two two seven” → “4227”
+function normaliseDigits(words) {
+  return words
+    .map((w) => DIGIT_WORDS[w] || w)
+    .join('');
+}
+
+export function extractEmailSmart(raw) {
+  if (!raw) return null;
+
+  // normalise spacing and case
+  let text = raw
+    .toLowerCase()
+    .replace(/-/g, ' ')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // remove filler words
+  text = text
+    .split(' ')
+    .filter((w) => !FILLERS.has(w))
+    .join(' ');
+
+  // convert spelled digits
+  text = text
+    .split(' ')
+    .map((w) => DIGIT_WORDS[w] || w)
+    .join(' ');
+
+  // normalise “at” → “@”
+  text = text.replace(/\b(at|a t)\b/g, '@');
+
+  // normalise “dot” → “.”
+  text = text.replace(/\b(dot|dot com|dott)\b/g, '.');
+
+  // collapse spaced letters: "j w" → "jw"
+  text = text.replace(/\b([a-z])\s+([a-z])\b/g, '$1$2');
+
+  // collapse repeated spaces again and remove them
+  text = text.replace(/\s+/g, '');
+
+  // final classic email pattern
+  const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+  if (emailRegex.test(text)) return text;
+
+  return null;
+}
+
+// ---------- EXISTING HELPERS ----------
+
 export function extractName(text) {
   if (!text) return null;
   const t = text.trim();
@@ -54,10 +145,12 @@ export function parseUkPhone(spoken) {
   // Normalise to E.164 +44…
   if (s.startsWith('+44')) {
     const rest = s.slice(3);
-    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
+    if (/^\d{10}$/.test(rest))
+      return { e164: `+44${rest}`, national: `0${rest}` };
   } else if (s.startsWith('44')) {
     const rest = s.slice(2);
-    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
+    if (/^\d{10}$/.test(rest))
+      return { e164: `+44${rest}`, national: `0${rest}` };
   } else if (s.startsWith('0') && /^\d{11}$/.test(s)) {
     return { e164: `+44${s.slice(1)}`, national: s };
   } else if (/^\d{10}$/.test(s)) {
@@ -73,6 +166,7 @@ export function isLikelyUkNumberPair(p) {
   return !!(p && /^0\d{10}$/.test(p.national) && /^\+44\d{10}$/.test(p.e164));
 }
 
+// Original simple email extractor (kept for backwards-compatibility)
 export function extractEmail(spoken) {
   if (!spoken) return null;
 
@@ -95,7 +189,6 @@ export function extractEmail(spoken) {
   // Normalise spaces around @ and .
   s = s.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
 
-  // VERY IMPORTANT:
   // Remove ALL remaining spaces so "4 2 2 7 4 3 5 j w at gmail dot com"
   // becomes "4227435jw@gmail.com"
   s = s.replace(/\s+/g, '');
@@ -108,7 +201,9 @@ export function extractEmail(spoken) {
 export function parseNaturalDate(utterance, tz = DEFAULT_TZ) {
   if (!utterance) return null;
 
-  const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
+  const parsed = chrono.parseDate(utterance, new Date(), {
+    forwardDate: true,
+  });
   if (!parsed) return null;
 
   const zoned = toZonedTime(parsed, tz);
