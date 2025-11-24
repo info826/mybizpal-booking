@@ -6,7 +6,7 @@ import { toZonedTime, fromZonedTime, formatInTimeZone } from 'date-fns-tz';
 
 const DEFAULT_TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
-// ---------- SHARED DIGIT + FILLER MAPS (EMAIL + PHONE) ----------
+// ---------- SMART EMAIL NORMALISER ----------
 
 // Map spelled-out digits → actual digits
 const DIGIT_WORDS = {
@@ -28,16 +28,13 @@ const DIGIT_WORDS = {
   nine: '9',
 };
 
-// Filler words to ignore when normalising
-const FILLER_WORDS = new Set([
+// Filler words we want to ignore around the email
+const FILLERS = new Set([
   'so',
   'ok',
   'okay',
   'um',
-  'umm',
   'uh',
-  'uhh',
-  'erm',
   'eh',
   'ah',
   'right',
@@ -49,10 +46,65 @@ const FILLER_WORDS = new Set([
   'just',
 ]);
 
-// Converts sequences like “four two two seven” → “4227”
-function normaliseDigits(words) {
-  return words.map((w) => DIGIT_WORDS[w] || w).join('');
+export function extractEmailSmart(raw) {
+  if (!raw) return null;
+
+  let text = raw.toLowerCase();
+
+  // Normalise some odd STT quirks like "gmail mail"
+  text = text.replace(/gmail\s+mail/g, 'gmail');
+  text = text.replace(/hotmail\s+mail/g, 'hotmail');
+  text = text.replace(/outlook\s+mail/g, 'outlook');
+
+  // Replace common separators with spaces so we can process tokens
+  text = text
+    .replace(/-/g, ' ')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Split into words, drop fillers, map digit words → digits
+  let words = text.split(' ').filter(Boolean);
+
+  words = words
+    .filter((w) => !FILLERS.has(w))
+    .map((w) => DIGIT_WORDS[w] || w);
+
+  text = words.join(' ');
+
+  // Map how people say "@"
+  text = text
+    .replace(/\bat sign\b/g, '@')
+    .replace(/\bat symbol\b/g, '@')
+    .replace(/\barroba\b/g, '@')
+    .replace(/\ba t\b/g, '@')
+    .replace(/\bat\b/g, '@');
+
+  // Map how people say "."
+  text = text
+    .replace(/\bdot com\b/g, '.com')
+    .replace(/\bdot\b/g, '.')
+    .replace(/\bpunto\b/g, '.')
+    .replace(/\bponto\b/g, '.')
+    .replace(/\bpoint\b/g, '.');
+
+  // Collapse spaced letters around local part: "j w" → "jw"
+  text = text.replace(/\b([a-z0-9])\s+([a-z0-9])\b/g, '$1$2');
+
+  // Finally, remove ALL remaining spaces so:
+  // "4 2 2 7 4 3 5 j w @ gmail dot com" → "4227435jw@gmail.com"
+  text = text.replace(/\s+/g, '');
+
+  // Classic email validation
+  const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+  if (emailRegex.test(text)) {
+    return text;
+  }
+
+  return null;
 }
+
+// ---------- NAME ----------
 
 export function extractName(text) {
   if (!text) return null;
@@ -71,36 +123,19 @@ export function extractName(text) {
   return m ? m[1] : null;
 }
 
-// Smarter UK phone parsing, handles filler words + “double/triple X”
+// ---------- PHONE (UK-FOCUSED, BUT FLEXIBLE) ----------
+
 export function parseUkPhone(spoken) {
   if (!spoken) return null;
 
   let s = ` ${spoken.toLowerCase()} `;
 
-  // Strip filler sounds + filler words
-  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, ' ');
-  s = s.replace(
-    /\b(so|ok|okay|right|like|well|yeah|you know|you\s+know|just)\b/g,
-    ' '
-  );
+  // Strip filler sounds
+  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, '');
 
   // Handle "plus forty four"
   s = s.replace(/\bplus\s*four\s*four\b/g, '+44');
   s = s.replace(/\bplus\b/g, '+');
-
-  // Expand "double/triple X"
-  s = s.replace(
-    /\b(double|triple)\s+(zero|oh|o|one|two|three|four|five|six|seven|eight|nine|\d)\b/g,
-    (_match, mult, digitWord) => {
-      let d = digitWord;
-      if (isNaN(Number(d))) {
-        d = DIGIT_WORDS[digitWord] || '';
-      }
-      if (!d) return '';
-      const count = mult === 'triple' ? 3 : 2;
-      return (' ' + d).repeat(count);
-    }
-  );
 
   // Map words → digits
   s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
@@ -121,12 +156,10 @@ export function parseUkPhone(spoken) {
   // Normalise to E.164 +44…
   if (s.startsWith('+44')) {
     const rest = s.slice(3);
-    if (/^\d{10}$/.test(rest))
-      return { e164: `+44${rest}`, national: `0${rest}` };
+    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
   } else if (s.startsWith('44')) {
     const rest = s.slice(2);
-    if (/^\d{10}$/.test(rest))
-      return { e164: `+44${rest}`, national: `0${rest}` };
+    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
   } else if (s.startsWith('0') && /^\d{11}$/.test(s)) {
     return { e164: `+44${s.slice(1)}`, national: s };
   } else if (/^\d{10}$/.test(s)) {
@@ -142,7 +175,9 @@ export function isLikelyUkNumberPair(p) {
   return !!(p && /^0\d{10}$/.test(p.national) && /^\+44\d{10}$/.test(p.e164));
 }
 
-// Simple email extractor (still used elsewhere as a fallback if needed)
+// ---------- BASIC EMAIL (LEGACY) ----------
+// Still here in case any existing code uses extractEmail directly.
+
 export function extractEmail(spoken) {
   if (!spoken) return null;
 
@@ -165,64 +200,15 @@ export function extractEmail(spoken) {
   // Normalise spaces around @ and .
   s = s.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
 
-  // Remove ALL remaining spaces
+  // Remove ALL remaining spaces so "4 2 2 7 4 3 5 j w at gmail dot com"
+  // becomes "4227435jw@gmail.com"
   s = s.replace(/\s+/g, '');
 
   const m = s.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
   return m ? m[0] : null;
 }
 
-// ---------- SMART EMAIL NORMALISER (used by logic.js) ----------
-
-export function extractEmailSmart(raw) {
-  if (!raw) return null;
-
-  let text = raw
-    .toLowerCase()
-    .replace(/-/g, ' ')
-    .replace(/_/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  // remove filler words ("so", "okay", etc.)
-  text = text
-    .split(' ')
-    .filter((w) => !FILLER_WORDS.has(w))
-    .join(' ');
-
-  // fix common gmail variants BEFORE digit / space work
-  // "g mail" → "gmail"
-  text = text.replace(/\bg\s+mail\b/g, 'gmail');
-  // "gmail mail" or "gmailmail" → "gmail"
-  text = text.replace(/\bgmail\s+mail\b/g, 'gmail');
-  text = text.replace(/\bgmailmail\b/g, 'gmail');
-
-  // convert spelled digits
-  text = text
-    .split(' ')
-    .map((w) => DIGIT_WORDS[w] || w)
-    .join(' ');
-
-  // normalise “at” → “@”
-  text = text.replace(/\b(at|a t)\b/g, '@');
-
-  // normalise “dot” → “.”
-  text = text.replace(/\b(dot|dot com|dott)\b/g, '.');
-
-  // collapse spaced letters: "j w" → "jw"
-  text = text.replace(/\b([a-z])\s+([a-z])\b/g, '$1$2');
-
-  // collapse repeated spaces again
-  text = text.replace(/\s+/g, '');
-
-  // final gmail fix: gmailmail.com → gmail.com
-  text = text.replace(/gmailmail\.com$/g, 'gmail.com');
-
-  const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
-  if (emailRegex.test(text)) return text;
-
-  return null;
-}
+// ---------- DATES & YES/NO ----------
 
 export function parseNaturalDate(utterance, tz = DEFAULT_TZ) {
   if (!utterance) return null;
