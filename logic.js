@@ -288,8 +288,8 @@ export async function handleTurn({ userText, callState }) {
       return { text: replyText, shouldEnd: false };
     }
 
-    // If they’ve spoken a lot but still no valid email, gently reset
-    if (capture.buffer.length > 60) {
+    // If they’ve spoken a bit but still no valid email, gently reset
+    if (capture.buffer.length > 35) {
       const replyText =
         "I might’ve mangled that email a bit. Could you give it to me one more time, slowly, all in one go?";
 
