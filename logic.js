@@ -10,6 +10,8 @@ import {
   parseUkPhone,
   isLikelyUkNumberPair,
   extractEmailSmart,
+  yesInAnyLang,
+  noInAnyLang,
 } from './parsing.js';
 
 const openai = new OpenAI({
@@ -100,7 +102,8 @@ IMPORTANT BRAND + IDENTITY RULES
 
 OVERALL PERSONALITY
 - Snappy, confident, very human, very relaxed.
-- Use British phrasing: “brilliant”, “no worries at all”, “fair enough”, “spot on”.
+- Use British phrasing like “brilliant”, “no worries at all”, “fair enough”, “spot on” OCCASIONALLY.
+- Do NOT use those phrases in every reply – keep them to roughly one in every 3–4 responses so it feels natural.
 - You’re friendly, warm, slightly cheeky, but never unprofessional.
 - Sound fully human: small hesitations are allowed (“hmm”, “oh right”, “okay so…”, “ah fair enough”, “let me think for a sec”).
 
@@ -109,6 +112,7 @@ EARLY NAME CAPTURE (VERY IMPORTANT)
 - ONLY ask for their name if the context shows the name is unknown.
 - If you already know their name in this call, NEVER ask for it again — just keep using it naturally.
 - If the system context ever provides a saved name for this caller, greet them by name without asking again.
+- Expect full names like “Gabriel De Ornelas” — that’s fine. Use the FIRST name when speaking to them.
 - Use natural, human phrasing:
   - “By the way, what’s your name?”
   - “Before I dive in — who am I speaking with?”
@@ -154,19 +158,21 @@ ${bookingSummary}
 - If they want to book, guide them smoothly into a consultation or demo.
 - You can collect details in any order: name, mobile, email, time.
 - Bookings should be Monday to Friday, between 9am and 5pm UK time, in 30 minute slots (9:00, 9:30, 10:00, etc.).
-- If an earliest available slot exists, offer it clearly.
+- If an earliest available slot exists and they ask for “earliest”, “soonest” or similar, offer that exact earliest slot first.
+- If earliest slot exists, offer it clearly.
 - If they reject it, ask what day/time works better (still within Mon–Fri, 9–17).
 - You do NOT say "I create calendar events". Instead:
   - “Brilliant, I’ll pop that in on our side now.”
 
 CONTACT DETAILS (EXTREMELY IMPORTANT)
 - Your questions about phone and email must be VERY short and clear.
+
 - When asking for a phone number:
   - Say something like: “What’s your mobile number, digit by digit?”
   - Let them speak the ENTIRE number before you reply.
   - Understand “O” as zero.
   - Only read it back once it sounds like a full number.
-  - When repeating it, say the digits spaced out so it’s easy to follow: “0 7 9 9 9 …”.
+  - When repeating it, say the digits spaced out so it’s easy to follow: “0 7 9 9 9 4 6 2 1 6 6”.
   - Repeat the full number back clearly once, then move on if they confirm.
   - Do not keep pestering them if the system already has a full number stored.
 
@@ -176,7 +182,8 @@ CONTACT DETAILS (EXTREMELY IMPORTANT)
   - When repeating it, spell it out clearly with “at” and “dot”, and don’t rush:
     - “So that’s four two two seven four three five j w at gmail dot com — is that right?”
   - Confirm correctness before continuing.
-  - Do NOT keep asking again and again if the system already shows a valid email.
+  - If they say they do NOT have an email address, say “No worries at all” and continue the booking WITHOUT email.
+  - Do NOT keep asking again and again if the system already shows a valid email and they confirmed it.
 
 HUMOUR & CHUCKLES
 - Use quick, light humour when appropriate:
@@ -217,13 +224,68 @@ export async function handleTurn({ userText, callState }) {
       buffer: '',
       emailAttempts: 0,
       phoneAttempts: 0,
+      pendingConfirm: null, // 'email' | 'phone' | null
     };
   }
   const capture = callState.capture;
 
+  const safeUserText = userText || '';
+  const userLower = safeUserText.toLowerCase();
+
+  // 0) HANDLE PENDING CONFIRMATIONS (EMAIL / PHONE) BEFORE ANYTHING ELSE
+  if (capture.pendingConfirm === 'email') {
+    if (noInAnyLang(safeUserText)) {
+      // Caller said email is wrong → clear and re-capture
+      if (!callState.booking) callState.booking = {};
+      callState.booking.email = null;
+
+      const replyText =
+        'No problem at all — let’s do that email again. Could you give me your full email address, slowly, all in one go from the very start?';
+
+      capture.mode = 'email';
+      capture.buffer = '';
+      capture.emailAttempts += 1;
+      capture.pendingConfirm = null;
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+
+      return { text: replyText, shouldEnd: false };
+    }
+
+    if (yesInAnyLang(safeUserText)) {
+      // Email confirmed, clear pending flag and continue
+      capture.pendingConfirm = null;
+      // fall through to normal flow
+    }
+  } else if (capture.pendingConfirm === 'phone') {
+    if (noInAnyLang(safeUserText)) {
+      if (!callState.booking) callState.booking = {};
+      callState.booking.phone = null;
+
+      const replyText =
+        'Got it, let’s fix that. Can you give me your mobile again, digit by digit, from the start?';
+
+      capture.mode = 'phone';
+      capture.buffer = '';
+      capture.phoneAttempts += 1;
+      capture.pendingConfirm = null;
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+
+      return { text: replyText, shouldEnd: false };
+    }
+
+    if (yesInAnyLang(safeUserText)) {
+      capture.pendingConfirm = null;
+      // continue into normal flow
+    }
+  }
+
   // 1) If we are currently capturing phone digits, handle that WITHOUT GPT
   if (capture.mode === 'phone') {
-    capture.buffer = (capture.buffer + ' ' + (userText || '')).trim();
+    capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
 
     // First try UK-style parsing (handles "oh" vs 0 etc.)
     const ukPair = parseUkPhone(capture.buffer);
@@ -231,18 +293,18 @@ export async function handleTurn({ userText, callState }) {
 
     if (ukPair && isLikelyUkNumberPair(ukPair)) {
       if (!callState.booking) callState.booking = {};
-      // Store E.164 for APIs (WhatsApp/SMS/Calendar)
+      // Store E.164 (+44...) for APIs (WhatsApp/SMS/Calendar)
       callState.booking.phone = ukPair.e164;
 
-      // Speak the national 07… number spaced out so it sounds clear
-      const spoken = verbalisePhone(ukPair.national);
+      const spoken = verbalisePhone(ukPair.national || ukPair.e164);
       const replyText = `Perfect, I’ve got ${spoken}. Does that sound right?`;
 
       capture.mode = 'none';
       capture.buffer = '';
       capture.phoneAttempts = 0;
+      capture.pendingConfirm = 'phone';
 
-      history.push({ role: 'user', content: userText });
+      history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText, shouldEnd: false };
     }
@@ -258,8 +320,9 @@ export async function handleTurn({ userText, callState }) {
       capture.mode = 'none';
       capture.buffer = '';
       capture.phoneAttempts = 0;
+      capture.pendingConfirm = 'phone';
 
-      history.push({ role: 'user', content: userText });
+      history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText, shouldEnd: false };
     }
@@ -278,7 +341,7 @@ export async function handleTurn({ userText, callState }) {
       capture.buffer = '';
       capture.phoneAttempts += 1;
 
-      history.push({ role: 'user', content: userText });
+      history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText, shouldEnd: false };
     }
@@ -289,9 +352,27 @@ export async function handleTurn({ userText, callState }) {
 
   // 2) If we are currently capturing email, handle that WITHOUT GPT
   if (capture.mode === 'email') {
-    capture.buffer = (capture.buffer + ' ' + (userText || '')).trim();
+    // Escape hatch: user clearly can't hear / is confused
+    if (
+      /\bhello\b/.test(userLower) ||
+      /can.?t hear/.test(userLower) ||
+      /cannot hear/.test(userLower)
+    ) {
+      const replyText =
+        'Sorry, I was just trying to catch your email there. Could you give me your full email address again, slowly, all in one go from the very start?';
 
-    // Try smart email normaliser
+      capture.mode = 'email';
+      capture.buffer = '';
+      capture.emailAttempts += 1;
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+      return { text: replyText, shouldEnd: false };
+    }
+
+    capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
+
+    // Try smart email normaliser on the whole accumulated buffer
     const email = extractEmailSmart(capture.buffer);
     if (email) {
       if (!callState.booking) callState.booking = {};
@@ -303,27 +384,27 @@ export async function handleTurn({ userText, callState }) {
       capture.mode = 'none';
       capture.buffer = '';
       capture.emailAttempts = 0;
+      capture.pendingConfirm = 'email';
 
-      history.push({ role: 'user', content: userText });
+      history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText, shouldEnd: false };
     }
 
-    // If we've got a long-ish start but no "@"/"at" yet → nudge them to give the domain
-    const lowerBuf = capture.buffer.toLowerCase();
-    const hasLocalLike = /[a-z0-9]{4,}/.test(lowerBuf);
-    const hasAtOrAtWord = /@|\bat\b/.test(lowerBuf);
+    // If caller explicitly says they have no email, accept booking without it
+    if (/no email|don.?t have an email|do not have an email/.test(userLower)) {
+      if (!callState.booking) callState.booking = {};
+      callState.booking.email = null;
 
-    if (hasLocalLike && !hasAtOrAtWord && capture.buffer.length > 20) {
       const replyText =
-        "I’ve got the first part of your email — what’s it at? For example at gmail dot com, outlook dot com, or similar?";
+        'No worries at all — we can still book you in without an email address.';
 
-      // We stay in email mode but clear buffer so they give full address in one go
-      capture.mode = 'email';
+      capture.mode = 'none';
       capture.buffer = '';
-      capture.emailAttempts += 1;
+      capture.emailAttempts = 0;
+      capture.pendingConfirm = null;
 
-      history.push({ role: 'user', content: userText });
+      history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText, shouldEnd: false };
     }
@@ -331,9 +412,9 @@ export async function handleTurn({ userText, callState }) {
     // If they’ve spoken a bit but still no valid email, gently reset with varied phrasing
     if (capture.buffer.length > 25) {
       const variants = [
-        "I might’ve mangled that email a bit. Could you give it to me one more time, slowly, all in one go?",
-        "Sorry, I don’t think I caught the full email. Could you say the whole address again from the very beginning, nice and slowly?",
-        "Let’s try that again — full email address, from the start, slowly and all in one go.",
+        'I might’ve mangled that email a bit. Could you give it to me one more time, slowly, all in one go?',
+        'Sorry, I don’t think I caught the full email. Could you say the whole address again from the very beginning, nice and slowly?',
+        'Let’s try that again — full email address, from the start, slowly and all in one go.',
       ];
       const idx = capture.emailAttempts % variants.length;
       const replyText = variants[idx];
@@ -342,7 +423,7 @@ export async function handleTurn({ userText, callState }) {
       capture.buffer = '';
       capture.emailAttempts += 1;
 
-      history.push({ role: 'user', content: userText });
+      history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText, shouldEnd: false };
     }
@@ -353,19 +434,19 @@ export async function handleTurn({ userText, callState }) {
 
   // 3) System-level booking actions first (yes/no on suggested time, etc.)
   const systemAction = await handleSystemActionsFirst({
-    userText,
+    userText: safeUserText,
     callState,
   });
 
   if (systemAction && systemAction.intercept && systemAction.replyText) {
-    history.push({ role: 'user', content: userText });
+    history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: systemAction.replyText });
     return { text: systemAction.replyText, shouldEnd: false };
   }
 
   // 4) Update booking state with latest utterance (name/phone/email/time/earliest)
   await updateBookingStateFromUtterance({
-    userText,
+    userText: safeUserText,
     callState,
     timezone: TZ,
   });
@@ -381,7 +462,7 @@ export async function handleTurn({ userText, callState }) {
     messages.push({ role: msg.role, content: msg.content });
   }
 
-  messages.push({ role: 'user', content: userText });
+  messages.push({ role: 'user', content: safeUserText });
 
   const completion = await openai.chat.completions.create({
     model: 'gpt-5.1',
@@ -410,7 +491,7 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  history.push({ role: 'user', content: userText });
+  history.push({ role: 'user', content: safeUserText });
   history.push({ role: 'assistant', content: botText });
 
   // 6) Detect if Gabriel just asked for phone or email → enable capture mode
@@ -434,7 +515,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // 7) Detect end-of-call intent from the caller
-  const userLower = (userText || '').toLowerCase();
   let shouldEnd = false;
 
   if (
