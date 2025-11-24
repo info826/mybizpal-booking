@@ -209,7 +209,12 @@ export async function handleTurn({ userText, callState }) {
 
   // Ensure capture state for phone/email
   if (!callState.capture) {
-    callState.capture = { mode: 'none', buffer: '' };
+    callState.capture = {
+      mode: 'none',
+      buffer: '',
+      emailAttempts: 0,
+      phoneAttempts: 0,
+    };
   }
   const capture = callState.capture;
 
@@ -228,6 +233,7 @@ export async function handleTurn({ userText, callState }) {
 
       capture.mode = 'none';
       capture.buffer = '';
+      capture.phoneAttempts = 0;
 
       history.push({ role: 'user', content: userText });
       history.push({ role: 'assistant', content: replyText });
@@ -245,19 +251,26 @@ export async function handleTurn({ userText, callState }) {
 
       capture.mode = 'none';
       capture.buffer = '';
+      capture.phoneAttempts = 0;
 
       history.push({ role: 'user', content: userText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText, shouldEnd: false };
     }
 
-    // If buffer is long and still no valid number, reset gracefully
+    // If buffer is long and still no valid number, reset gracefully with varied phrasing
     if (capture.buffer.length > 40 || digitsOnly.length > 16) {
-      const replyText =
-        "I’m not sure I caught that cleanly. Could you repeat your mobile slowly for me, digit by digit, from the start?";
+      const variants = [
+        "I’m not sure I caught that cleanly. Could you repeat your mobile slowly for me, digit by digit, from the start?",
+        "Sorry, I don’t think I got that whole number. Can you give me the full mobile again, nice and slowly, from the beginning?",
+        "Let’s try that one more time — full mobile number, digit by digit, from the very start.",
+      ];
+      const idx = capture.phoneAttempts % variants.length;
+      const replyText = variants[idx];
 
       capture.mode = 'phone';
       capture.buffer = '';
+      capture.phoneAttempts += 1;
 
       history.push({ role: 'user', content: userText });
       history.push({ role: 'assistant', content: replyText });
@@ -272,6 +285,7 @@ export async function handleTurn({ userText, callState }) {
   if (capture.mode === 'email') {
     capture.buffer = (capture.buffer + ' ' + (userText || '')).trim();
 
+    // Try smart email normaliser
     const email = extractEmailSmart(capture.buffer);
     if (email) {
       if (!callState.booking) callState.booking = {};
@@ -282,19 +296,45 @@ export async function handleTurn({ userText, callState }) {
 
       capture.mode = 'none';
       capture.buffer = '';
+      capture.emailAttempts = 0;
 
       history.push({ role: 'user', content: userText });
       history.push({ role: 'assistant', content: replyText });
       return { text: replyText, shouldEnd: false };
     }
 
-    // If they’ve spoken a bit but still no valid email, gently reset
-    if (capture.buffer.length > 35) {
+    // If we've got a long-ish start but no "@"/"at" yet → nudge them to give the domain
+    const lowerBuf = capture.buffer.toLowerCase();
+    const hasLocalLike = /[a-z0-9]{4,}/.test(lowerBuf);
+    const hasAtOrAtWord = /@|\bat\b/.test(lowerBuf);
+
+    if (hasLocalLike && !hasAtOrAtWord && capture.buffer.length > 20) {
       const replyText =
-        "I might’ve mangled that email a bit. Could you give it to me one more time, slowly, all in one go?";
+        "I’ve got the first part of your email — what’s it at? For example at gmail dot com, outlook dot com, or similar?";
+
+      // We stay in email mode but clear buffer so they give full address in one go
+      capture.mode = 'email';
+      capture.buffer = '';
+      capture.emailAttempts += 1;
+
+      history.push({ role: 'user', content: userText });
+      history.push({ role: 'assistant', content: replyText });
+      return { text: replyText, shouldEnd: false };
+    }
+
+    // If they’ve spoken a bit but still no valid email, gently reset with varied phrasing
+    if (capture.buffer.length > 25) {
+      const variants = [
+        "I might’ve mangled that email a bit. Could you give it to me one more time, slowly, all in one go?",
+        "Sorry, I don’t think I caught the full email. Could you say the whole address again from the very beginning, nice and slowly?",
+        "Let’s try that again — full email address, from the start, slowly and all in one go.",
+      ];
+      const idx = capture.emailAttempts % variants.length;
+      const replyText = variants[idx];
 
       capture.mode = 'email';
       capture.buffer = '';
+      capture.emailAttempts += 1;
 
       history.push({ role: 'user', content: userText });
       history.push({ role: 'assistant', content: replyText });
@@ -377,9 +417,11 @@ export async function handleTurn({ userText, callState }) {
   ) {
     capture.mode = 'phone';
     capture.buffer = '';
+    capture.phoneAttempts = 0;
   } else if (/(email|e-mail|e mail)/.test(lower)) {
     capture.mode = 'email';
     capture.buffer = '';
+    capture.emailAttempts = 0;
   } else {
     capture.mode = 'none';
     capture.buffer = '';
