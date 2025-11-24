@@ -1,7 +1,9 @@
 // calendar.js
 // Google Calendar helpers: earliest-available, create, cancel, find existing
+// + WhatsApp-first confirmation with SMS fallback
 
 import { google } from 'googleapis';
+import twilio from 'twilio';
 import {
   addMinutes,
   addDays,
@@ -18,6 +20,8 @@ const CALENDAR_ID =
   process.env.GOOGLE_CALENDAR_ID ||
   process.env.CALENDAR_ID ||
   'primary';
+
+// ---------- GOOGLE CALENDAR SETUP ----------
 
 const jwt = new google.auth.JWT(
   process.env.GOOGLE_CLIENT_EMAIL,
@@ -37,7 +41,20 @@ async function ensureGoogleAuth() {
   }
 }
 
-// Format spoken time
+// ---------- TWILIO SETUP (WHATSAPP + SMS) ----------
+
+const twilioClient = twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
+
+const WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM;        // e.g. 'whatsapp:+447456438935'
+const SMS_FROM = process.env.TWILIO_SMS_FROM;                  // e.g. '+447456438935'
+const WHATSAPP_TEMPLATE_SID = process.env.TWILIO_WHATSAPP_TEMPLATE_SID;
+
+// ---------- COMMON HELPERS ----------
+
+// Format spoken time (for messages etc.)
 export function formatSpokenDateTime(iso, timezone = TZ) {
   const d = new Date(iso);
   const day = formatInTimeZone(d, timezone, 'eeee');
@@ -71,6 +88,48 @@ function dayEnd(d) {
   e = setSeconds(e, 0);
   return e;
 }
+
+// Never let "hi/hello/hey/thanks/booking" be saved as a name
+function safeCallerName(rawName) {
+  const raw = rawName ? String(rawName).trim() : '';
+  if (!raw) return 'New caller';
+
+  const lower = raw.toLowerCase();
+  const bad = new Set(['hi', 'hello', 'hey', 'thanks', 'thank you', 'booking']);
+  if (bad.has(lower)) return 'New caller';
+
+  return raw;
+}
+
+// Build SMS body (used when WhatsApp fails)
+function buildSmsBody({ startISO }) {
+  const spoken = formatSpokenDateTime(startISO, TZ);
+
+  const zoomLink = process.env.ZOOM_LINK || '';
+  const zoomId = process.env.ZOOM_MEETING_ID || '';
+  const zoomPass = process.env.ZOOM_PASSCODE || '';
+
+  const lines = [
+    `✅ (hi) MyBizPal — Business Consultation (15–30 min)`,
+    `Date: ${spoken}`,
+    '(Greenwich Mean Time)',
+    '',
+  ];
+
+  if (zoomLink) {
+    lines.push(`Zoom: ${zoomLink}`);
+    if (zoomId || zoomPass) {
+      lines.push(`ID: ${zoomId}  Passcode: ${zoomPass}`);
+    }
+    lines.push('');
+  }
+
+  lines.push('Reply CHANGE to reschedule.');
+
+  return lines.join('\n');
+}
+
+// ---------- EARLIEST AVAILABLE SLOT ----------
 
 /**
  * Find earliest available 30-min slot within next N days,
@@ -191,7 +250,8 @@ export async function findEarliestAvailableSlot({
   return null;
 }
 
-// Basic conflict checker
+// ---------- BASIC CONFLICT CHECKER ----------
+
 export async function hasConflict({ startISO, durationMin = 30 }) {
   await ensureGoogleAuth();
   const start = new Date(startISO).toISOString();
@@ -207,6 +267,8 @@ export async function hasConflict({ startISO, durationMin = 30 }) {
   });
   return (r.data.items || []).length > 0;
 }
+
+// ---------- FIND & CANCEL EXISTING BOOKINGS ----------
 
 export async function findExistingBooking({ phone, email }) {
   await ensureGoogleAuth();
@@ -243,6 +305,15 @@ export async function cancelEventById(id) {
   await calendar.events.delete({ calendarId: CALENDAR_ID, eventId: id });
 }
 
+// ---------- CREATE BOOKING EVENT + NOTIFICATIONS ----------
+
+/**
+ * Old-style API (what your code is using now).
+ * Creates the event at `startISO` and sends WhatsApp confirmation,
+ * with SMS fallback if WhatsApp fails.
+ *
+ * Returns the created Google Calendar event (same as before).
+ */
 export async function createBookingEvent({
   startISO,
   durationMinutes = 30,
@@ -255,18 +326,21 @@ export async function createBookingEvent({
   const endISO = new Date(
     new Date(startISO).getTime() + durationMinutes * 60000
   ).toISOString();
-  const who = name ? `(${name}) ` : '';
 
   const zoomLink = process.env.ZOOM_LINK || '';
   const zoomId = process.env.ZOOM_MEETING_ID || '';
   const zoomPass = process.env.ZOOM_PASSCODE || '';
 
+  const safeName = safeCallerName(name);
+  const whoPrefix = safeName && safeName !== 'New caller' ? `(${safeName}) ` : '';
+
   const descriptionLines = [
     'Booked by MyBizPal (Gabriel).',
-    `Caller name: ${name || 'Prospect'}`,
+    `Caller name: ${safeName}`,
     `Caller phone: ${phone || 'n/a'}`,
     `Caller email: ${email || 'n/a'}`,
   ];
+
   if (zoomLink) {
     descriptionLines.push('');
     descriptionLines.push(`Zoom: ${zoomLink}`);
@@ -281,7 +355,7 @@ export async function createBookingEvent({
   }
 
   const event = {
-    summary: `${who}MyBizPal — Business Consultation (15–30 min)`,
+    summary: `${whoPrefix}MyBizPal — Business Consultation (15–30 min)`,
     start: { dateTime: startISO, timeZone: TZ },
     end: { dateTime: endISO, timeZone: TZ },
     description: descriptionLines.join('\n'),
@@ -293,5 +367,92 @@ export async function createBookingEvent({
     sendUpdates: 'none',
   });
 
+  // ----- WhatsApp first, then SMS fallback -----
+  if (!phone) {
+    console.warn('⚠️ No caller phone provided; cannot send WhatsApp/SMS confirmation');
+    return created.data;
+  }
+
+  const smsBody = buildSmsBody({ startISO });
+  let whatsappError = null;
+
+  try {
+    if (!WHATSAPP_FROM || !WHATSAPP_TEMPLATE_SID) {
+      throw new Error('Missing WHATSAPP_FROM or TWILIO_WHATSAPP_TEMPLATE_SID env vars');
+    }
+
+    const toWhatsapp = phone.startsWith('whatsapp:') ? phone : `whatsapp:${phone}`;
+
+    // We keep variables simple here – adapt to match your Twilio template
+    const spoken = formatSpokenDateTime(startISO, TZ);
+
+    const vars = {
+      1: safeName,           // {{1}} name
+      2: spoken,             // {{2}} full date/time text
+      3: phone,              // {{3}} phone
+      4: zoomLink || '',     // {{4}} zoom link (if any)
+    };
+
+    await twilioClient.messages.create({
+      from: WHATSAPP_FROM,
+      to: toWhatsapp,
+      contentSid: WHATSAPP_TEMPLATE_SID,
+      contentVariables: JSON.stringify(vars),
+    });
+
+    console.log('✅ WhatsApp confirmation sent');
+  } catch (err) {
+    whatsappError = err;
+    console.error('❌ WhatsApp template send error:', err.message || err);
+  }
+
+  if (whatsappError) {
+    try {
+      if (!SMS_FROM) {
+        throw new Error('Missing SMS_FROM env var');
+      }
+
+      await twilioClient.messages.create({
+        from: SMS_FROM,
+        to: phone,
+        body: smsBody,
+      });
+
+      console.log('✅ SMS fallback confirmation sent');
+    } catch (err) {
+      console.error('❌ SMS fallback send error:', err.message || err);
+    }
+  }
+
   return created.data;
+}
+
+/**
+ * New-style helper if you ever want to call with the whole booking object.
+ * This simply adapts `booking` → `createBookingEvent` so either style works.
+ */
+export async function createBookingCalendarEventAndNotify(booking) {
+  if (!booking) {
+    throw new Error('createBookingCalendarEventAndNotify called without booking');
+  }
+
+  const startISO = booking.slotStartIso || booking.startISO;
+  const durationMinutes = booking.durationMinutes || 30;
+
+  if (!startISO) {
+    throw new Error('Booking is missing slotStartIso/startISO');
+  }
+
+  return createBookingEvent({
+    startISO,
+    durationMinutes,
+    name: booking.name,
+    email: booking.email,
+    phone: booking.phone,
+  });
+}
+
+// Backwards-compatible alias if any file imports this name
+export async function createCalendarEventAndNotify(booking) {
+  return createBookingCalendarEventAndNotify(booking);
 }
