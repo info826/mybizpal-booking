@@ -6,7 +6,7 @@ import { toZonedTime, fromZonedTime, formatInTimeZone } from 'date-fns-tz';
 
 const DEFAULT_TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
-// ---------- SMART EMAIL NORMALISER ----------
+// ---------- SHARED DIGIT + FILLER MAPS (EMAIL + PHONE) ----------
 
 // Map spelled-out digits → actual digits
 const DIGIT_WORDS = {
@@ -28,13 +28,16 @@ const DIGIT_WORDS = {
   nine: '9',
 };
 
-// Filler words to remove
-const FILLERS = new Set([
+// Filler words to ignore when normalising
+const FILLER_WORDS = new Set([
   'so',
   'ok',
   'okay',
   'um',
+  'umm',
   'uh',
+  'uhh',
+  'erm',
   'eh',
   'ah',
   'right',
@@ -48,54 +51,8 @@ const FILLERS = new Set([
 
 // Converts sequences like “four two two seven” → “4227”
 function normaliseDigits(words) {
-  return words
-    .map((w) => DIGIT_WORDS[w] || w)
-    .join('');
+  return words.map((w) => DIGIT_WORDS[w] || w).join('');
 }
-
-export function extractEmailSmart(raw) {
-  if (!raw) return null;
-
-  // normalise spacing and case
-  let text = raw
-    .toLowerCase()
-    .replace(/-/g, ' ')
-    .replace(/_/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  // remove filler words
-  text = text
-    .split(' ')
-    .filter((w) => !FILLERS.has(w))
-    .join(' ');
-
-  // convert spelled digits
-  text = text
-    .split(' ')
-    .map((w) => DIGIT_WORDS[w] || w)
-    .join(' ');
-
-  // normalise “at” → “@”
-  text = text.replace(/\b(at|a t)\b/g, '@');
-
-  // normalise “dot” → “.”
-  text = text.replace(/\b(dot|dot com|dott)\b/g, '.');
-
-  // collapse spaced letters: "j w" → "jw"
-  text = text.replace(/\b([a-z])\s+([a-z])\b/g, '$1$2');
-
-  // collapse repeated spaces again and remove them
-  text = text.replace(/\s+/g, '');
-
-  // final classic email pattern
-  const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
-  if (emailRegex.test(text)) return text;
-
-  return null;
-}
-
-// ---------- EXISTING HELPERS ----------
 
 export function extractName(text) {
   if (!text) return null;
@@ -114,17 +71,36 @@ export function extractName(text) {
   return m ? m[1] : null;
 }
 
+// Smarter UK phone parsing, handles filler words + “double/triple X”
 export function parseUkPhone(spoken) {
   if (!spoken) return null;
 
   let s = ` ${spoken.toLowerCase()} `;
 
-  // Strip filler sounds
-  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, '');
+  // Strip filler sounds + filler words
+  s = s.replace(/\b(uh|uhh|uhm|um|umm|erm)\b/g, ' ');
+  s = s.replace(
+    /\b(so|ok|okay|right|like|well|yeah|you know|you\s+know|just)\b/g,
+    ' '
+  );
 
   // Handle "plus forty four"
   s = s.replace(/\bplus\s*four\s*four\b/g, '+44');
   s = s.replace(/\bplus\b/g, '+');
+
+  // Expand "double/triple X"
+  s = s.replace(
+    /\b(double|triple)\s+(zero|oh|o|one|two|three|four|five|six|seven|eight|nine|\d)\b/g,
+    (_match, mult, digitWord) => {
+      let d = digitWord;
+      if (isNaN(Number(d))) {
+        d = DIGIT_WORDS[digitWord] || '';
+      }
+      if (!d) return '';
+      const count = mult === 'triple' ? 3 : 2;
+      return (' ' + d).repeat(count);
+    }
+  );
 
   // Map words → digits
   s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
@@ -166,7 +142,7 @@ export function isLikelyUkNumberPair(p) {
   return !!(p && /^0\d{10}$/.test(p.national) && /^\+44\d{10}$/.test(p.e164));
 }
 
-// Original simple email extractor (kept for backwards-compatibility)
+// Original simple email extractor (still exported in case other code uses it)
 export function extractEmail(spoken) {
   if (!spoken) return null;
 
@@ -198,12 +174,53 @@ export function extractEmail(spoken) {
   return m ? m[0] : null;
 }
 
+// ---------- SMART EMAIL NORMALISER (used by logic.js) ----------
+
+export function extractEmailSmart(raw) {
+  if (!raw) return null;
+
+  let text = raw
+    .toLowerCase()
+    .replace(/-/g, ' ')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // remove filler words
+  text = text
+    .split(' ')
+    .filter((w) => !FILLER_WORDS.has(w))
+    .join(' ');
+
+  // convert spelled digits
+  text = text
+    .split(' ')
+    .map((w) => DIGIT_WORDS[w] || w)
+    .join(' ');
+
+  // normalise “at” → “@”
+  text = text.replace(/\b(at|a t)\b/g, '@');
+
+  // normalise “dot” → “.”
+  text = text.replace(/\b(dot|dot com|dott)\b/g, '.');
+
+  // collapse spaced letters: "j w" → "jw"
+  text = text.replace(/\b([a-z])\s+([a-z])\b/g, '$1$2');
+
+  // collapse repeated spaces again
+  text = text.replace(/\s+/g, '');
+
+  // if it now looks like an email, return it
+  const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
+  if (emailRegex.test(text)) return text;
+
+  return null;
+}
+
 export function parseNaturalDate(utterance, tz = DEFAULT_TZ) {
   if (!utterance) return null;
 
-  const parsed = chrono.parseDate(utterance, new Date(), {
-    forwardDate: true,
-  });
+  const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
   if (!parsed) return null;
 
   const zoned = toZonedTime(parsed, tz);
