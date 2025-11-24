@@ -142,7 +142,7 @@ export function isLikelyUkNumberPair(p) {
   return !!(p && /^0\d{10}$/.test(p.national) && /^\+44\d{10}$/.test(p.e164));
 }
 
-// Original simple email extractor (still exported in case other code uses it)
+// Simple email extractor (still used elsewhere as a fallback if needed)
 export function extractEmail(spoken) {
   if (!spoken) return null;
 
@@ -165,11 +165,9 @@ export function extractEmail(spoken) {
   // Normalise spaces around @ and .
   s = s.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
 
-  // Remove ALL remaining spaces so "4 2 2 7 4 3 5 j w at gmail dot com"
-  // becomes "4227435jw@gmail.com"
+  // Remove ALL remaining spaces
   s = s.replace(/\s+/g, '');
 
-  // Now extract classic email pattern
   const m = s.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
   return m ? m[0] : null;
 }
@@ -186,11 +184,18 @@ export function extractEmailSmart(raw) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // remove filler words
+  // remove filler words ("so", "okay", etc.)
   text = text
     .split(' ')
     .filter((w) => !FILLER_WORDS.has(w))
     .join(' ');
+
+  // fix common gmail variants BEFORE digit / space work
+  // "g mail" → "gmail"
+  text = text.replace(/\bg\s+mail\b/g, 'gmail');
+  // "gmail mail" or "gmailmail" → "gmail"
+  text = text.replace(/\bgmail\s+mail\b/g, 'gmail');
+  text = text.replace(/\bgmailmail\b/g, 'gmail');
 
   // convert spelled digits
   text = text
@@ -210,7 +215,9 @@ export function extractEmailSmart(raw) {
   // collapse repeated spaces again
   text = text.replace(/\s+/g, '');
 
-  // if it now looks like an email, return it
+  // final gmail fix: gmailmail.com → gmail.com
+  text = text.replace(/gmailmail\.com$/g, 'gmail.com');
+
   const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
   if (emailRegex.test(text)) return text;
 
