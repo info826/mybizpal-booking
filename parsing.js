@@ -6,57 +6,47 @@ import { toZonedTime, fromZonedTime, formatInTimeZone } from 'date-fns-tz';
 
 const DEFAULT_TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
-// ---------- NAME EXTRACTION ----------
+// ---------- NAME PARSING ----------
 
-const NAME_STOP_WORDS = new Set([
+const NAME_GREETING_STOP_WORDS = new Set([
   'hi',
   'hello',
   'hey',
   'thanks',
   'thank',
-  'please',
+  'thankyou',
   'booking',
   'book',
-  'call',
-  'calling',
-  'help',
-  'ok',
-  'okay',
-  'yes',
-  'yeah',
-  'no',
-  'nope',
+  'good',
+  'morning',
+  'afternoon',
+  'evening',
 ]);
 
 export function extractName(text) {
   if (!text) return null;
   const t = text.trim();
 
-  // Patterns like: "I'm Gabriel", "my name is Raquel", "this is John"
-  let m = t.match(
-    /\b(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z '-]{1,30})\b/i
+  // Normalise spaces
+  const normalised = t.replace(/\s+/g, ' ');
+
+  // "I'm Gabriel", "I am Gabriel", "this is John", "my name is Raquel", "no my name is Gabriel"
+  let m = normalised.match(
+    /\b(?:no[, ]+)?(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
   );
   if (m) {
-    const full = m[1]
-      .trim()
-      .replace(/\s+/g, ' ')
-      .replace(/[^A-Za-z '-]/g, '');
-    if (!full) return null;
-    // Use FIRST token as spoken name (e.g. "Gabriel" from "Gabriel De Ornelas")
-    const first = full.split(' ')[0];
-    return first;
+    const full = m[1].trim().replace(/\s+/g, ' ');
+    // Use only first token as the name ("Gabriel" from "Gabriel De Ornelas")
+    return full.split(' ')[0];
   }
 
-  // Fallback: first "reasonable" word that is not a greeting/stop word and ≥ 3 letters
-  const words = t
-    .split(/\s+/)
-    .map((w) => w.replace(/[^A-Za-z'-]/g, ''))
-    .filter(Boolean);
-
+  // Fallback: first reasonable-looking word that is not a greeting/stop word and ≥ 3 letters
+  const words = normalised.split(' ');
   for (const w of words) {
-    const lower = w.toLowerCase();
-    if (lower.length >= 3 && !NAME_STOP_WORDS.has(lower)) {
-      return w;
+    const clean = w.replace(/[^A-Za-z'-]/g, '');
+    const lower = clean.toLowerCase();
+    if (clean.length >= 3 && !NAME_GREETING_STOP_WORDS.has(lower)) {
+      return clean;
     }
   }
 
@@ -96,12 +86,10 @@ export function parseUkPhone(spoken) {
   // Normalise to E.164 +44…
   if (s.startsWith('+44')) {
     const rest = s.slice(3);
-    if (/^\d{10}$/.test(rest))
-      return { e164: `+44${rest}`, national: `0${rest}` };
+    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
   } else if (s.startsWith('44')) {
     const rest = s.slice(2);
-    if (/^\d{10}$/.test(rest))
-      return { e164: `+44${rest}`, national: `0${rest}` };
+    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
   } else if (s.startsWith('0') && /^\d{11}$/.test(s)) {
     return { e164: `+44${s.slice(1)}`, national: s };
   } else if (/^\d{10}$/.test(s)) {
@@ -117,7 +105,7 @@ export function isLikelyUkNumberPair(p) {
   return !!(p && /^0\d{10}$/.test(p.national) && /^\+44\d{10}$/.test(p.e164));
 }
 
-// ---------- SMART EMAIL NORMALISER ----------
+// ---------- EMAIL PARSING ----------
 
 // Map spelled-out digits → actual digits
 const DIGIT_WORDS = {
@@ -139,8 +127,8 @@ const DIGIT_WORDS = {
   nine: '9',
 };
 
-// Filler words to remove when building an email address
-const EMAIL_FILLERS = new Set([
+// General fillers
+const GENERAL_FILLERS = new Set([
   'so',
   'ok',
   'okay',
@@ -152,33 +140,46 @@ const EMAIL_FILLERS = new Set([
   'like',
   'well',
   'yeah',
-  'yes',
-  'yep',
-  'yup',
   'you',
   'know',
   'just',
+]);
+
+// Extra email-specific fillers that often appear before the real address
+const EMAIL_LEAD_IN_FILLERS = new Set([
+  'yes',
+  'yeah',
+  'yep',
+  'sure',
+  'so',
+  'ok',
+  'okay',
+  'right',
+  'well',
   'my',
   'email',
   'mail',
-  'address',
-  'it',
+  'is',
   "it's",
   'its',
-  'is',
-  'this',
-  'that',
   'here',
   'there',
-  'please',
   'the',
+  'best',
+  'one',
+  'would',
+  'be',
+  'i',
 ]);
+
+function isEmailFiller(word) {
+  const w = word.toLowerCase();
+  return GENERAL_FILLERS.has(w) || EMAIL_LEAD_IN_FILLERS.has(w);
+}
 
 // Converts sequences like “four two two seven” → “4227”
 function normaliseDigits(words) {
-  return words
-    .map((w) => DIGIT_WORDS[w] || w)
-    .join('');
+  return words.map((w) => DIGIT_WORDS[w] || w).join('');
 }
 
 export function extractEmailSmart(raw) {
@@ -191,72 +192,55 @@ export function extractEmailSmart(raw) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Remove filler words like "yes", "so", "my email is", etc.
-  text = text
-    .split(' ')
-    .filter((w) => !EMAIL_FILLERS.has(w))
-    .join(' ');
+  // Tokenise
+  let tokens = text.split(' ');
 
-  // Convert spelled digits → numerals
-  text = text
-    .split(' ')
-    .map((w) => DIGIT_WORDS[w] || w)
-    .join(' ');
+  // Drop leading fillers like "yes / so / my email is / it's / ok"
+  while (tokens.length && isEmailFiller(tokens[0])) {
+    tokens.shift();
+  }
 
-  // normalise “at” → “@”
-  text = text.replace(/\b(at|a t)\b/g, '@');
+  // Remove filler words anywhere
+  tokens = tokens.filter((w) => !GENERAL_FILLERS.has(w));
+
+  // Convert spelled digits
+  tokens = tokens.map((w) => DIGIT_WORDS[w] || w);
+
+  // Re-join
+  text = tokens.join(' ');
+
+  // normalise “at” phrases → “@”
+  text = text.replace(/\b(at sign|at symbol)\b/g, '@');
+  text = text.replace(/\barroba\b/g, '@');
+  text = text.replace(/\bat\b/g, '@');
 
   // normalise “dot” → “.”
-  text = text.replace(/\b(dot|dot com|dott)\b/g, '.');
+  text = text.replace(/\b(dot com|dot)\b/g, '.');
 
   // collapse spaced letters: "j w" → "jw"
   text = text.replace(/\b([a-z])\s+([a-z])\b/g, '$1$2');
 
-  // collapse spaces around @ and .
-  text = text.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
-
-  // finally remove all spaces so "4 2 2 7 4 3 5 jw @ gmail dot com"
-  // becomes "4227435jw@gmail.com"
+  // collapse spaces
   text = text.replace(/\s+/g, '');
 
+  // Classic email regex
   const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
   if (emailRegex.test(text)) return text;
 
   return null;
 }
 
-// (Older simple email extractor – kept for any generic use, not used in capture mode)
+// Kept for backwards compatibility if something still calls extractEmail()
 export function extractEmail(spoken) {
-  if (!spoken) return null;
-  let s = ` ${spoken.toLowerCase()} `;
-
-  s = s
-    .replace(/\bat(-|\s)?sign\b/g, '@')
-    .replace(/\bat symbol\b/g, '@')
-    .replace(/\barroba\b/g, '@')
-    .replace(/\bat\b/g, '@');
-
-  s = s
-    .replace(/\bdot\b/g, '.')
-    .replace(/\bpunto\b/g, '.')
-    .replace(/\bponto\b/g, '.')
-    .replace(/\bpoint\b/g, '.');
-
-  s = s.replace(/\s*@\s*/g, '@').replace(/\s*\.\s*/g, '.');
-  s = s.replace(/\s+/g, '');
-
-  const m = s.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
-  return m ? m[0] : null;
+  return extractEmailSmart(spoken);
 }
 
-// ---------- NATURAL DATE PARSING ----------
+// ---------- DATE PARSING ----------
 
 export function parseNaturalDate(utterance, tz = DEFAULT_TZ) {
   if (!utterance) return null;
 
-  const parsed = chrono.parseDate(utterance, new Date(), {
-    forwardDate: true,
-  });
+  const parsed = chrono.parseDate(utterance, new Date(), { forwardDate: true });
   if (!parsed) return null;
 
   const zoned = toZonedTime(parsed, tz);
@@ -277,7 +261,7 @@ export function formatSpokenDateTime(iso, tz = DEFAULT_TZ) {
   return `${day} ${date} ${month} at ${time}`;
 }
 
-// ---------- YES / NO ----------
+// ---------- YES / NO HELPERS ----------
 
 export function yesInAnyLang(text) {
   const t = (text || '').toLowerCase().trim();
