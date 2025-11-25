@@ -86,14 +86,20 @@ export function parseUkPhone(spoken) {
   // Normalise to E.164 +44…
   if (s.startsWith('+44')) {
     const rest = s.slice(3);
-    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
+    if (/^\d{10}$/.test(rest)) {
+      return { e164: `+44${rest}`, national: `0${rest}` };
+    }
   } else if (s.startsWith('44')) {
     const rest = s.slice(2);
-    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
+    if (/^\d{10}$/.test(rest)) {
+      return { e164: `+44${rest}`, national: `0${rest}` };
+    }
   } else if (s.startsWith('0') && /^\d{11}$/.test(s)) {
+    // Proper UK 0XXXXXXXXXX mobile/landline
     return { e164: `+44${s.slice(1)}`, national: s };
-  } else if (/^\d{10}$/.test(s)) {
-    // No leading 0 but 10 digits → assume UK, add 0
+  } else if (/^\d{10}$/.test(s) && !s.startsWith('0')) {
+    // 10 digits *without* a leading 0 → assume UK, add 0 on national only
+    // (e.g. "7 9 9 9 4 6 2 1 6 6" → "+447999462166" / "07999462166")
     return { e164: `+44${s}`, national: `0${s}` };
   }
 
@@ -200,7 +206,7 @@ export function extractEmailSmart(raw) {
     tokens.shift();
   }
 
-  // Remove filler words anywhere
+  // Remove general filler words anywhere
   tokens = tokens.filter((w) => !GENERAL_FILLERS.has(w));
 
   // Convert spelled digits
