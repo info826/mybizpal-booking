@@ -1,9 +1,7 @@
 // calendar.js
 // Google Calendar helpers: earliest-available, create, cancel, find existing
-// + WhatsApp-first confirmation with SMS fallback
 
 import { google } from 'googleapis';
-import twilio from 'twilio';
 import {
   addMinutes,
   addDays,
@@ -13,7 +11,7 @@ import {
   setMinutes,
   setSeconds,
 } from 'date-fns';
-import { formatInTimeZone } from 'date-fns-tz';
+import { formatInTimeZone, utcToZonedTime, zonedTimeToUtc } from 'date-fns-tz';
 
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 const CALENDAR_ID =
@@ -40,17 +38,6 @@ async function ensureGoogleAuth() {
     console.log('✅ Google service account authorized for Calendar');
   }
 }
-
-// ---------- TWILIO SETUP (WHATSAPP + SMS) ----------
-
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
-
-const WHATSAPP_FROM = process.env.TWILIO_WHATSAPP_FROM;        // e.g. 'whatsapp:+447456438935'
-const SMS_FROM = process.env.TWILIO_SMS_FROM;                  // e.g. '+447456438935'
-const WHATSAPP_TEMPLATE_SID = process.env.TWILIO_WHATSAPP_TEMPLATE_SID;
 
 // ---------- COMMON HELPERS ----------
 
@@ -101,32 +88,42 @@ function safeCallerName(rawName) {
   return raw;
 }
 
-// Build SMS body (used when WhatsApp fails)
-function buildSmsBody({ startISO }) {
-  const spoken = formatSpokenDateTime(startISO, TZ);
+/**
+ * Clamp a proposed start time into business hours in TZ:
+ * - Mon–Fri only
+ * - 09:00–17:00, 30-minute increments (last valid start 16:30)
+ * If time is outside this window, we snap it back into the window
+ * on the SAME day. Booking logic already tries to keep things in-range;
+ * this is a safety net (e.g. fixing a 06:00 bug to 09:00).
+ */
+function clampToBusinessHours(startISO) {
+  let utc = new Date(startISO);
+  let zoned = utcToZonedTime(utc, TZ); // "wall-clock" in business timezone
 
-  const zoomLink = process.env.ZOOM_LINK || '';
-  const zoomId = process.env.ZOOM_MEETING_ID || '';
-  const zoomPass = process.env.ZOOM_PASSCODE || '';
+  // If weekend, we leave day alone here – earliest-slot logic already avoids weekends.
+  // We only clamp the hours/minutes.
+  let hours = zoned.getHours();
+  let mins = zoned.getMinutes();
 
-  const lines = [
-    `✅ (hi) MyBizPal — Business Consultation (15–30 min)`,
-    `Date: ${spoken}`,
-    '(Greenwich Mean Time)',
-    '',
-  ];
-
-  if (zoomLink) {
-    lines.push(`Zoom: ${zoomLink}`);
-    if (zoomId || zoomPass) {
-      lines.push(`ID: ${zoomId}  Passcode: ${zoomPass}`);
+  if (hours < 9) {
+    hours = 9;
+    mins = 0;
+  } else if (hours > 16 || (hours === 16 && mins > 30)) {
+    hours = 16;
+    mins = 30;
+  } else {
+    // Snap minutes to nearest 0 or 30 to keep clean slots
+    if (mins < 15) mins = 0;
+    else if (mins < 45) mins = 30;
+    else {
+      hours += 1;
+      mins = 0;
     }
-    lines.push('');
   }
 
-  lines.push('Reply CHANGE to reschedule.');
-
-  return lines.join('\n');
+  zoned.setHours(hours, mins, 0, 0);
+  const correctedUtc = zonedTimeToUtc(zoned, TZ);
+  return correctedUtc.toISOString();
 }
 
 // ---------- EARLIEST AVAILABLE SLOT ----------
@@ -148,10 +145,10 @@ export async function findEarliestAvailableSlot({
 }) {
   await ensureGoogleAuth();
 
-  const base = fromISO ? new Date(fromISO) : new Date();
-  const windowEnd = addDays(base, daysAhead);
+  const baseUtc = fromISO ? new Date(fromISO) : new Date();
+  const windowEnd = addDays(baseUtc, daysAhead);
 
-  const timeMin = base.toISOString();
+  const timeMin = baseUtc.toISOString();
   const timeMax = windowEnd.toISOString();
 
   const res = await calendar.events.list({
@@ -168,7 +165,7 @@ export async function findEarliestAvailableSlot({
   );
 
   // Start cursor from base, rounded UP to the next 30-min boundary
-  let cursor = new Date(base.getTime());
+  let cursor = new Date(baseUtc.getTime());
   cursor.setSeconds(0, 0);
   const mins = cursor.getMinutes();
   const extra = mins % 30;
@@ -176,18 +173,22 @@ export async function findEarliestAvailableSlot({
     cursor = addMinutes(cursor, 30 - extra);
   }
 
-  // Move cursor to a valid working time (Mon–Fri, 9–17)
+  // Move cursor to a valid working time (Mon–Fri, 9–17) in TZ
   function normaliseCursorToWorkingTime(d) {
-    let c = new Date(d.getTime());
+    // Interpret d in the business timezone
+    let zoned = utcToZonedTime(d, timezone);
+
     // If weekend or after hours, bump to next valid weekday at 9:00
-    while (isWeekend(c) || isAfter(c, dayEnd(c))) {
-      c = dayStart(addDays(c, 1));
+    while (isWeekend(zoned) || isAfter(zoned, dayEnd(zoned))) {
+      zoned = dayStart(addDays(zoned, 1));
     }
     // If before 9am, move to 9am
-    if (isBefore(c, dayStart(c))) {
-      c = dayStart(c);
+    if (isBefore(zoned, dayStart(zoned))) {
+      zoned = dayStart(zoned);
     }
-    return c;
+
+    // Convert back to UTC for comparisons
+    return zonedTimeToUtc(zoned, timezone);
   }
 
   cursor = normaliseCursorToWorkingTime(cursor);
@@ -201,12 +202,15 @@ export async function findEarliestAvailableSlot({
     const slotEnd = addMinutes(cursor, durationMinutes);
 
     // Ensure this 30-min slot fits entirely within working hours
-    if (isAfter(slotEnd, dayEnd(cursor))) {
-      cursor = dayStart(addDays(cursor, 1));
+    const cursorZoned = utcToZonedTime(cursor, timezone);
+    const slotEndZoned = utcToZonedTime(slotEnd, timezone);
+    if (isAfter(slotEndZoned, dayEnd(cursorZoned))) {
+      const nextDay = dayStart(addDays(cursorZoned, 1));
+      cursor = zonedTimeToUtc(nextDay, timezone);
       continue;
     }
 
-    // Check overlap
+    // Check overlap with any existing events
     const overlapping = events.some((ev) => {
       const evStart = new Date(ev.start.dateTime);
       const evEnd = new Date(ev.end.dateTime);
@@ -305,14 +309,12 @@ export async function cancelEventById(id) {
   await calendar.events.delete({ calendarId: CALENDAR_ID, eventId: id });
 }
 
-// ---------- CREATE BOOKING EVENT + NOTIFICATIONS ----------
+// ---------- CREATE BOOKING EVENT ----------
 
 /**
- * Old-style API (what your code is using now).
- * Creates the event at `startISO` and sends WhatsApp confirmation,
- * with SMS fallback if WhatsApp fails.
- *
- * Returns the created Google Calendar event (same as before).
+ * Creates the event at `startISO` clamped into business hours
+ * and returns the created Google Calendar event.
+ * Notifications (WhatsApp/SMS) are handled separately in sms.js.
  */
 export async function createBookingEvent({
   startISO,
@@ -323,8 +325,9 @@ export async function createBookingEvent({
 }) {
   await ensureGoogleAuth();
 
+  const correctedStartISO = clampToBusinessHours(startISO);
   const endISO = new Date(
-    new Date(startISO).getTime() + durationMinutes * 60000
+    new Date(correctedStartISO).getTime() + durationMinutes * 60000
   ).toISOString();
 
   const zoomLink = process.env.ZOOM_LINK || '';
@@ -356,7 +359,7 @@ export async function createBookingEvent({
 
   const event = {
     summary: `${whoPrefix}MyBizPal — Business Consultation (15–30 min)`,
-    start: { dateTime: startISO, timeZone: TZ },
+    start: { dateTime: correctedStartISO, timeZone: TZ },
     end: { dateTime: endISO, timeZone: TZ },
     description: descriptionLines.join('\n'),
   };
@@ -366,63 +369,6 @@ export async function createBookingEvent({
     requestBody: event,
     sendUpdates: 'none',
   });
-
-  // ----- WhatsApp first, then SMS fallback -----
-  if (!phone) {
-    console.warn('⚠️ No caller phone provided; cannot send WhatsApp/SMS confirmation');
-    return created.data;
-  }
-
-  const smsBody = buildSmsBody({ startISO });
-  let whatsappError = null;
-
-  try {
-    if (!WHATSAPP_FROM || !WHATSAPP_TEMPLATE_SID) {
-      throw new Error('Missing WHATSAPP_FROM or TWILIO_WHATSAPP_TEMPLATE_SID env vars');
-    }
-
-    const toWhatsapp = phone.startsWith('whatsapp:') ? phone : `whatsapp:${phone}`;
-
-    // We keep variables simple here – adapt to match your Twilio template
-    const spoken = formatSpokenDateTime(startISO, TZ);
-
-    const vars = {
-      1: safeName,           // {{1}} name
-      2: spoken,             // {{2}} full date/time text
-      3: phone,              // {{3}} phone
-      4: zoomLink || '',     // {{4}} zoom link (if any)
-    };
-
-    await twilioClient.messages.create({
-      from: WHATSAPP_FROM,
-      to: toWhatsapp,
-      contentSid: WHATSAPP_TEMPLATE_SID,
-      contentVariables: JSON.stringify(vars),
-    });
-
-    console.log('✅ WhatsApp confirmation sent');
-  } catch (err) {
-    whatsappError = err;
-    console.error('❌ WhatsApp template send error:', err.message || err);
-  }
-
-  if (whatsappError) {
-    try {
-      if (!SMS_FROM) {
-        throw new Error('Missing SMS_FROM env var');
-      }
-
-      await twilioClient.messages.create({
-        from: SMS_FROM,
-        to: phone,
-        body: smsBody,
-      });
-
-      console.log('✅ SMS fallback confirmation sent');
-    } catch (err) {
-      console.error('❌ SMS fallback send error:', err.message || err);
-    }
-  }
 
   return created.data;
 }
