@@ -98,11 +98,20 @@ wss.on('connection', (ws, req) => {
     callSid: null,
     history: [],
     greeted: false,
+    mainSpeaker: null, // Deepgram diarisation: id of the main caller
   };
 
   // ---- Deepgram connection (STT) ----
+  // Add diarize=true and endpointing to improve robustness in noisy environments.
   const dgUrl =
-    'wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&channels=1&interim_results=true&vad_events=true';
+    'wss://api.deepgram.com/v1/listen' +
+    '?encoding=mulaw' +
+    '&sample_rate=8000' +
+    '&channels=1' +
+    '&interim_results=true' +
+    '&vad_events=true' +
+    '&diarize=true' +
+    '&endpointing=1200';
 
   const dgSocket = new WebSocket(dgUrl, {
     headers: {
@@ -201,18 +210,54 @@ wss.on('connection', (ws, req) => {
     }
   }
 
-  // Deepgram → transcript handler (with barge-in)
+  // Deepgram → transcript handler (with barge-in + diarisation)
   dgSocket.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString());
       if (!msg.channel || !msg.channel.alternatives) return;
 
       const alt = msg.channel.alternatives[0];
-      const transcript = alt.transcript?.trim();
-      if (!transcript) return;
-
+      let transcript = alt.transcript?.trim();
       const isFinal = msg.is_final;
+
+      if (!transcript) return;
       if (!isFinal) return; // only final segments
+
+      // If diarisation is enabled, lock onto the main speaker
+      if (Array.isArray(alt.words) && alt.words.length > 0) {
+        // If we have not yet chosen a main speaker, pick the first one that appears
+        if (callState.mainSpeaker == null) {
+          const firstWordWithSpeaker = alt.words.find((w) => w.speaker !== undefined);
+          if (firstWordWithSpeaker && firstWordWithSpeaker.speaker !== undefined) {
+            callState.mainSpeaker = firstWordWithSpeaker.speaker;
+            console.log('🎙️ Main speaker set to', callState.mainSpeaker);
+          }
+        }
+
+        // If we have a main speaker, rebuild transcript from only that speaker's words
+        if (callState.mainSpeaker != null) {
+          const primaryWords = alt.words.filter(
+            (w) => w.speaker === callState.mainSpeaker
+          );
+
+          if (primaryWords.length > 0) {
+            const primaryTranscript = primaryWords
+              .map((w) => w.punctuated_word || w.word || '')
+              .join(' ')
+              .trim();
+
+            if (primaryTranscript) {
+              transcript = primaryTranscript;
+            } else {
+              // No usable words from main speaker in this message
+              return;
+            }
+          } else {
+            // This chunk belongs entirely to someone else (background voice) → ignore it
+            return;
+          }
+        }
+      }
 
       // If Gabriel is talking and caller interrupts → cancel TTS (barge-in)
       if (callState.isSpeaking) {
@@ -239,7 +284,7 @@ wss.on('connection', (ws, req) => {
     }
 
     const { event } = msg;
-    
+
     if (event === 'start') {
       streamSid = msg.start.streamSid;
       callState.callSid = msg.start.callSid || null;
@@ -254,7 +299,7 @@ wss.on('connection', (ws, req) => {
       );
 
       return;
-    } 
+    }
 
     if (event === 'media') {
       if (dgSocket.readyState === WebSocket.OPEN) {
