@@ -67,7 +67,7 @@ export function parseUkPhone(spoken) {
   s = s.replace(/\bplus\s*four\s*four\b/g, '+44');
   s = s.replace(/\bplus\b/g, '+');
 
-  // Map words → digits
+  // Map words → digits (handles "oh" / "o" as 0)
   s = s.replace(/\b(oh|o|zero|naught)\b/g, '0');
   s = s
     .replace(/\bone\b/g, '1')
@@ -86,24 +86,18 @@ export function parseUkPhone(spoken) {
   // Normalise to E.164 +44…
   if (s.startsWith('+44')) {
     const rest = s.slice(3);
-    if (/^\d{10}$/.test(rest)) {
-      return { e164: `+44${rest}`, national: `0${rest}` };
-    }
+    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
   } else if (s.startsWith('44')) {
     const rest = s.slice(2);
-    if (/^\d{10}$/.test(rest)) {
-      return { e164: `+44${rest}`, national: `0${rest}` };
-    }
+    if (/^\d{10}$/.test(rest)) return { e164: `+44${rest}`, national: `0${rest}` };
   } else if (s.startsWith('0') && /^\d{11}$/.test(s)) {
-    // Proper UK 0XXXXXXXXXX mobile/landline
     return { e164: `+44${s.slice(1)}`, national: s };
-  } else if (/^\d{10}$/.test(s) && !s.startsWith('0')) {
-    // 10 digits *without* a leading 0 → assume UK, add 0 on national only
-    // (e.g. "7 9 9 9 4 6 2 1 6 6" → "+447999462166" / "07999462166")
+  } else if (/^\d{10}$/.test(s)) {
+    // No leading 0 but 10 digits → assume UK, add 0
     return { e164: `+44${s}`, national: `0${s}` };
   }
 
-  // If it doesn't look like a UK mobile/landline, return null
+  // If it does not look like a UK mobile or landline, return null
   return null;
 }
 
@@ -133,7 +127,7 @@ const DIGIT_WORDS = {
   nine: '9',
 };
 
-// General fillers
+// General fillers that can be safely dropped
 const GENERAL_FILLERS = new Set([
   'so',
   'ok',
@@ -149,6 +143,11 @@ const GENERAL_FILLERS = new Set([
   'you',
   'know',
   'just',
+  'please',
+  'the',
+  'address',
+  'email',
+  'mail',
 ]);
 
 // Extra email-specific fillers that often appear before the real address
@@ -176,6 +175,9 @@ const EMAIL_LEAD_IN_FILLERS = new Set([
   'would',
   'be',
   'i',
+  'this',
+  'that',
+  'it',
 ]);
 
 function isEmailFiller(word) {
@@ -201,42 +203,70 @@ export function extractEmailSmart(raw) {
   // Tokenise
   let tokens = text.split(' ');
 
-  // Drop leading fillers like "yes / so / my email is / it's / ok"
+  // Drop leading fillers like "yes / so / my email is / it is / ok"
   while (tokens.length && isEmailFiller(tokens[0])) {
     tokens.shift();
   }
 
-  // Remove general filler words anywhere
+  // Remove general fillers anywhere in the string
   tokens = tokens.filter((w) => !GENERAL_FILLERS.has(w));
 
   // Convert spelled digits
   tokens = tokens.map((w) => DIGIT_WORDS[w] || w);
 
-  // Re-join
+  // Fix "gmail mail" (and similar) → "gmail"
+  const compactTokens = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const w = tokens[i];
+    const next = tokens[i + 1];
+    if (
+      (w === 'gmail' || w === 'hotmail' || w === 'outlook') &&
+      next === 'mail'
+    ) {
+      compactTokens.push(w);
+      i += 1; // skip "mail"
+      continue;
+    }
+    compactTokens.push(w);
+  }
+  tokens = compactTokens;
+
+  // Re-join into a string
   text = tokens.join(' ');
 
-  // normalise “at” phrases → “@”
-  text = text.replace(/\b(at sign|at symbol)\b/g, '@');
+  // Normalise “at …” phrases → "@"
+  text = text.replace(/\bat\s+sign\b/g, '@');
+  text = text.replace(/\bat\s+symbol\b/g, '@');
   text = text.replace(/\barroba\b/g, '@');
   text = text.replace(/\bat\b/g, '@');
 
-  // normalise “dot” → “.”
-  text = text.replace(/\b(dot com|dot)\b/g, '.');
+  // Handle common "dot something" phrases before generic "dot"
+  text = text.replace(/\bdot\s+co\s+dot\s+uk\b/g, '.co.uk');
+  text = text.replace(/\bdot\s+com\b/g, '.com');
+  text = text.replace(/\bdot\s+co\b/g, '.co');
+  text = text.replace(/\bdot\b/g, '.');
 
-  // collapse spaced letters: "j w" → "jw"
+  // Collapse spaced letters: "j w" → "jw"
   text = text.replace(/\b([a-z])\s+([a-z])\b/g, '$1$2');
 
-  // collapse spaces
-  text = text.replace(/\s+/g, '');
+  // Build a compact version with no spaces
+  const compact = text.replace(/\s+/g, '');
 
-  // Classic email regex
-  const emailRegex = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;
-  if (emailRegex.test(text)) return text;
+  // Find the first email-shaped substring inside the compact text
+  const match = compact.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/);
+  if (!match) return null;
 
-  return null;
+  let email = match[0];
+
+  // Post-fix common speech / transcription glitches
+  email = email.replace(/gmailmail(\.)/g, 'gmail$1');
+  email = email.replace(/gmaill(\.)/g, 'gmail$1');
+  email = email.replace(/gmai(\.)/g, 'gmail$1');
+
+  return email;
 }
 
-// Kept for backwards compatibility if something still calls extractEmail()
+// For backwards compatibility if anything still calls extractEmail()
 export function extractEmail(spoken) {
   return extractEmailSmart(spoken);
 }
