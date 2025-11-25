@@ -11,7 +11,7 @@ import {
   setMinutes,
   setSeconds,
 } from 'date-fns';
-import { formatInTimeZone, utcToZonedTime, zonedTimeToUtc } from 'date-fns-tz';
+import { formatInTimeZone } from 'date-fns-tz';
 
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 const CALENDAR_ID =
@@ -99,21 +99,18 @@ function safeCallerName(rawName) {
 }
 
 /**
- * Clamp a proposed start time into business hours in TZ:
- * - Mon–Fri only
+ * Clamp a proposed start time into business hours:
+ * - Mon–Fri only (day is left as-is; earliest-slot logic already avoids weekends)
  * - 09:00–17:00, 30-minute increments (last valid start 16:30)
  * If time is outside this window, we snap it back into the window
- * on the SAME day. Booking logic already tries to keep things in-range;
- * this is a safety net (e.g. fixing a 06:00 bug to 09:00).
+ * on the SAME day. This is a safety net (e.g. fixing a 06:00 bug to 09:00).
  */
 function clampToBusinessHours(startISO) {
-  let utc = new Date(startISO);
-  let zoned = utcToZonedTime(utc, TZ); // "wall-clock" in business timezone
+  const d = new Date(startISO);
 
-  // If weekend, we leave day alone here – earliest-slot logic already avoids weekends.
-  // We only clamp the hours/minutes.
-  let hours = zoned.getHours();
-  let mins = zoned.getMinutes();
+  // Only clamp hours/mins; leave the date alone.
+  let hours = d.getHours();
+  let mins = d.getMinutes();
 
   if (hours < 9) {
     hours = 9;
@@ -131,9 +128,8 @@ function clampToBusinessHours(startISO) {
     }
   }
 
-  zoned.setHours(hours, mins, 0, 0);
-  const correctedUtc = zonedTimeToUtc(zoned, TZ);
-  return correctedUtc.toISOString();
+  d.setHours(hours, mins, 0, 0);
+  return d.toISOString();
 }
 
 // ---------- EARLIEST AVAILABLE SLOT ----------
@@ -143,7 +139,7 @@ function clampToBusinessHours(startISO) {
  * starting from `fromISO` if provided, otherwise "now".
  * Rules:
  *  - Only Monday–Friday
- *  - Working hours: 09:00–17:00 UK time
+ *  - Working hours: 09:00–17:00
  *  - 30-minute increments (00 or 30)
  *  - No overlap with existing events
  */
@@ -155,10 +151,10 @@ export async function findEarliestAvailableSlot({
 }) {
   await ensureGoogleAuth();
 
-  const baseUtc = fromISO ? new Date(fromISO) : new Date();
-  const windowEnd = addDays(baseUtc, daysAhead);
+  const base = fromISO ? new Date(fromISO) : new Date();
+  const windowEnd = addDays(base, daysAhead);
 
-  const timeMin = baseUtc.toISOString();
+  const timeMin = base.toISOString();
   const timeMax = windowEnd.toISOString();
 
   const res = await calendar.events.list({
@@ -175,7 +171,7 @@ export async function findEarliestAvailableSlot({
   );
 
   // Start cursor from base, rounded UP to the next 30-min boundary
-  let cursor = new Date(baseUtc.getTime());
+  let cursor = new Date(base.getTime());
   cursor.setSeconds(0, 0);
   const mins = cursor.getMinutes();
   const extra = mins % 30;
@@ -183,22 +179,18 @@ export async function findEarliestAvailableSlot({
     cursor = addMinutes(cursor, 30 - extra);
   }
 
-  // Move cursor to a valid working time (Mon–Fri, 9–17) in TZ
+  // Move cursor to a valid working time (Mon–Fri, 9–17)
   function normaliseCursorToWorkingTime(d) {
-    // Interpret d in the business timezone
-    let zoned = utcToZonedTime(d, timezone);
-
+    let c = new Date(d.getTime());
     // If weekend or after hours, bump to next valid weekday at 9:00
-    while (isWeekend(zoned) || isAfter(zoned, dayEnd(zoned))) {
-      zoned = dayStart(addDays(zoned, 1));
+    while (isWeekend(c) || isAfter(c, dayEnd(c))) {
+      c = dayStart(addDays(c, 1));
     }
     // If before 9am, move to 9am
-    if (isBefore(zoned, dayStart(zoned))) {
-      zoned = dayStart(zoned);
+    if (isBefore(c, dayStart(c))) {
+      c = dayStart(c);
     }
-
-    // Convert back to UTC for comparisons
-    return zonedTimeToUtc(zoned, timezone);
+    return c;
   }
 
   cursor = normaliseCursorToWorkingTime(cursor);
@@ -212,11 +204,8 @@ export async function findEarliestAvailableSlot({
     const slotEnd = addMinutes(cursor, durationMinutes);
 
     // Ensure this 30-min slot fits entirely within working hours
-    const cursorZoned = utcToZonedTime(cursor, timezone);
-    const slotEndZoned = utcToZonedTime(slotEnd, timezone);
-    if (isAfter(slotEndZoned, dayEnd(cursorZoned))) {
-      const nextDay = dayStart(addDays(cursorZoned, 1));
-      cursor = zonedTimeToUtc(nextDay, timezone);
+    if (isAfter(slotEnd, dayEnd(cursor))) {
+      cursor = dayStart(addDays(cursor, 1));
       continue;
     }
 
