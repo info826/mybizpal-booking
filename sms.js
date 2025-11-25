@@ -1,5 +1,5 @@
 // sms.js
-// WhatsApp (card template) + SMS confirmation & reminders using Twilio
+// WhatsApp (card template + simple template) + SMS confirmation & reminders using Twilio
 
 import twilio from 'twilio';
 import { formatInTimeZone } from 'date-fns-tz';
@@ -10,7 +10,9 @@ const {
   TWILIO_NUMBER,
   SMS_FROM,
   TWILIO_WHATSAPP_FROM,
+  WHATSAPP_FROM,
   WHATSAPP_APPOINTMENT_TEMPLATE_SID,
+  TWILIO_WHATSAPP_TEMPLATE_SID,
   BUSINESS_TIMEZONE,
   ZOOM_LINK,
   ZOOM_MEETING_ID,
@@ -21,32 +23,33 @@ let twilioClient = null;
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 } else {
-  console.warn('⚠️ TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN missing — messaging disabled.');
+  console.warn(
+    '⚠️ TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN missing — messaging disabled.'
+  );
 }
 
 // SMS "from" number (E.164, e.g. +447456438935)
-const SMS_FROM_NUMBER = TWILIO_NUMBER || SMS_FROM || null;
+const SMS_FROM_NUMBER = SMS_FROM || TWILIO_NUMBER || null;
+
 // WhatsApp "from" identity (e.g. whatsapp:+447456438935)
-const WHATSAPP_FROM_NUMBER = TWILIO_WHATSAPP_FROM || null;
-// Content Template SID for your WhatsApp card, e.g. HX1b3b97d64d9f464c7d8840c2080953
-const WA_TEMPLATE_SID = WHATSAPP_APPOINTMENT_TEMPLATE_SID || null;
+// We support either WHATSAPP_FROM or legacy TWILIO_WHATSAPP_FROM
+const WHATSAPP_FROM_NUMBER = WHATSAPP_FROM || TWILIO_WHATSAPP_FROM || null;
+
+// Content Template SID for your WhatsApp card / simple template
+// We support either TWILIO_WHATSAPP_TEMPLATE_SID or WHATSAPP_APPOINTMENT_TEMPLATE_SID
+const WA_TEMPLATE_SID =
+  TWILIO_WHATSAPP_TEMPLATE_SID || WHATSAPP_APPOINTMENT_TEMPLATE_SID || null;
 
 const TZ = BUSINESS_TIMEZONE || 'Europe/London';
 
+// ---------- DATE / TIME FORMATTING ----------
+
 function formatDateForHuman(iso) {
-  return formatInTimeZone(
-    new Date(iso),
-    TZ,
-    'eee dd MMM yyyy'
-  );
+  return formatInTimeZone(new Date(iso), TZ, 'eee dd MMM yyyy');
 }
 
 function formatTimeForHuman(iso) {
-  return formatInTimeZone(
-    new Date(iso),
-    TZ,
-    'h:mmaaa'
-  );
+  return formatInTimeZone(new Date(iso), TZ, 'h:mmaaa');
 }
 
 function formatDateForSms(iso) {
@@ -104,11 +107,12 @@ function buildReminderText({ startISO }) {
 
 // ------------ CHANNEL HELPERS ------------
 
+// We expect to get something like '+44...' from the booking logic.
+// Strip any whatsapp: prefix just in case.
 function normaliseE164(to) {
-  // We expect to get something like '+44...' from the booking logic.
-  // Strip any whatsapp: prefix just in case.
-  const clean = String(to || '').replace(/^whatsapp:/, '').trim();
-  return clean;
+  if (!to) return null;
+  const clean = String(to).replace(/^whatsapp:/, '').trim();
+  return clean || null;
 }
 
 function makeWhatsAppTo(to) {
@@ -135,7 +139,8 @@ async function sendSmsMessage({ to, body }) {
   }
 }
 
-async function sendWhatsAppTemplate({ to, startISO, name }) {
+// Internal helper: WhatsApp card template with numeric variables (your existing template)
+async function sendWhatsAppCardTemplate({ to, startISO, name }) {
   if (!twilioClient || !WHATSAPP_FROM_NUMBER || !WA_TEMPLATE_SID) {
     console.warn('WhatsApp template not sent — missing config');
     return false;
@@ -202,7 +207,75 @@ async function sendWhatsAppText({ to, body }) {
   }
 }
 
-// ------------ PUBLIC API ------------
+// ------------ SIMPLE HELPERS FOR THE VOICE AGENT ------------
+
+// This is the helper you asked for: uses named template variables {name, time}
+export async function sendWhatsAppTemplate({ to, name, timeSpoken }) {
+  if (!twilioClient) {
+    console.warn('No Twilio client configured – skipping WhatsApp send.');
+    return;
+  }
+
+  if (!WHATSAPP_FROM_NUMBER || !WA_TEMPLATE_SID) {
+    console.error(
+      '❌ WhatsApp template send error: Missing WHATSAPP_FROM/TWILIO_WHATSAPP_FROM or TWILIO_WHATSAPP_TEMPLATE_SID/WHATSAPP_APPOINTMENT_TEMPLATE_SID env vars'
+    );
+    return;
+  }
+
+  const e164 = normaliseE164(to);
+  if (!e164) {
+    console.error('❌ WhatsApp template send error: Invalid "to" number', to);
+    return;
+  }
+
+  try {
+    await twilioClient.messages.create({
+      from: WHATSAPP_FROM_NUMBER,          // e.g. "whatsapp:+44..."
+      to: `whatsapp:${e164}`,              // e.g. "whatsapp:+447999462166"
+      contentSid: WA_TEMPLATE_SID,
+      // MUST be valid JSON string and match template variables in Twilio
+      contentVariables: JSON.stringify({
+        name: name || 'there',
+        time: timeSpoken || '',
+      }),
+    });
+    console.log('✅ WhatsApp template sent to', e164);
+  } catch (err) {
+    console.error('❌ WhatsApp template send error:', err?.message || err);
+  }
+}
+
+// Simple SMS fallback helper you asked for
+export async function sendSmsFallback({ to, message }) {
+  if (!twilioClient) return;
+
+  if (!SMS_FROM_NUMBER) {
+    console.error(
+      '❌ SMS fallback send error: Missing SMS_FROM or TWILIO_NUMBER env var'
+    );
+    return;
+  }
+
+  const e164 = normaliseE164(to);
+  if (!e164) {
+    console.error('❌ SMS fallback send error: Invalid "to" number', to);
+    return;
+  }
+
+  try {
+    await twilioClient.messages.create({
+      from: SMS_FROM_NUMBER,
+      to: e164, // "+447999462166"
+      body: message,
+    });
+    console.log('✅ SMS fallback sent to', e164);
+  } catch (err) {
+    console.error('❌ SMS fallback send error:', err?.message || err);
+  }
+}
+
+// ------------ PUBLIC API (EXISTING FLOW) ------------
 
 export async function sendConfirmationAndReminders({ to, startISO, name }) {
   if (!twilioClient || !to) {
@@ -218,9 +291,9 @@ export async function sendConfirmationAndReminders({ to, startISO, name }) {
 
   let usedWhatsApp = false;
 
-  // 1) Try WhatsApp card template first
+  // 1) Try WhatsApp card template first (existing behaviour)
   if (WHATSAPP_FROM_NUMBER && WA_TEMPLATE_SID) {
-    usedWhatsApp = await sendWhatsAppTemplate({
+    usedWhatsApp = await sendWhatsAppCardTemplate({
       to: e164,
       startISO,
       name,
@@ -239,7 +312,7 @@ export async function sendConfirmationAndReminders({ to, startISO, name }) {
 
   const reminderTimes = [
     startMs - 24 * 60 * 60 * 1000, // 24h
-    startMs - 60 * 60 * 1000,      // 60m
+    startMs - 60 * 60 * 1000, // 60m
   ];
 
   for (const fireAt of reminderTimes) {
