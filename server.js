@@ -174,13 +174,38 @@ wss.on('connection', (ws, req) => {
         callState,
       });
 
-      console.log(`🤖 Gabriel: "${reply}"`);
+      const trimmedReply = (reply || '').trim();
+
+      // If logic says "say nothing" (e.g. still capturing phone/email),
+      // then do not send any TTS at all — just stay quiet.
+      if (!trimmedReply) {
+        if (shouldEnd && !callState.hangupRequested) {
+          callState.hangupRequested = true;
+
+          if (twilioClient && callState.callSid) {
+            try {
+              await twilioClient
+                .calls(callState.callSid)
+                .update({ status: 'completed' });
+              console.log('📞 Call ended by Gabriel (hangupRequested=true)');
+            } catch (e) {
+              console.error('Error ending call via Twilio API:', e?.message || e);
+              ws.close(); // fallback
+            }
+          } else {
+            ws.close();
+          }
+        }
+        return;
+      }
+
+      console.log(`🤖 Gabriel: "${trimmedReply}"`);
 
       callState.isSpeaking = true;
       callState.cancelSpeaking = false;
 
       try {
-        const audioBuffer = await synthesizeWithElevenLabs(reply);
+        const audioBuffer = await synthesizeWithElevenLabs(trimmedReply);
         await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
       } catch (err) {
         console.error('Error during TTS or sendAudio:', err);
