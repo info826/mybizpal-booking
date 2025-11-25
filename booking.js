@@ -69,7 +69,7 @@ function ensureBooking(callState) {
       phone: null,
       email: null,
 
-      // Requested time
+      // Requested / confirmed time
       timeISO: null,
       timeSpoken: null,
 
@@ -85,7 +85,7 @@ function ensureBooking(callState) {
 
       // Internal flags
       lastPromptWasTimeSuggestion: false,
-      needEmailBeforeBooking: false,
+      needEmailBeforeBooking: false, // "we've already asked for email for this confirmed time"
     };
   }
   return callState.booking;
@@ -203,7 +203,7 @@ export async function updateBookingStateFromUtterance({
 
 /**
  * Step 2: system actions that must happen BEFORE GPT speaks:
- *  - If we already have time + phone + email and need to book, create the event.
+ *  - If we already have a confirmed time + phone (+ email), create the event.
  *  - User confirms or rejects a suggested time (natural or earliest).
  */
 export async function handleSystemActionsFirst({ userText, callState }) {
@@ -214,15 +214,34 @@ export async function handleSystemActionsFirst({ userText, callState }) {
   const email = booking.email || null;
   const name = booking.name || null;
 
-  // A) If we already have time + phone + email and we previously decided
-  //    we needed the email before booking, now create the event.
+  // Time that we would book if confirmed
+  const timeCandidate = booking.timeISO || booking.earliestSlotISO || null;
+
+  // A) If we already have a CONFIRMED time (awaitingTimeConfirm = false),
+  //    plus phone, and no booking yet, handle email + booking.
   if (
-    booking.needEmailBeforeBooking &&
-    booking.timeISO &&
+    timeCandidate &&
     phone &&
-    email &&
-    !booking.bookingConfirmed
+    !booking.bookingConfirmed &&
+    !booking.awaitingTimeConfirm
   ) {
+    // If email missing → ask once, then wait for it
+    if (!email) {
+      if (!booking.needEmailBeforeBooking) {
+        booking.needEmailBeforeBooking = true;
+        const replyText =
+          'Brilliant — before I lock that in, what’s your best email address, nice and slowly?';
+        return {
+          intercept: true,
+          replyText,
+        };
+      }
+      // We've already asked for email; let GPT handle the conversation while
+      // the email-capture logic does its thing.
+      return { intercept: false };
+    }
+
+    // We have time + phone + email → create / replace booking now
     try {
       const existing = await findExistingBooking({ phone, email });
       if (existing && existing.id) {
@@ -234,14 +253,14 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       }
 
       const event = await createBookingEvent({
-        startISO: booking.timeISO,
+        startISO: timeCandidate,
         durationMinutes: 30,
         name,
         email,
         phone,
       });
 
-      const startISO = event.start?.dateTime || booking.timeISO;
+      const startISO = event.start?.dateTime || timeCandidate;
 
       await sendConfirmationAndReminders({
         to: phone,
@@ -256,9 +275,10 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       booking.needEmailBeforeBooking = false;
 
       const spoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
-      const replyText = name
-        ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
-        : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
+      const replyText =
+        name
+          ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
+          : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
 
       return {
         intercept: true,
@@ -277,113 +297,30 @@ export async function handleSystemActionsFirst({ userText, callState }) {
     }
   }
 
-  // B) If we are waiting on a yes/no for a specific time
+  // B) If we are waiting on a yes/no for a specific time suggestion
   if (booking.awaitingTimeConfirm && (yesInAnyLang(t) || noInAnyLang(t))) {
     if (yesInAnyLang(t)) {
-      // Decide which time to book: explicit requested time > earliest suggestion
+      // Decide which time to use as the confirmed slot
       const timeISO = booking.timeISO || booking.earliestSlotISO || null;
 
       if (!timeISO) {
         // No actual time stored; reset and let GPT re-ask
         booking.awaitingTimeConfirm = false;
         booking.lastPromptWasTimeSuggestion = false;
-        return {
-          intercept: false,
-        };
+        return { intercept: false };
       }
 
-      // We have a time, plus (hopefully) contact details.
-      const phoneNow = booking.phone || callState.callerNumber || null;
-      const emailNow = booking.email || null;
-      const nameNow = booking.name || null;
+      // Store this as the confirmed time; booking of the event
+      // will be handled by the "A" block once we have phone + email.
+      booking.timeISO = timeISO;
+      booking.timeSpoken =
+        booking.timeSpoken ||
+        booking.earliestSlotSpoken ||
+        formatSpokenDateTime(timeISO, BUSINESS_TIMEZONE);
+      booking.awaitingTimeConfirm = false;
+      booking.lastPromptWasTimeSuggestion = false;
 
-      // If no phone, we can't confirm — let GPT ask for it.
-      if (!phoneNow) {
-        booking.awaitingTimeConfirm = false;
-        booking.timeISO = timeISO;
-        booking.timeSpoken =
-          booking.timeSpoken ||
-          booking.earliestSlotSpoken ||
-          formatSpokenDateTime(timeISO, BUSINESS_TIMEZONE);
-        return {
-          intercept: false,
-        };
-      }
-
-      // If phone is present but email is missing → ask email FIRST, don't book yet.
-      if (!emailNow) {
-        booking.awaitingTimeConfirm = false;
-        booking.timeISO = timeISO;
-        booking.timeSpoken =
-          booking.timeSpoken ||
-          booking.earliestSlotSpoken ||
-          formatSpokenDateTime(timeISO, BUSINESS_TIMEZONE);
-        booking.needEmailBeforeBooking = true;
-
-        const replyText =
-          'Brilliant — before I lock that in, what’s your best email address, nice and slowly?';
-
-        return {
-          intercept: true,
-          replyText,
-        };
-      }
-
-      // We have time + phone + email → perform booking now
-      try {
-        const existing = await findExistingBooking({
-          phone: phoneNow,
-          email: emailNow,
-        });
-        if (existing && existing.id) {
-          try {
-            await cancelEventById(existing.id);
-          } catch (e) {
-            console.warn('Cancel previous booking failed:', e?.message || e);
-          }
-        }
-
-        const event = await createBookingEvent({
-          startISO: timeISO,
-          durationMinutes: 30,
-          name: nameNow,
-          email: emailNow,
-          phone: phoneNow,
-        });
-
-        const startISO = event.start?.dateTime || timeISO;
-
-        await sendConfirmationAndReminders({
-          to: phoneNow,
-          startISO,
-          name: nameNow,
-        });
-
-        booking.bookingConfirmed = true;
-        booking.lastEventId = event.id;
-        booking.awaitingTimeConfirm = false;
-        booking.lastPromptWasTimeSuggestion = false;
-
-        const spoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
-
-        const replyText = nameNow
-          ? `Brilliant ${nameNow} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
-          : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
-
-        return {
-          intercept: true,
-          replyText,
-        };
-      } catch (err) {
-        console.error('Booking error:', err);
-        booking.awaitingTimeConfirm = false;
-        booking.lastPromptWasTimeSuggestion = false;
-        return {
-          intercept: true,
-          replyText:
-            "Hmm, something didn’t quite go through on my side. I’ll note your details and follow up, but is there anything else I can help with for now?",
-        };
-      }
+      return { intercept: false };
     } else if (noInAnyLang(t)) {
       // User rejected the suggested time
       booking.awaitingTimeConfirm = false;
