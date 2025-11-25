@@ -288,10 +288,10 @@ wss.on('connection', (ws, req) => {
       if (callState.isSpeaking) {
         console.log('🚫 Barge-in detected – cancelling current TTS');
         callState.cancelSpeaking = true;
-        // Ignore THIS transcript; next utterance after TTS stops will be handled.
-        return;
+        // IMPORTANT: we *do not* return here — we still process this transcript
+        // so if they started giving their name/number mid-sentence, we catch it.
       }
-
+      
       await respondToUser(transcript);
     } catch (err) {
       console.error('Error handling Deepgram message:', err);
