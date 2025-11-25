@@ -41,16 +41,26 @@ async function ensureGoogleAuth() {
 
 // ---------- COMMON HELPERS ----------
 
-// Format spoken time (for messages etc.)
+// Format spoken time (for messages / Gabriel read-back)
 export function formatSpokenDateTime(iso, timezone = TZ) {
   const d = new Date(iso);
   const day = formatInTimeZone(d, timezone, 'eeee');
   const date = formatInTimeZone(d, timezone, 'd');
   const month = formatInTimeZone(d, timezone, 'LLLL');
-  const mins = formatInTimeZone(d, timezone, 'mm');
-  const hour = formatInTimeZone(d, timezone, 'h');
-  const mer = formatInTimeZone(d, timezone, 'a').toLowerCase();
-  const time = mins === '00' ? `${hour} ${mer}` : `${hour}:${mins} ${mer}`;
+
+  const mins = formatInTimeZone(d, timezone, 'mm');   // "00", "30", etc.
+  const hour = formatInTimeZone(d, timezone, 'h');    // "1"–"12"
+  const mer = formatInTimeZone(d, timezone, 'a');     // "AM" / "PM"
+
+  let time;
+  if (mins === '00') {
+    // e.g. "9 o'clock A M"
+    time = `${hour} o'clock ${mer[0]} ${mer[1]}`;
+  } else {
+    // e.g. "9:30 A M"
+    time = `${hour}:${mins} ${mer[0]} ${mer[1]}`;
+  }
+
   return `${day} ${date} ${month} at ${time}`;
 }
 
