@@ -21,6 +21,46 @@ import { sendConfirmationAndReminders } from './sms.js';
 
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
+// ---- NAME SAFETY HELPERS ----
+
+function isFillerWord(str = '') {
+  const t = str.trim().toLowerCase();
+  if (!t) return true;
+  // Single “yes/no/ok” style words we never want as a name
+  const badSingles = [
+    'yes',
+    'yeah',
+    'ye',
+    'yep',
+    'yup',
+    'no',
+    'nope',
+    'ok',
+    'okay',
+    'alright',
+    'sure',
+    'fine',
+    'good',
+    'perfect',
+    'thanks',
+    'thank you',
+  ];
+  if (badSingles.includes(t)) return true;
+
+  // Very short 1–2 letter “names” are almost always noise here
+  if (t.length <= 2) return true;
+
+  return false;
+}
+
+// If the caller says “put it under John Smith” etc, we allow overriding name.
+function isExplicitNameOverridePhrase(text = '') {
+  const t = text.toLowerCase();
+  return /put it under|book it under|make it under|put the booking under|put the appointment under|in the name of/.test(
+    t
+  );
+}
+
 function ensureBooking(callState) {
   if (!callState.booking) {
     callState.booking = {
@@ -95,10 +135,16 @@ export async function updateBookingStateFromUtterance({
     booking.wantsEarliest = true;
   }
 
-  // Try extract name
-  if (!booking.name) {
-    const n = extractName(raw);
-    if (n) booking.name = n;
+  // Try extract name, but avoid filler like “yeah”, “ok”, etc.
+  const extractedName = extractName(raw);
+  if (extractedName && !isFillerWord(extractedName)) {
+    if (!booking.name) {
+      // First good name we hear → treat as caller’s name
+      booking.name = extractedName;
+    } else if (isExplicitNameOverridePhrase(raw)) {
+      // Caller has explicitly asked to put the booking under a (new) name
+      booking.name = extractedName;
+    }
   }
 
   // Try extract phone
@@ -210,10 +256,9 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       booking.needEmailBeforeBooking = false;
 
       const spoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
-      const replyText =
-        name
-          ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
-          : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
+      const replyText = name
+        ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
+        : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
 
       return {
         intercept: true,
@@ -236,8 +281,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
   if (booking.awaitingTimeConfirm && (yesInAnyLang(t) || noInAnyLang(t))) {
     if (yesInAnyLang(t)) {
       // Decide which time to book: explicit requested time > earliest suggestion
-      const timeISO =
-        booking.timeISO || booking.earliestSlotISO || null;
+      const timeISO = booking.timeISO || booking.earliestSlotISO || null;
 
       if (!timeISO) {
         // No actual time stored; reset and let GPT re-ask
@@ -322,10 +366,9 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
         const spoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
 
-        const replyText =
-          nameNow
-            ? `Brilliant ${nameNow} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
-            : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
+        const replyText = nameNow
+          ? `Brilliant ${nameNow} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
+          : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
 
         return {
           intercept: true,
@@ -363,4 +406,4 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
   // No special system action needed
   return { intercept: false };
-    }
+}
