@@ -352,47 +352,12 @@ export async function handleTurn({ userText, callState }) {
 
   // 2) If we are currently capturing email, handle that WITHOUT GPT
   if (capture.mode === 'email') {
-    // Escape hatch: user clearly can't hear / is confused
-    if (
-      /\bhello\b/.test(userLower) ||
-      /can.?t hear/.test(userLower) ||
-      /cannot hear/.test(userLower)
-    ) {
-      const replyText =
-        'Sorry, I was just trying to catch your email there. Could you give me your full email address again, slowly, all in one go from the very start?';
-
-      capture.mode = 'email';
-      capture.buffer = '';
-      capture.emailAttempts += 1;
-
-      history.push({ role: 'user', content: safeUserText });
-      history.push({ role: 'assistant', content: replyText });
-      return { text: replyText, shouldEnd: false };
-    }
-
-    capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
-
-    // Try smart email normaliser on the whole accumulated buffer
-    const email = extractEmailSmart(capture.buffer);
-    if (email) {
-      if (!callState.booking) callState.booking = {};
-      callState.booking.email = email;
-
-      const spokenEmail = verbaliseEmail(email);
-      const replyText = `Brilliant, let me just check I’ve got that right: ${spokenEmail}. Does that look correct?`;
-
-      capture.mode = 'none';
-      capture.buffer = '';
-      capture.emailAttempts = 0;
-      capture.pendingConfirm = 'email';
-
-      history.push({ role: 'user', content: safeUserText });
-      history.push({ role: 'assistant', content: replyText });
-      return { text: replyText, shouldEnd: false };
-    }
-
     // If caller explicitly says they have no email, accept booking without it
-    if (/no email|don.?t have an email|do not have an email/.test(userLower)) {
+    if (
+      /no email|don.?t have an email|do not have an email|i don.?t use email/.test(
+        userLower
+      )
+    ) {
       if (!callState.booking) callState.booking = {};
       callState.booking.email = null;
 
@@ -409,12 +374,36 @@ export async function handleTurn({ userText, callState }) {
       return { text: replyText, shouldEnd: false };
     }
 
-    // If they’ve spoken a bit but still no valid email, gently reset with varied phrasing
-    if (capture.buffer.length > 25) {
+    // Normal accumulation – keep stacking partials together
+    capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
+
+    // Try smart email normaliser on the whole accumulated buffer
+    const email = extractEmailSmart(capture.buffer);
+    if (email) {
+      if (!callState.booking) callState.booking = {};
+      callState.booking.email = email;
+
+      const spokenEmail = verbaliseEmail(email);
+      const replyText = `Brilliant, let me just check I’ve got that right: ${spokenEmail}. Does that look correct?`;
+
+      capture.mode = 'none';
+      capture.buffer = '';
+      capture.emailAttempts = 0;
+      // expect a yes/no next
+      capture.pendingConfirm = 'email';
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+      return { text: replyText, shouldEnd: false };
+    }
+
+    // Only if they’ve spoken a LOT and we *still* have no valid email,
+    // then gently reset. (This avoids mid-email interruptions.)
+    if (capture.buffer.length > 80) {
       const variants = [
-        'I might’ve mangled that email a bit. Could you give it to me one more time, slowly, all in one go?',
-        'Sorry, I don’t think I caught the full email. Could you say the whole address again from the very beginning, nice and slowly?',
-        'Let’s try that again — full email address, from the start, slowly and all in one go.',
+        "I might’ve mangled that email a bit. Could you give it to me one more time, slowly, all in one go?",
+        "Sorry, I don’t think I caught the full email. Could you say the whole address again from the very beginning, nice and slowly?",
+        "Let’s try that again — full email address, from the start, slowly and all in one go.",
       ];
       const idx = capture.emailAttempts % variants.length;
       const replyText = variants[idx];
