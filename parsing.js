@@ -21,6 +21,21 @@ const NAME_GREETING_STOP_WORDS = new Set([
   'morning',
   'afternoon',
   'evening',
+  'ok',
+  'okay',
+  'sure',
+  'fine',
+  'perfect',
+  'please',
+  'yeah',
+  'yes',
+  'no',
+  'alright',
+  'great',
+  'nice',
+  'that',
+  'this',
+  'there',
 ]);
 
 export function extractName(text) {
@@ -30,20 +45,52 @@ export function extractName(text) {
   // Normalise spaces
   const normalised = t.replace(/\s+/g, ' ');
 
-  // "I'm Gabriel", "I am Gabriel", "this is John", "my name is Raquel", "no my name is Gabriel"
+  // 1) Patterns like:
+  // "I'm Gabriel", "I am Gabriel", "this is John",
+  // "my name is Raquel", "no my name is Gabriel"
   let m = normalised.match(
-    /\b(?:no[, ]+)?(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
+    /\b(?:no[, ]+)?(?:i am|i'm|this is|my name is|my name's)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
   );
   if (m) {
     const full = m[1].trim().replace(/\s+/g, ' ');
-    // Use only first token as the name ("Gabriel" from "Gabriel De Ornelas")
+    return full.split(' ')[0]; // first token only
+  }
+
+  // 2) "it's John" / "its John"
+  m = normalised.match(
+    /\b(?:it['’]?s|its)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
+  );
+  if (m) {
+    const full = m[1].trim().replace(/\s+/g, ' ');
     return full.split(' ')[0];
   }
 
-  // SAFER FALLBACK:
-  // Only treat it as a name if the *entire* utterance is a single, non-greeting word.
-  // This avoids picking random words from longer sentences like "that's perfect".
+  // 3) "John speaking" / "John here"
+  m = normalised.match(
+    /\b([A-Za-z][A-Za-z '-]{1,40})\s+(?:speaking|here)\b/i
+  );
+  if (m) {
+    const full = m[1].trim().replace(/\s+/g, ' ');
+    return full.split(' ')[0];
+  }
+
+  // 4) Short answers like "yes John", "yeah it's John", "it's John here"
   const words = normalised.split(' ').filter(Boolean);
+  if (words.length >= 2 && words.length <= 4) {
+    const last = words[words.length - 1];
+    const cleanLast = last.replace(/[^A-Za-z'-]/g, '');
+    const lowerLast = cleanLast.toLowerCase();
+    if (
+      cleanLast.length >= 3 &&
+      !NAME_GREETING_STOP_WORDS.has(lowerLast)
+    ) {
+      return cleanLast;
+    }
+  }
+
+  // 5) VERY conservative fallback:
+  // Only treat it as a name if the *entire* utterance is a single word
+  // that is not a greeting / filler and has ≥3 letters.
   if (words.length === 1) {
     const w = words[0];
     const clean = w.replace(/[^A-Za-z'-]/g, '');
@@ -97,7 +144,7 @@ export function parseUkPhone(spoken) {
     return { e164: `+44${s.slice(1)}`, national: s };
   } else if (/^\d{10}$/.test(s)) {
     // No leading 0 but 10 digits → assume UK, add 0
-    return { e164: `+44${s}`, national: `0{s}` };
+    return { e164: `+44${s}`, national: `0${s}` };
   }
 
   // If it does not look like a UK mobile or landline, return null
