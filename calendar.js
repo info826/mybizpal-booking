@@ -1,6 +1,3 @@
-// calendar.js
-// Google Calendar helpers: earliest-available, create, cancel, find existing
-
 import { google } from 'googleapis';
 import {
   addMinutes,
@@ -86,13 +83,21 @@ function dayEnd(d) {
   return e;
 }
 
-// Never let "hi/hello/hey/thanks/booking" be saved as a name
+// Never let obvious junk be saved as a name
 function safeCallerName(rawName) {
   const raw = rawName ? String(rawName).trim() : '';
   if (!raw) return 'New caller';
 
   const lower = raw.toLowerCase();
-  const bad = new Set(['hi', 'hello', 'hey', 'thanks', 'thank you', 'booking']);
+  const bad = new Set([
+    'hi',
+    'hello',
+    'hey',
+    'thanks',
+    'thank you',
+    'booking',
+    'there',    // avoid "Hi there" becoming the name
+  ]);
   if (bad.has(lower)) return 'New caller';
 
   return raw;
@@ -244,8 +249,8 @@ export async function findEarliestAvailableSlot({
         if (!soonestEnd || evEnd < soonestEnd) {
           soonestEnd = evEnd;
         }
+        cursor = new Date(soonestEnd.getTime());
       }
-      cursor = new Date(soonestEnd.getTime());
     }
   }
 
@@ -321,6 +326,7 @@ export async function createBookingEvent({
   name,
   email,
   phone,
+  notes, // optional smart summary / key points
 }) {
   await ensureGoogleAuth();
 
@@ -336,12 +342,20 @@ export async function createBookingEvent({
   const safeName = safeCallerName(name);
   const whoPrefix = safeName && safeName !== 'New caller' ? `(${safeName}) ` : '';
 
-  const descriptionLines = [
-    'Booked by MyBizPal (Gabriel).',
-    `Caller name: ${safeName}`,
-    `Caller phone: ${phone || 'n/a'}`,
-    `Caller email: ${email || 'n/a'}`,
-  ];
+  const descriptionLines = [];
+
+  // ✅ Smart summary at the TOP of the event, for the Zoom prep
+  if (notes && String(notes).trim()) {
+    descriptionLines.push('Smart summary (for Zoom prep):');
+    descriptionLines.push(String(notes).trim());
+    descriptionLines.push(''); // blank line before system details
+  }
+
+  // Core booking details
+  descriptionLines.push('Booked by MyBizPal (Gabriel).');
+  descriptionLines.push(`Caller name: ${safeName}`);
+  descriptionLines.push(`Caller phone: ${phone || 'n/a'}`);
+  descriptionLines.push(`Caller email: ${email || 'n/a'}`);
 
   if (zoomLink) {
     descriptionLines.push('');
@@ -394,6 +408,7 @@ export async function createBookingCalendarEventAndNotify(booking) {
     name: booking.name,
     email: booking.email,
     phone: booking.phone,
+    notes: booking.notes || booking.conversationSummary || '',
   });
 }
 
