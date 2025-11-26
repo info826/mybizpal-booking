@@ -16,6 +16,7 @@ import {
   findExistingBooking,
   cancelEventById,
   formatSpokenDateTime,
+  hasConflict,
 } from './calendar.js';
 import { sendConfirmationAndReminders } from './sms.js';
 
@@ -26,6 +27,7 @@ const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 function isFillerWord(str = '') {
   const t = str.trim().toLowerCase();
   if (!t) return true;
+
   // Single “yes/no/ok” style words we never want as a name
   const badSingles = [
     'yes',
@@ -94,7 +96,7 @@ function ensureBooking(callState) {
       lastPromptWasTimeSuggestion: false,
       needEmailBeforeBooking: false, // "we've already asked for email for this confirmed time"
 
-      // Notes for calendar
+      // Notes for calendar / Zoom prep
       summaryNotes: null,
     };
   }
@@ -313,7 +315,55 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       return { intercept: false };
     }
 
-    // We have time + phone + email → create / replace booking now
+    // 🔍 Check for conflicts with existing events before booking
+    const conflict = await hasConflict({ startISO: timeCandidate, durationMin: 30 });
+
+    if (conflict) {
+      // Try to find the next available 30-min slot starting from this time
+      const nextSlot = await findEarliestAvailableSlot({
+        timezone: BUSINESS_TIMEZONE,
+        durationMinutes: 30,
+        daysAhead: 7,
+        fromISO: timeCandidate,
+      });
+
+      if (nextSlot && nextSlot.iso) {
+        booking.timeISO = null;
+        booking.timeSpoken = null;
+        booking.earliestSlotISO = nextSlot.iso;
+        booking.earliestSlotSpoken =
+          nextSlot.spoken || formatSpokenDateTime(nextSlot.iso, BUSINESS_TIMEZONE);
+        booking.awaitingTimeConfirm = true;
+        booking.lastPromptWasTimeSuggestion = true;
+        booking.needEmailBeforeBooking = false;
+
+        const replyText = `It looks like that exact time has just been taken. The next available slot I can see is ${booking.earliestSlotSpoken}. Would you like me to book you in for then?`;
+
+        return {
+          intercept: true,
+          replyText,
+        };
+      }
+
+      // No free slots found at all
+      booking.timeISO = null;
+      booking.timeSpoken = null;
+      booking.earliestSlotISO = null;
+      booking.earliestSlotSpoken = null;
+      booking.awaitingTimeConfirm = false;
+      booking.lastPromptWasTimeSuggestion = false;
+      booking.needEmailBeforeBooking = false;
+
+      const replyText =
+        "It looks like we’re fully booked around that time. What other day and time would work for you (Monday to Friday, 9 to 5 UK time)?";
+
+      return {
+        intercept: true,
+        replyText,
+      };
+    }
+
+    // We have time + phone + email and no conflict → create / replace booking now
     try {
       const existing = await findExistingBooking({ phone, email });
       if (existing && existing.id) {
