@@ -21,54 +21,6 @@ import { sendConfirmationAndReminders } from './sms.js';
 
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
-// ---- NAME SAFETY HELPERS ----
-
-function isFillerWord(str = '') {
-  const t = str.trim().toLowerCase();
-  if (!t) return true;
-
-  // Single “yes/no/ok” style words we never want as a name
-  const badSingles = [
-    'yes',
-    'yeah',
-    'ye',
-    'yep',
-    'yup',
-    'no',
-    'nope',
-    'ok',
-    'okay',
-    'alright',
-    'sure',
-    'fine',
-    'good',
-    'perfect',
-    'thanks',
-    'thank you',
-    'booking',
-    'book',
-    'please',
-    'would',
-    'email',
-    'mail',
-    'best',
-  ];
-  if (badSingles.includes(t)) return true;
-
-  // Very short 1–2 letter “names” are almost always noise here
-  if (t.length <= 2) return true;
-
-  return false;
-}
-
-// If the caller says “put it under John Smith” etc, we allow overriding name.
-function isExplicitNameOverridePhrase(text = '') {
-  const t = text.toLowerCase();
-  return /put it under|book it under|make it under|put the booking under|put the appointment under|in the name of/.test(
-    t
-  );
-}
-
 function ensureBooking(callState) {
   if (!callState.booking) {
     callState.booking = {
@@ -206,18 +158,6 @@ export async function updateBookingStateFromUtterance({
   // Earliest request?
   if (detectEarliestRequest(raw)) {
     booking.wantsEarliest = true;
-  }
-
-  // Try extract name, but avoid filler like “yeah”, “ok”, etc.
-  const extractedName = extractName(raw);
-  if (extractedName && !isFillerWord(extractedName)) {
-    if (!booking.name) {
-      // First good name we hear → treat as caller’s name
-      booking.name = extractedName;
-    } else if (isExplicitNameOverridePhrase(raw)) {
-      // Caller has explicitly asked to put the booking under a (new) name
-      booking.name = extractedName;
-    }
   }
 
   // Try extract phone
