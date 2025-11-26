@@ -1,3 +1,6 @@
+// calendar.js
+// Google Calendar helpers: earliest-available, create, cancel, find existing
+
 import { google } from 'googleapis';
 import {
   addMinutes,
@@ -83,7 +86,7 @@ function dayEnd(d) {
   return e;
 }
 
-// Never let obvious junk be saved as a name
+// Never let junk like "hi/hello/booking/yes" be saved as a name
 function safeCallerName(rawName) {
   const raw = rawName ? String(rawName).trim() : '';
   if (!raw) return 'New caller';
@@ -96,7 +99,24 @@ function safeCallerName(rawName) {
     'thanks',
     'thank you',
     'booking',
-    'there',    // avoid "Hi there" becoming the name
+    'book',
+    'yes',
+    'yeah',
+    'yep',
+    'yup',
+    'no',
+    'nope',
+    'ok',
+    'okay',
+    'alright',
+    'sure',
+    'fine',
+    'perfect',
+    'please',
+    'would',
+    'best',
+    'email',
+    'mail',
   ]);
   if (bad.has(lower)) return 'New caller';
 
@@ -249,8 +269,8 @@ export async function findEarliestAvailableSlot({
         if (!soonestEnd || evEnd < soonestEnd) {
           soonestEnd = evEnd;
         }
-        cursor = new Date(soonestEnd.getTime());
       }
+      cursor = new Date(soonestEnd.getTime());
     }
   }
 
@@ -326,7 +346,7 @@ export async function createBookingEvent({
   name,
   email,
   phone,
-  notes, // optional smart summary / key points
+  summaryNotes, // optional smart summary text
 }) {
   await ensureGoogleAuth();
 
@@ -344,14 +364,11 @@ export async function createBookingEvent({
 
   const descriptionLines = [];
 
-  // ✅ Smart summary at the TOP of the event, for the Zoom prep
-  if (notes && String(notes).trim()) {
-    descriptionLines.push('Smart summary (for Zoom prep):');
-    descriptionLines.push(String(notes).trim());
-    descriptionLines.push(''); // blank line before system details
+  if (summaryNotes && summaryNotes.trim()) {
+    descriptionLines.push(summaryNotes.trim());
+    descriptionLines.push('');
   }
 
-  // Core booking details
   descriptionLines.push('Booked by MyBizPal (Gabriel).');
   descriptionLines.push(`Caller name: ${safeName}`);
   descriptionLines.push(`Caller phone: ${phone || 'n/a'}`);
@@ -408,7 +425,7 @@ export async function createBookingCalendarEventAndNotify(booking) {
     name: booking.name,
     email: booking.email,
     phone: booking.phone,
-    notes: booking.notes || booking.conversationSummary || '',
+    summaryNotes: booking.summaryNotes || null,
   });
 }
 
