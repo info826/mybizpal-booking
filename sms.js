@@ -25,7 +25,7 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 }
 
 // SMS "from" number (E.164, e.g. +447456438935)
-const SMS_FROM_NUMBER = TWILIO_NUMBER || SMS_FROM || null;
+const SMS_FROM_NUMBER = (TWILIO_NUMBER || SMS_FROM || '').trim() || null;
 
 // WhatsApp "from" identity (we will normalise it to whatsapp:+447...)
 function normaliseWhatsAppFrom(rawFrom) {
@@ -40,9 +40,12 @@ const WHATSAPP_FROM_NUMBER = normaliseWhatsAppFrom(
   TWILIO_WHATSAPP_FROM || process.env.WHATSAPP_FROM || ''
 );
 
-// ✅ NEW: accept either env var name for the template SID
+// Accept either env var name for the template SID + trim
 const WA_TEMPLATE_SID =
-  WHATSAPP_APPOINTMENT_TEMPLATE_SID || process.env.TWILIO_WHATSAPP_TEMPLATE_SID || null;
+  (WHATSAPP_APPOINTMENT_TEMPLATE_SID ||
+    process.env.TWILIO_WHATSAPP_TEMPLATE_SID ||
+    ''
+  ).trim() || null;
 
 const TZ = BUSINESS_TIMEZONE || 'Europe/London';
 
@@ -135,6 +138,14 @@ async function sendSmsMessage({ to, body }) {
     return true;
   } catch (e) {
     console.error('❌ SMS send error:', e?.message || e);
+    if (e) {
+      console.error('SMS Twilio error details:', {
+        code: e.code,
+        status: e.status,
+        moreInfo: e.moreInfo,
+        details: e.details,
+      });
+    }
     return false;
   }
 }
@@ -162,7 +173,7 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
   const phoneForCard = e164;
   const zoomUrl = ZOOM_LINK || '';
 
-  // Your card has variables:
+  // Template variables:
   // {{1}} = Name
   // {{2}} = Date
   // {{3}} = Time
@@ -182,7 +193,7 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
   console.log('📲 WhatsApp DEBUG', {
     from,
     to: waTo,
-    templateSid: WA_TEMPLATE_SID,
+    contentSid: WA_TEMPLATE_SID,
     variables,
   });
 
@@ -197,6 +208,14 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
     return true;
   } catch (e) {
     console.error('❌ WhatsApp template send error:', e?.message || e);
+    if (e) {
+      console.error('WhatsApp Twilio error details:', {
+        code: e.code,
+        status: e.status,
+        moreInfo: e.moreInfo,
+        details: e.details,
+      });
+    }
     return false;
   }
 }
@@ -221,6 +240,14 @@ async function sendWhatsAppText({ to, body }) {
     return true;
   } catch (e) {
     console.error('❌ WhatsApp text send error:', e?.message || e);
+    if (e) {
+      console.error('WhatsApp text Twilio error details:', {
+        code: e.code,
+        status: e.status,
+        moreInfo: e.moreInfo,
+        details: e.details,
+      });
+    }
     return false;
   }
 }
