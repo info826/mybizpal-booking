@@ -44,6 +44,7 @@ function isFillerWord(str = '') {
     'perfect',
     'thanks',
     'thank you',
+    'there', // avoid "hi there" ending up as name
   ];
   if (badSingles.includes(t)) return true;
 
@@ -59,6 +60,30 @@ function isExplicitNameOverridePhrase(text = '') {
   return /put it under|book it under|make it under|put the booking under|put the appointment under|in the name of/.test(
     t
   );
+}
+
+// Normalise the name we use in SMS / WhatsApp / Calendar title
+function normaliseDisplayName(rawName) {
+  const raw = rawName ? String(rawName).trim() : '';
+  if (!raw) return null;
+
+  const lower = raw.toLowerCase();
+  const bad = new Set([
+    'hi',
+    'hello',
+    'hey',
+    'thanks',
+    'thank you',
+    'booking',
+    'there',
+  ]);
+  if (bad.has(lower)) return null;
+
+  // Use first token as spoken name
+  const first = raw.split(/\s+/)[0];
+  if (isFillerWord(first)) return null;
+
+  return first;
 }
 
 function ensureBooking(callState) {
@@ -86,6 +111,10 @@ function ensureBooking(callState) {
       // Internal flags
       lastPromptWasTimeSuggestion: false,
       needEmailBeforeBooking: false, // "we've already asked for email for this confirmed time"
+
+      // Conversation context for smart summary
+      reasonUtterance: null,      // the line where they expressed booking intent
+      conversationNotes: [],      // last few user utterances
     };
   }
   return callState.booking;
@@ -112,6 +141,42 @@ function detectEarliestRequest(text) {
   );
 }
 
+// Build a short "smart summary" string for the calendar description
+function buildSmartSummary({ booking, callState }) {
+  const lines = [];
+
+  if (booking.intent === 'wants_booking') {
+    lines.push('Interested in a MyBizPal consultation / demo.');
+  }
+
+  if (booking.reasonUtterance) {
+    let reason = String(booking.reasonUtterance).replace(/\s+/g, ' ').trim();
+    if (reason.length > 260) reason = reason.slice(0, 257) + '…';
+    if (reason) {
+      lines.push(`Main request in their words: "${reason}"`);
+    }
+  }
+
+  // Add last few user messages as key points (truncated)
+  const history = (callState && Array.isArray(callState.history))
+    ? callState.history
+    : [];
+
+  const userMessages = history.filter((m) => m.role === 'user');
+  const recent = userMessages.slice(-3);
+
+  recent.forEach((m, idx) => {
+    let txt = String(m.content || '').replace(/\s+/g, ' ').trim();
+    if (!txt) return;
+    if (txt.length > 200) txt = txt.slice(0, 197) + '…';
+    lines.push(`Key point ${idx + 1}: ${txt}`);
+  });
+
+  if (!lines.length) return '';
+
+  return lines.map((line) => `- ${line}`).join('\n');
+}
+
 /**
  * Step 1: update booking state from the latest user utterance.
  *  - Fill in name / phone / email / time if found
@@ -125,9 +190,21 @@ export async function updateBookingStateFromUtterance({
   const booking = ensureBooking(callState);
   const raw = userText || '';
 
+  // Track conversation notes (last few user utterances)
+  if (raw && typeof raw === 'string') {
+    booking.conversationNotes.push(raw.trim());
+    if (booking.conversationNotes.length > 10) {
+      booking.conversationNotes.shift(); // keep it small
+    }
+  }
+
   // Detect booking intent
   if (detectBookingIntent(raw)) {
     booking.intent = 'wants_booking';
+    // Save the first utterance where they clearly expressed intent
+    if (!booking.reasonUtterance) {
+      booking.reasonUtterance = raw;
+    }
   }
 
   // Earliest request?
@@ -252,12 +329,19 @@ export async function handleSystemActionsFirst({ userText, callState }) {
         }
       }
 
+      // Build smart notes for the calendar event
+      const notes = buildSmartSummary({ booking, callState });
+
+      // Cleaned name for external use (calendar title + messages)
+      const displayName = normaliseDisplayName(name);
+
       const event = await createBookingEvent({
         startISO: timeCandidate,
         durationMinutes: 30,
-        name,
+        name: displayName || name,
         email,
         phone,
+        notes,
       });
 
       const startISO = event.start?.dateTime || timeCandidate;
@@ -265,7 +349,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       await sendConfirmationAndReminders({
         to: phone,
         startISO,
-        name,
+        name: displayName || name || undefined,
       });
 
       booking.bookingConfirmed = true;
@@ -275,9 +359,11 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       booking.needEmailBeforeBooking = false;
 
       const spoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
+      const nameForSpeech = displayName || name;
+
       const replyText =
-        name
-          ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
+        nameForSpeech
+          ? `Brilliant ${nameForSpeech} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
           : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
 
       return {
