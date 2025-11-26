@@ -98,27 +98,26 @@ function safeCallerName(rawName) {
     'hey',
     'thanks',
     'thank you',
+    'thank',
     'booking',
     'book',
     'yes',
     'yeah',
     'yep',
-    'yup',
-    'no',
-    'nope',
     'ok',
     'okay',
-    'alright',
     'sure',
     'fine',
     'perfect',
     'please',
     'would',
-    'best',
     'email',
     'mail',
   ]);
   if (bad.has(lower)) return 'New caller';
+
+  // super short "names" are also treated as unknown
+  if (lower.length <= 2) return 'New caller';
 
   return raw;
 }
