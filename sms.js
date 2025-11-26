@@ -17,6 +17,41 @@ const {
   ZOOM_PASSCODE,
 } = process.env;
 
+// ---------- NAME SAFETY FOR MESSAGES ----------
+
+function safeDisplayName(rawName) {
+  const raw = rawName ? String(rawName).trim() : '';
+  if (!raw) return 'Guest';
+
+  const lower = raw.toLowerCase();
+  const bad = new Set([
+    'hi',
+    'hello',
+    'hey',
+    'thanks',
+    'thank you',
+    'thank',
+    'booking',
+    'book',
+    'yes',
+    'yeah',
+    'yep',
+    'ok',
+    'okay',
+    'sure',
+    'fine',
+    'perfect',
+    'please',
+    'would',
+    'email',
+    'mail',
+  ]);
+
+  if (bad.has(lower) || lower.length <= 2) return 'Guest';
+
+  return raw;
+}
+
 let twilioClient = null;
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
@@ -67,7 +102,8 @@ function formatDateForSms(iso) {
 
 function buildConfirmationSms({ startISO, name }) {
   const when = formatDateForSms(startISO);
-  const who = name ? `(${name}) ` : '';
+  const safeName = safeDisplayName(name);
+  const who = safeName && safeName !== 'Guest' ? `(${safeName}) ` : '';
 
   const zoomLink = ZOOM_LINK || '';
   const zoomId = ZOOM_MEETING_ID || '';
@@ -167,7 +203,7 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
     return false;
   }
 
-  const displayName = name || 'Guest';
+  const displayName = safeDisplayName(name);
   const dateStr = formatDateForHuman(startISO); // e.g. Mon 12 Dec 2025
   const timeStr = formatTimeForHuman(startISO); // e.g. 2:30PM
   const phoneForCard = e164;
