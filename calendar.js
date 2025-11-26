@@ -380,14 +380,14 @@ export async function createBookingEvent({
       descriptionLines.push(`ID: ${zoomId}  Passcode: ${zoomPass}`);
     }
     descriptionLines.push('');
-    descriptionLines.push('tag: booked by mybizpal (gabriel)');
+    descriptionLines.push('tag: booked by mybizpal (Gabriel)');
   } else {
     descriptionLines.push('');
-    descriptionLines.push('tag: booked by mybizpal (gabriel)');
+    descriptionLines.push('tag: booked by mybizpal (Gabriel)');
   }
 
   const event = {
-    summary: `${whoPrefix}MyBizPal — Business Consultation (15–30 min)`,
+    summary: `Business Strategy Consultation with ${safeName} — MyBizPal`,
     start: { dateTime: correctedStartISO, timeZone: TZ },
     end: { dateTime: endISO, timeZone: TZ },
     description: descriptionLines.join('\n'),
