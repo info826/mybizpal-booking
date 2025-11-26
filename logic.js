@@ -1,5 +1,5 @@
 // logic.js
-// Gabriel brain: GPT-5.1 + booking orchestration + careful phone/email capture
+// Gabriel brain: GPT-5.1 + booking orchestration + careful phone/email/name capture
 
 import OpenAI from 'openai';
 import {
@@ -47,6 +47,36 @@ function verbaliseEmail(email) {
   const domainSpoken = rest ? `${host} dot ${rest}` : host;
 
   return `${localSpoken} at ${domainSpoken}`;
+}
+
+// Strict, confirmation-friendly name extractor used only during name capture.
+// It does NOT try to be clever on long sentences; it only reacts to clear name answers.
+function extractNameFromUtterance(text) {
+  if (!text) return null;
+  const t = text.trim();
+  if (!t) return null;
+
+  const normalised = t.replace(/\s+/g, ' ');
+
+  // Explicit patterns:
+  // "my name is Gabriel", "name is Gabriel", "I'm Gabriel", "I am Gabriel",
+  // "this is John", "it's Sarah", "it is Sarah"
+  let m = normalised.match(
+    /\b(?:my name is|name is|i am|i'm|this is|it's|it is)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
+  );
+  if (m) {
+    const full = m[1].trim().replace(/\s+/g, ' ');
+    return full.split(' ')[0]; // first token as spoken name
+  }
+
+  // If the whole reply is just 1–3 words, assume it's their name, e.g. "Gabriel" or "Gabriel Soares"
+  const words = normalised.split(' ');
+  if (words.length <= 3) {
+    const first = words[0].replace(/[^A-Za-z'-]/g, '');
+    if (first.length >= 2) return first;
+  }
+
+  return null;
 }
 
 function buildSystemPrompt(callState) {
@@ -217,14 +247,15 @@ and amazes callers with how human he sounds — while keeping replies short and 
 export async function handleTurn({ userText, callState }) {
   const history = ensureHistory(callState);
 
-  // Ensure capture state for phone/email
+  // Ensure capture state for phone/email/name
   if (!callState.capture) {
     callState.capture = {
-      mode: 'none',
+      mode: 'none',          // 'none' | 'phone' | 'email' | 'name'
       buffer: '',
       emailAttempts: 0,
       phoneAttempts: 0,
-      pendingConfirm: null, // 'email' | 'phone' | null
+      nameAttempts: 0,
+      pendingConfirm: null,  // 'email' | 'phone' | 'name' | null
     };
   }
   const capture = callState.capture;
@@ -232,8 +263,32 @@ export async function handleTurn({ userText, callState }) {
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
 
-  // 0) HANDLE PENDING CONFIRMATIONS (EMAIL / PHONE) BEFORE ANYTHING ELSE
-  if (capture.pendingConfirm === 'email') {
+  // 0) HANDLE PENDING CONFIRMATIONS (NAME / EMAIL / PHONE) BEFORE ANYTHING ELSE
+  if (capture.pendingConfirm === 'name') {
+    if (noInAnyLang(safeUserText)) {
+      // Caller said name is wrong → clear and re-capture
+      if (!callState.booking) callState.booking = {};
+      callState.booking.name = null;
+
+      const replyText =
+        "No worries — what should I call you instead? Just your first name.";
+
+      capture.mode = 'name';
+      capture.pendingConfirm = null;
+      capture.nameAttempts += 1;
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+
+      return { text: replyText, shouldEnd: false };
+    }
+
+    if (yesInAnyLang(safeUserText)) {
+      // Name confirmed, clear pending flag and continue
+      capture.pendingConfirm = null;
+      // fall through to normal flow
+    }
+  } else if (capture.pendingConfirm === 'email') {
     if (noInAnyLang(safeUserText)) {
       // Caller said email is wrong → clear and re-capture
       if (!callState.booking) callState.booking = {};
@@ -283,7 +338,44 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // 1) If we are currently capturing phone digits, handle that WITHOUT GPT
+  // 1) If we are currently capturing NAME, handle that WITHOUT GPT
+  if (capture.mode === 'name') {
+    const candidate = extractNameFromUtterance(safeUserText);
+
+    if (candidate) {
+      if (!callState.booking) callState.booking = {};
+      callState.booking.name = candidate;
+
+      const replyText = `Lovely, ${candidate}. Did I get that right?`;
+
+      capture.mode = 'none';
+      capture.pendingConfirm = 'name';
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+
+      return { text: replyText, shouldEnd: false };
+    }
+
+    // If they talk a lot but we still don't see a clear name, gently re-ask
+    if (safeUserText.length > 40 || capture.nameAttempts > 0) {
+      const replyText =
+        "Sorry, I didn’t quite catch your name — could you just say your first name nice and clearly?";
+
+      capture.mode = 'name';
+      capture.nameAttempts += 1;
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+
+      return { text: replyText, shouldEnd: false };
+    }
+
+    // Otherwise, stay quiet and keep listening
+    return { text: '', shouldEnd: false };
+  }
+
+  // 2) If we are currently capturing PHONE digits, handle that WITHOUT GPT
   if (capture.mode === 'phone') {
     capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
 
@@ -350,7 +442,7 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // 2) If we are currently capturing email, handle that WITHOUT GPT
+  // 3) If we are currently capturing EMAIL, handle that WITHOUT GPT
   if (capture.mode === 'email') {
     // If caller explicitly says they have no email, accept booking without it
     if (
@@ -421,7 +513,7 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // 3) System-level booking actions first (yes/no on suggested time, etc.)
+  // 4) System-level booking actions first (yes/no on suggested time, etc.)
   const systemAction = await handleSystemActionsFirst({
     userText: safeUserText,
     callState,
@@ -433,14 +525,15 @@ export async function handleTurn({ userText, callState }) {
     return { text: systemAction.replyText, shouldEnd: false };
   }
 
-  // 4) Update booking state with latest utterance (name/phone/email/time/earliest)
+  // 5) Update booking state with latest utterance (phone/email/time/earliest)
+  //    (We no longer try to auto-guess names here — name is handled via explicit capture.)
   await updateBookingStateFromUtterance({
     userText: safeUserText,
     callState,
     timezone: TZ,
   });
 
-  // 5) Build GPT-5.1 prompt
+  // 6) Build GPT-5.1 prompt
   const systemPrompt = buildSystemPrompt(callState);
 
   const messages = [{ role: 'system', content: systemPrompt }];
@@ -483,10 +576,18 @@ export async function handleTurn({ userText, callState }) {
   history.push({ role: 'user', content: safeUserText });
   history.push({ role: 'assistant', content: botText });
 
-  // 6) Detect if Gabriel just asked for phone or email → enable capture mode
+  // 7) Detect if Gabriel just asked for NAME / PHONE / EMAIL → enable capture mode
   const lower = botText.toLowerCase();
 
   if (
+    /(what's your name|whats your name|your name|who am i speaking with|who am i speaking to|can i take your name|may i take your name)/.test(
+      lower
+    )
+  ) {
+    capture.mode = 'name';
+    capture.buffer = '';
+    capture.nameAttempts = 0;
+  } else if (
     /(mobile|phone number|your number|best number|contact number|cell number)/.test(
       lower
     )
@@ -499,11 +600,12 @@ export async function handleTurn({ userText, callState }) {
     capture.buffer = '';
     capture.emailAttempts = 0;
   } else {
+    // If he didn't explicitly ask for a detail, clear capture mode
     capture.mode = 'none';
     capture.buffer = '';
   }
 
-  // 7) Detect end-of-call intent from the caller
+  // 8) Detect end-of-call intent from the caller
   let shouldEnd = false;
 
   if (
