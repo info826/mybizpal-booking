@@ -40,9 +40,12 @@ export function extractName(text) {
     return full.split(' ')[0];
   }
 
-  // Fallback: first reasonable-looking word that is not a greeting/stop word and ≥ 3 letters
-  const words = normalised.split(' ');
-  for (const w of words) {
+  // SAFER FALLBACK:
+  // Only treat it as a name if the *entire* utterance is a single, non-greeting word.
+  // This avoids picking random words from longer sentences like "that's perfect".
+  const words = normalised.split(' ').filter(Boolean);
+  if (words.length === 1) {
+    const w = words[0];
     const clean = w.replace(/[^A-Za-z'-]/g, '');
     const lower = clean.toLowerCase();
     if (clean.length >= 3 && !NAME_GREETING_STOP_WORDS.has(lower)) {
@@ -94,7 +97,7 @@ export function parseUkPhone(spoken) {
     return { e164: `+44${s.slice(1)}`, national: s };
   } else if (/^\d{10}$/.test(s)) {
     // No leading 0 but 10 digits → assume UK, add 0
-    return { e164: `+44${s}`, national: `0${s}` };
+    return { e164: `+44${s}`, national: `0{s}` };
   }
 
   // If it does not look like a UK mobile or landline, return null
