@@ -36,8 +36,13 @@ function normaliseWhatsAppFrom(rawFrom) {
   return `whatsapp:${s.replace(/^whatsapp:/, '')}`;
 }
 
-const WHATSAPP_FROM_NUMBER = normaliseWhatsAppFrom(TWILIO_WHATSAPP_FROM || process.env.WHATSAPP_FROM || '');
-const WA_TEMPLATE_SID = WHATSAPP_APPOINTMENT_TEMPLATE_SID || null;
+const WHATSAPP_FROM_NUMBER = normaliseWhatsAppFrom(
+  TWILIO_WHATSAPP_FROM || process.env.WHATSAPP_FROM || ''
+);
+
+// ✅ NEW: accept either env var name for the template SID
+const WA_TEMPLATE_SID =
+  WHATSAPP_APPOINTMENT_TEMPLATE_SID || process.env.TWILIO_WHATSAPP_TEMPLATE_SID || null;
 
 const TZ = BUSINESS_TIMEZONE || 'Europe/London';
 
@@ -134,7 +139,7 @@ async function sendSmsMessage({ to, body }) {
   }
 }
 
-// ---------- NEW: WhatsApp template sender with strong normalisation + debug ----------
+// ---------- WhatsApp template sender with strong normalisation + debug ----------
 
 async function sendWhatsAppTemplate({ to, startISO, name }) {
   if (!twilioClient || !WHATSAPP_FROM_NUMBER || !WA_TEMPLATE_SID) {
