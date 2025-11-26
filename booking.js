@@ -2,7 +2,6 @@
 // Booking state machine: extract fields, propose earliest slot, confirm & create events.
 
 import {
-  extractName,
   parseUkPhone,
   isLikelyUkNumberPair,
   extractEmailSmart,
