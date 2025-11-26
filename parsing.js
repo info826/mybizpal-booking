@@ -8,6 +8,7 @@ const DEFAULT_TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
 // ---------- NAME PARSING ----------
 
+// Words that are clearly not names when we see them after "my name is" etc.
 const NAME_GREETING_STOP_WORDS = new Set([
   'hi',
   'hello',
@@ -21,62 +22,51 @@ const NAME_GREETING_STOP_WORDS = new Set([
   'morning',
   'afternoon',
   'evening',
+  'please',
+  'would',
   'yes',
   'yeah',
   'yep',
-  'yup',
-  'no',
-  'nope',
   'ok',
   'okay',
-  'alright',
   'sure',
   'fine',
   'perfect',
-  'please',
-  'would',
-  'best',
-  'email',
-  'mail',
 ]);
 
 export function extractName(text) {
   if (!text) return null;
   const t = text.trim();
+  if (!t) return null;
 
-  // Normalise spaces
   const normalised = t.replace(/\s+/g, ' ');
 
-  // Pattern style: "I'm Gabriel", "I am Gabriel", "this is John",
-  // "my name is Raquel", "no my name is Gabriel"
+  // 1) Strong patterns: "I'm Gabriel", "I am Gabriel",
+  // "this is John", "my name is Raquel", "it's James", "it is James"
   let m = normalised.match(
-    /\b(?:no[, ]+)?(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
+    /\b(?:no[, ]+)?(?:i am|i'm|this is|my name is|it is|it's)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
   );
   if (m) {
     const full = m[1].trim().replace(/\s+/g, ' ');
-    // Use only first token as the name ("Gabriel" from "Gabriel De Ornelas")
-    return full.split(' ')[0];
-  }
-
-  // Single-word answer like "Gabriel"
-  const parts = normalised.split(' ');
-  if (parts.length === 1) {
-    const w = parts[0].replace(/[^A-Za-z'-]/g, '');
-    const lower = w.toLowerCase();
-    if (w.length >= 3 && !NAME_GREETING_STOP_WORDS.has(lower)) {
-      return w;
+    const first = full.split(' ')[0];
+    const lower = first.toLowerCase();
+    if (!NAME_GREETING_STOP_WORDS.has(lower)) {
+      return first;
     }
   }
 
-  // Fallback: first reasonable-looking word that is not a greeting/stop word and ≥ 3 letters
-  for (const wRaw of parts) {
-    const clean = wRaw.replace(/[^A-Za-z'-]/g, '');
-    const lower = clean.toLowerCase();
-    if (clean.length >= 3 && !NAME_GREETING_STOP_WORDS.has(lower)) {
-      return clean;
+  // 2) "Gabriel speaking"
+  m = normalised.match(/\b([A-Za-z][A-Za-z '-]{1,40})\s+speaking\b/i);
+  if (m) {
+    const full = m[1].trim().replace(/\s+/g, ' ');
+    const first = full.split(' ')[0];
+    const lower = first.toLowerCase();
+    if (!NAME_GREETING_STOP_WORDS.has(lower)) {
+      return first;
     }
   }
 
+  // 3) NO fallback guessing – if we’re not sure, return null
   return null;
 }
 
@@ -212,7 +202,6 @@ function isEmailFiller(word) {
   return GENERAL_FILLERS.has(w) || EMAIL_LEAD_IN_FILLERS.has(w);
 }
 
-// Converts sequences like “four two two seven” → “4227”
 function normaliseDigits(words) {
   return words.map((w) => DIGIT_WORDS[w] || w).join('');
 }
