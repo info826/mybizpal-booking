@@ -37,36 +37,34 @@ const NAME_GREETING_STOP_WORDS = new Set([
 export function extractName(text) {
   if (!text) return null;
   const t = text.trim();
-  if (!t) return null;
 
+  // Normalise spaces
   const normalised = t.replace(/\s+/g, ' ');
 
-  // 1) Strong patterns: "I'm Gabriel", "I am Gabriel",
-  // "this is John", "my name is Raquel", "it's James", "it is James"
+  // 1) Explicit phrases:
+  // "I'm Gabriel", "I am Gabriel", "this is John", "my name is Raquel", "no my name is Gabriel"
   let m = normalised.match(
-    /\b(?:no[, ]+)?(?:i am|i'm|this is|my name is|it is|it's)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
+    /\b(?:no[, ]+)?(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
   );
   if (m) {
     const full = m[1].trim().replace(/\s+/g, ' ');
-    const first = full.split(' ')[0];
-    const lower = first.toLowerCase();
-    if (!NAME_GREETING_STOP_WORDS.has(lower)) {
-      return first;
+    // Use only first token as the name ("Gabriel" from "Gabriel De Ornelas")
+    return full.split(' ')[0];
+  }
+
+  // 2) Short direct answer like: "Gabriel" or "Gabriel Soares"
+  const words = normalised.split(' ').filter(Boolean);
+
+  // Only treat it as a name if the caller basically ONLY said their name
+  if (words.length <= 2) {
+    // Take the FIRST word as the first name
+    const candidate = words[0].replace(/[^A-Za-z'-]/g, '');
+    if (candidate.length >= 3 && candidate.length <= 20) {
+      return candidate;
     }
   }
 
-  // 2) "Gabriel speaking"
-  m = normalised.match(/\b([A-Za-z][A-Za-z '-]{1,40})\s+speaking\b/i);
-  if (m) {
-    const full = m[1].trim().replace(/\s+/g, ' ');
-    const first = full.split(' ')[0];
-    const lower = first.toLowerCase();
-    if (!NAME_GREETING_STOP_WORDS.has(lower)) {
-      return first;
-    }
-  }
-
-  // 3) NO fallback guessing – if we’re not sure, return null
+  // Otherwise, don't guess
   return null;
 }
 
