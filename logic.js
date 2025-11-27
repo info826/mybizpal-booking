@@ -319,7 +319,8 @@ HUMOUR & CHUCKLES
   - “No stress at all — I’ve got you.”
   - “Phones always ring at the worst possible time, don’t they?”
 - You may occasionally include very small human touches like:
-  - “heh”, “haha”, “(laughs softly)”, “(little chuckle)”
+  - “heh”, “haha”, “(laughs softly)”
+  - “(little chuckle)”
 - Use these sparingly so they feel natural, not forced.
 - Do NOT use humour if they sound stressed, angry, or upset.
 
@@ -733,7 +734,7 @@ export async function handleTurn({ userText, callState }) {
   history.push({ role: 'user', content: safeUserText });
   history.push({ role: 'assistant', content: botText });
 
-  // 7) Detect if Gabriel just asked for NAME / PHONE / EMAIL → enable capture mode
+  // 7) Detect if Gabriel just asked the caller to SPELL NAME / give PHONE / give EMAIL
   const lower = botText.toLowerCase();
 
   // If Gabriel has just asked the caller to spell their name
@@ -745,21 +746,37 @@ export async function handleTurn({ userText, callState }) {
   ) {
     capture.mode = 'name';
     capture.buffer = '';
-  } else if (
-    /(mobile|phone number|your number|best number|contact number|cell number)/.test(
+  }
+  // PHONE: only when he clearly asks for their number
+  else if (
+    /(what('| i)s|what is|can i grab|could i grab|may i grab|let me grab|can i take|could i take|may i take).*(mobile|phone number|your number|best number|contact number|cell number)/.test(
       lower
-    )
+    ) ||
+    /(what('| i)s your mobile\b)/.test(lower)
   ) {
     capture.mode = 'phone';
     capture.buffer = '';
     capture.phoneAttempts = 0;
-  } else if (/(email|e-mail|e mail)/.test(lower)) {
+  }
+  // EMAIL: only when he explicitly asks for it
+  else if (
+    /(what('| i)s|what is|can i grab|could i grab|may i grab|let me grab|can i take|could i take|may i take).*(email|e-mail|e mail)/.test(
+      lower
+    ) ||
+    /(your best email|best email for you|best email address)/.test(lower)
+  ) {
     capture.mode = 'email';
     capture.buffer = '';
     capture.emailAttempts = 0;
   } else {
-    capture.mode = 'none';
-    capture.buffer = '';
+    // Don't aggressively kill capture mode if we're in the middle of it;
+    // just clear any stale buffer. If mode was none, keep it none.
+    if (capture.mode !== 'none') {
+      capture.buffer = '';
+    } else {
+      capture.mode = 'none';
+      capture.buffer = '';
+    }
   }
 
   // 8) Detect end-of-call intent from the caller
