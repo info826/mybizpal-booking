@@ -234,63 +234,27 @@ wss.on('connection', (ws, req) => {
     }
   }
 
-  // Deepgram → transcript handler (with barge-in + diarisation)
+ // Deepgram → transcript handler (with barge-in, no diarisation)
   dgSocket.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString());
       if (!msg.channel || !msg.channel.alternatives) return;
 
       const alt = msg.channel.alternatives[0];
-      let transcript = alt.transcript?.trim();
-      const isFinal = msg.is_final;
 
+      // We only asked Deepgram for final results, but we still double-check:
+      if (!msg.is_final) return;
+
+      const transcript = (alt.transcript || '').trim();
       if (!transcript) return;
-      if (!isFinal) return; // only final segments
-
-      // If diarisation is enabled, lock onto the main speaker
-      if (Array.isArray(alt.words) && alt.words.length > 0) {
-        // If we have not yet chosen a main speaker, pick the first one that appears
-        if (callState.mainSpeaker == null) {
-          const firstWordWithSpeaker = alt.words.find((w) => w.speaker !== undefined);
-          if (firstWordWithSpeaker && firstWordWithSpeaker.speaker !== undefined) {
-            callState.mainSpeaker = firstWordWithSpeaker.speaker;
-            console.log('🎙️ Main speaker set to', callState.mainSpeaker);
-          }
-        }
-
-        // If we have a main speaker, rebuild transcript from only that speaker's words
-        if (callState.mainSpeaker != null) {
-          const primaryWords = alt.words.filter(
-            (w) => w.speaker === callState.mainSpeaker
-          );
-
-          if (primaryWords.length > 0) {
-            const primaryTranscript = primaryWords
-              .map((w) => w.punctuated_word || w.word || '')
-              .join(' ')
-              .trim();
-
-            if (primaryTranscript) {
-              transcript = primaryTranscript;
-            } else {
-              // No usable words from main speaker in this message
-              return;
-            }
-          } else {
-            // This chunk belongs entirely to someone else (background voice) → ignore it
-            return;
-          }
-        }
-      }
 
       // If Gabriel is talking and caller interrupts → cancel TTS (barge-in)
       if (callState.isSpeaking) {
         console.log('🚫 Barge-in detected – cancelling current TTS');
         callState.cancelSpeaking = true;
-        // IMPORTANT: we *do not* return here — we still process this transcript
-        // so if they started giving their name/number mid-sentence, we catch it.
+        // We still continue and process this transcript
       }
-      
+
       await respondToUser(transcript);
     } catch (err) {
       console.error('Error handling Deepgram message:', err);
