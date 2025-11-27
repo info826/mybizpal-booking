@@ -7,6 +7,7 @@ import {
   handleSystemActionsFirst,
 } from './booking.js';
 import {
+  extractName,
   parseUkPhone,
   isLikelyUkNumberPair,
   extractEmailSmart,
