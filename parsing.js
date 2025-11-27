@@ -213,7 +213,11 @@ export function extractEmailSmart(raw) {
     .replace(/_/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-
+  
+// Fix common "g mail" / "g male" → "gmail"
+  text = text.replace(/\bg\s+mail\b/g, 'gmail');
+  text = text.replace(/\bg\s+male\b/g, 'gmail');
+  
   // Tokenise
   let tokens = text.split(' ');
 
@@ -271,6 +275,9 @@ export function extractEmailSmart(raw) {
   if (!match) return null;
 
   let email = match[0];
+
+  // If STT collapses "gmail" to just "g.com", correct it
+  email = email.replace(/@g\.com$/i, '@gmail.com');
 
   // Post-fix common speech / transcription glitches
   email = email.replace(/gmailmail(\.)/g, 'gmail$1');
