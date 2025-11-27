@@ -103,13 +103,14 @@ function isBoringSentence(str = '') {
     'perfect',
     'thanks',
     'thank you',
+    'just',
   ]);
   if (boring.has(t)) return true;
 
   return false;
 }
 
-// Old bullet-style summary kept as a fallback if AI is unavailable
+// Paragraph-style fallback summary (no bullets) if AI is unavailable
 function buildFallbackSummary(callState) {
   const history = (callState && callState.history) || [];
   const userUtterances = history
@@ -119,26 +120,52 @@ function buildFallbackSummary(callState) {
 
   if (userUtterances.length === 0) return null;
 
+  const meaningful = userUtterances.filter((u) => !isBoringSentence(u));
   const mainRequest =
-    userUtterances.find((u) => !isBoringSentence(u)) || userUtterances[0];
+    meaningful.find((u) => u.length > 15) || meaningful[0] || userUtterances[0];
 
-  const keyPoints = userUtterances.filter(
-    (u) => u !== mainRequest && !isBoringSentence(u)
+  const extraPoints = meaningful.filter((u) => u !== mainRequest);
+
+  const behaviour = callState?.behaviour || {};
+  const interest = behaviour.interestLevel || 'unknown';
+  const pain = behaviour.painPointsMentioned ? 'some pain points around calls or operations' : null;
+
+  const sentences = [];
+
+  if (mainRequest) {
+    sentences.push(
+      `The caller contacted MyBizPal primarily to discuss the following: "${mainRequest}".`
+    );
+  }
+
+  if (extraPoints.length) {
+    const trimmed = extraPoints.slice(0, 3).join(' | ');
+    sentences.push(
+      `During the conversation they also mentioned: ${trimmed}.`
+    );
+  }
+
+  if (pain) {
+    sentences.push(`They appear to be experiencing ${pain}.`);
+  }
+
+  if (interest !== 'unknown') {
+    sentences.push(
+      `Overall they came across as ${interest} in exploring MyBizPal further.`
+    );
+  } else {
+    sentences.push(
+      `Their level of interest is not fully clear from the partial transcript but there is at least some curiosity about what MyBizPal can do.`
+    );
+  }
+
+  sentences.push(
+    `On the Zoom call, it would be useful to clarify their current call handling process, quantify any missed-call or lead-loss issues, and show concrete ways MyBizPal can reduce friction and increase booked appointments.`
   );
 
-  const lines = [];
-  lines.push('Smart summary (for Zoom prep):');
-  lines.push('- Interested in a MyBizPal consultation / demo.');
-  if (mainRequest) {
-    lines.push(`- Main request in their words: "${mainRequest}"`);
-  }
+  const paragraph = sentences.join(' ');
 
-  const maxKeys = 3;
-  for (let i = 0; i < Math.min(maxKeys, keyPoints.length); i++) {
-    lines.push(`- Key point ${i + 1}: ${keyPoints[i]}`);
-  }
-
-  return lines.join('\n');
+  return `Smart summary (for Zoom prep):\n\n${paragraph}`;
 }
 
 /**
@@ -152,7 +179,7 @@ function buildFallbackSummary(callState) {
 async function buildSmartSummary(callState) {
   try {
     if (!openai.apiKey) {
-      // No API key available – fall back to simple list summary
+      // No API key available – fall back to simple paragraph summary
       return buildFallbackSummary(callState);
     }
 
@@ -195,11 +222,12 @@ Booking readiness: ${behaviour.bookingReadiness || 'unknown'}
 You are an internal assistant for MyBizPal creating a smart prep note
 for a human consultant who will run a Zoom call.
 
-Write a SINGLE short paragraph (3–6 sentences, no bullets, no headings) that summarises:
+Write ONE short paragraph (3–6 sentences, no bullets, no headings) that summarises:
 - What the caller was asking about and what they care about.
 - Any explicit or implied pain points (e.g. missed calls, lost leads, time wasted).
 - How the caller seemed emotionally and commercially (warm / neutral / cold; curious, sceptical, etc.).
 - How interested they seem in MyBizPal and how strong the opportunity looks.
+- A simple "call score" style judgement (e.g. overall this feels like a warm opportunity and worth prioritising).
 - What the consultant should focus on in the upcoming Zoom to maximise conversion.
 - Any specific questions or requests the caller made that should be addressed on the call.
 
@@ -241,10 +269,15 @@ ${behaviourContext}
 
     // Hard safety: ensure it's not accidentally bullet-style
     if (summary.includes('\n- ') || summary.startsWith('- ')) {
-      summary = summary.replace(/\n- /g, ' ').replace(/^- /, '');
+      summary = summary
+        .replace(/\r/g, ' ')
+        .replace(/\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .replace(/^- /, '')
+        .trim();
     }
 
-    return summary;
+    return `Smart summary (for Zoom prep):\n\n${summary}`;
   } catch (err) {
     console.error('Error building smart summary:', err);
     return buildFallbackSummary(callState);
