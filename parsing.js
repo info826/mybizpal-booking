@@ -162,7 +162,6 @@ const GENERAL_FILLERS = new Set([
   'the',
   'address',
   'email',
-  'mail',
 ]);
 
 // Extra email-specific fillers that often appear before the real address
@@ -276,10 +275,35 @@ export function extractEmailSmart(raw) {
 
   let email = match[0];
 
-  // If STT collapses "gmail" to just "g.com", correct it
-  email = email.replace(/@g\.com$/i, '@gmail.com');
+  // Split into local + domain so we can fix the domain separately
+  const [localPart, domainPartRaw] = email.split('@');
+  let domainPart = domainPartRaw || '';
 
-  // Post-fix common speech / transcription glitches
+  // Fix common ASR glitches on the domain side
+  const domainFixes = {
+    'g.com': 'gmail.com',
+    'gmai.com': 'gmail.com',
+    'gmaill.com': 'gmail.com',
+    'gmailmail.com': 'gmail.com',
+
+    'hotmai.com': 'hotmail.com',
+    'hotmaill.com': 'hotmail.com',
+    'hotmailmail.com': 'hotmail.com',
+
+    'outllok.com': 'outlook.com',
+    'outlookmail.com': 'outlook.com',
+
+    'yahoomail.com': 'yahoo.com',
+    'googlemailmail.com': 'googlemail.com',
+  };
+
+  if (domainFixes[domainPart]) {
+    domainPart = domainFixes[domainPart];
+  }
+
+  email = `${localPart}@${domainPart}`;
+
+  // Extra safety for any leftover "gmailmail." style glitches
   email = email.replace(/gmailmail(\.)/g, 'gmail$1');
   email = email.replace(/gmaill(\.)/g, 'gmail$1');
   email = email.replace(/gmai(\.)/g, 'gmail$1');
