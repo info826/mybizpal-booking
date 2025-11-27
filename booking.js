@@ -18,8 +18,13 @@ import {
   hasConflict,
 } from './calendar.js';
 import { sendConfirmationAndReminders } from './sms.js';
+import OpenAI from 'openai';
 
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Europe/London';
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 function ensureBooking(callState) {
   if (!callState.booking) {
@@ -104,7 +109,8 @@ function isBoringSentence(str = '') {
   return false;
 }
 
-function buildSmartSummary(callState) {
+// Old bullet-style summary kept as a fallback if AI is unavailable
+function buildFallbackSummary(callState) {
   const history = (callState && callState.history) || [];
   const userUtterances = history
     .filter((m) => m.role === 'user')
@@ -113,11 +119,9 @@ function buildSmartSummary(callState) {
 
   if (userUtterances.length === 0) return null;
 
-  // Main request: first non-boring utterance
   const mainRequest =
     userUtterances.find((u) => !isBoringSentence(u)) || userUtterances[0];
 
-  // Key points: last few non-boring utterances, excluding the main request
   const keyPoints = userUtterances.filter(
     (u) => u !== mainRequest && !isBoringSentence(u)
   );
@@ -135,6 +139,116 @@ function buildSmartSummary(callState) {
   }
 
   return lines.join('\n');
+}
+
+/**
+ * New AI-powered smart summary.
+ * Produces a SINGLE paragraph (no bullets) describing:
+ * - enquiry + pain points
+ * - sentiment / warmth / interest
+ * - what to focus on in the Zoom to convert
+ * - any specific questions or notes from the caller
+ */
+async function buildSmartSummary(callState) {
+  try {
+    if (!openai.apiKey) {
+      // No API key available – fall back to simple list summary
+      return buildFallbackSummary(callState);
+    }
+
+    const history = (callState && callState.history) || [];
+    if (!history.length) return null;
+
+    const booking = callState.booking || {};
+    const behaviour = callState.behaviour || {};
+
+    // Keep transcript short-ish: last 20 messages (10 exchanges)
+    const recent = history.slice(-20);
+    const transcript = recent
+      .map((m) => {
+        const speaker = m.role === 'user' ? 'Caller' : 'Gabriel';
+        return `${speaker}: ${m.content || ''}`;
+      })
+      .join('\n')
+      .trim();
+
+    if (!transcript) return null;
+
+    const bookingContext = `
+Intent: ${booking.intent || 'none'}
+Name (may be unknown): ${booking.name || 'unknown'}
+Phone present: ${booking.phone ? 'yes' : 'no'}
+Email present: ${booking.email ? 'yes' : 'no'}
+Requested time (spoken): ${booking.timeSpoken || booking.earliestSlotSpoken || 'not specified'}
+`.trim();
+
+    const behaviourContext = `
+Rapport level (0–5): ${behaviour.rapportLevel ?? 0}
+Interest level: ${behaviour.interestLevel || 'unknown'}
+Scepticism level: ${behaviour.scepticismLevel || 'unknown'}
+Pain points mentioned: ${behaviour.painPointsMentioned ? 'yes' : 'no'}
+Decision power: ${behaviour.decisionPower || 'unknown'}
+Booking readiness: ${behaviour.bookingReadiness || 'unknown'}
+`.trim();
+
+    const systemPrompt = `
+You are an internal assistant for MyBizPal creating a smart prep note
+for a human consultant who will run a Zoom call.
+
+Write a SINGLE short paragraph (3–6 sentences, no bullets, no headings) that summarises:
+- What the caller was asking about and what they care about.
+- Any explicit or implied pain points (e.g. missed calls, lost leads, time wasted).
+- How the caller seemed emotionally and commercially (warm / neutral / cold; curious, sceptical, etc.).
+- How interested they seem in MyBizPal and how strong the opportunity looks.
+- What the consultant should focus on in the upcoming Zoom to maximise conversion.
+- Any specific questions or requests the caller made that should be addressed on the call.
+
+Tone: concise, professional and practical, written in third person
+(“The caller…”, “They…”, “Gabriel’s impression is that…”).
+Do NOT use bullet points. Do NOT include labels like “Pain points:”.
+Just write one coherent paragraph.
+`.trim();
+
+    const userPrompt = `
+CALL TRANSCRIPT (partial, most recent first-to-last):
+
+${transcript}
+
+BOOKING CONTEXT:
+${bookingContext}
+
+BEHAVIOUR CONTEXT:
+${behaviourContext}
+`.trim();
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-5.1',
+      reasoning_effort: 'none',
+      temperature: 0.4,
+      max_completion_tokens: 220,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    });
+
+    let summary =
+      completion.choices?.[0]?.message?.content?.trim() || '';
+
+    if (!summary) {
+      return buildFallbackSummary(callState);
+    }
+
+    // Hard safety: ensure it's not accidentally bullet-style
+    if (summary.includes('\n- ') || summary.startsWith('- ')) {
+      summary = summary.replace(/\n- /g, ' ').replace(/^- /, '');
+    }
+
+    return summary;
+  } catch (err) {
+    console.error('Error building smart summary:', err);
+    return buildFallbackSummary(callState);
+  }
 }
 
 /**
@@ -314,7 +428,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       }
 
       // Build smart summary from call history for the calendar notes
-      const summaryNotes = buildSmartSummary(callState);
+      const summaryNotes = await buildSmartSummary(callState);
       booking.summaryNotes = summaryNotes || null;
 
       const event = await createBookingEvent({
