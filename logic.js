@@ -629,33 +629,34 @@ if (capture.mode === 'name') {
   history.push({ role: 'assistant', content: botText });
 
   // 7) Detect if Gabriel just asked for NAME / PHONE / EMAIL → enable capture mode
-  const lower = botText.toLowerCase();
+  
+const lower = botText.toLowerCase();
 
-  if (
-    /(what's your name|whats your name|your name|who am i speaking with|who am i speaking to|can i take your name|may i take your name)/.test(
-      lower
-    )
-  ) {
-    capture.mode = 'name';
-    capture.buffer = '';
-    capture.nameAttempts = 0;
-  } else if (
-    /(mobile|phone number|your number|best number|contact number|cell number)/.test(
-      lower
-    )
-  ) {
-    capture.mode = 'phone';
-    capture.buffer = '';
-    capture.phoneAttempts = 0;
-  } else if (/(email|e-mail|e mail)/.test(lower)) {
-    capture.mode = 'email';
-    capture.buffer = '';
-    capture.emailAttempts = 0;
-  } else {
-    // If he didn't explicitly ask for a detail, clear capture mode
-    capture.mode = 'none';
-    capture.buffer = '';
-  }
+// If Gabriel has just asked the caller to spell their name
+if (
+  /spell your name/.test(lower) ||
+  /spell it for me/.test(lower) ||
+  /spell your first name/.test(lower) ||
+  (/letter by letter/.test(lower) && /name/.test(lower))
+) {
+  capture.mode = 'name';
+  capture.buffer = '';
+} else if (
+  /(mobile|phone number|your number|best number|contact number|cell number)/.test(
+    lower
+  )
+) {
+  capture.mode = 'phone';
+  capture.buffer = '';
+  capture.phoneAttempts = 0;
+} else if (/(email|e-mail|e mail)/.test(lower)) {
+  capture.mode = 'email';
+  capture.buffer = '';
+  capture.emailAttempts = 0;
+} else {
+  capture.mode = 'none';
+  capture.buffer = '';
+}
 
   // 8) Detect end-of-call intent from the caller
   let shouldEnd = false;
