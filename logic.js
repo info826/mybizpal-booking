@@ -39,6 +39,7 @@ function ensureBehaviourState(callState) {
   }
   return callState.behaviour;
 }
+
 // ---------- VERBALISERS FOR CLEAR READ-BACK ----------
 
 function verbalisePhone(number) {
@@ -346,9 +347,9 @@ and almost always ending with a clear question or next step.
 
 export async function handleTurn({ userText, callState }) {
   const history = ensureHistory(callState);
-  const behaviour = ensureBehaviourState(callState);  // << add this line
+  const behaviour = ensureBehaviourState(callState);
 
-  // Ensure capture state for phone/email
+  // Ensure capture state for phone/email/name
   if (!callState.capture) {
     callState.capture = {
       mode: 'none',          // 'none' | 'phone' | 'email' | 'name'
@@ -365,33 +366,32 @@ export async function handleTurn({ userText, callState }) {
   const userLower = safeUserText.toLowerCase();
 
   // ---- Light Autonomous Behaviour Updates ----
-// These micro-signals help Gabriel feel alive, adaptive, and human.
+  // These micro-signals help Gabriel feel alive, adaptive, and human.
 
-if (/thank(s| you)/.test(userLower)) {
-  behaviour.rapportLevel = Number(behaviour.rapportLevel || 0) + 1;
-}
-  // optional: prevent rapport from going above 5
-behaviour.rapportLevel = Math.min(5, behaviour.rapportLevel);
-
-if (/just looking|just curious|having a look/.test(userLower)) {
-  behaviour.interestLevel = 'low';
-}
-
-if (/miss(ed)? calls?|lost leads?|too many calls|overwhelmed/.test(userLower)) {
-  behaviour.painPointsMentioned = true;
-  if (behaviour.interestLevel === 'unknown') {
-    behaviour.interestLevel = 'medium';
+  if (/thank(s| you)/.test(userLower)) {
+    behaviour.rapportLevel = Number(behaviour.rapportLevel || 0) + 1;
+    behaviour.rapportLevel = Math.min(5, behaviour.rapportLevel);
   }
-}
 
-if (/how much|price|cost|expensive|too pricey/.test(userLower)) {
-  behaviour.scepticismLevel =
-    behaviour.scepticismLevel === 'unknown' ? 'medium' : behaviour.scepticismLevel;
-}
+  if (/just looking|just curious|having a look/.test(userLower)) {
+    behaviour.interestLevel = 'low';
+  }
 
-if (/i own|my business|i run|i'm the owner|i am the owner/.test(userLower)) {
-  behaviour.decisionPower = 'decision-maker';
-}
+  if (/miss(ed)? calls?|lost leads?|too many calls|overwhelmed/.test(userLower)) {
+    behaviour.painPointsMentioned = true;
+    if (behaviour.interestLevel === 'unknown') {
+      behaviour.interestLevel = 'medium';
+    }
+  }
+
+  if (/how much|price|cost|expensive|too pricey/.test(userLower)) {
+    behaviour.scepticismLevel =
+      behaviour.scepticismLevel === 'unknown' ? 'medium' : behaviour.scepticismLevel;
+  }
+
+  if (/i own|my business|i run|i'm the owner|i am the owner/.test(userLower)) {
+    behaviour.decisionPower = 'decision-maker';
+  }
 
   // 0) HANDLE PENDING CONFIRMATIONS (NAME / EMAIL / PHONE) BEFORE ANYTHING ELSE
   if (capture.pendingConfirm === 'name') {
@@ -412,58 +412,7 @@ if (/i own|my business|i run|i'm the owner|i am the owner/.test(userLower)) {
 
       return { text: replyText, shouldEnd: false };
     }
-    
-// 1) If we are currently capturing a spelled name, handle that WITHOUT GPT
-if (capture.mode === 'name') {
-  const raw = safeUserText || '';
 
-  let cleaned = raw
-    .toLowerCase()
-    .replace(/[^a-z\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (!cleaned) {
-    return { text: '', shouldEnd: false };
-  }
-
-  const parts = cleaned.split(' ').filter(Boolean);
-  let candidate = null;
-
-  if (
-    parts.length >= 2 &&
-    parts.length <= 12 &&
-    parts.every((p) => p.length === 1)
-  ) {
-    candidate = parts.join('');
-  } else {
-    candidate = parts.find((p) => p.length >= 2 && p.length <= 20) || null;
-  }
-
-  if (!candidate) {
-    const replyText =
-      "Sorry, I still didn’t quite get that — could you spell your first name again, letter by letter?";
-    history.push({ role: 'user', content: safeUserText });
-    history.push({ role: 'assistant', content: replyText });
-    return { text: replyText, shouldEnd: false };
-  }
-
-  const proper = candidate.charAt(0).toUpperCase() + candidate.slice(1);
-
-  if (!callState.booking) callState.booking = {};
-  callState.booking.name = proper;
-
-  const replyText = `Got it, ${proper}. Did I get that right?`;
-
-  capture.mode = 'none';
-  capture.buffer = '';
-
-  history.push({ role: 'user', content: safeUserText });
-  history.push({ role: 'assistant', content: replyText });
-
-  return { text: replyText, shouldEnd: false };
-}
-    
     if (yesInAnyLang(safeUserText)) {
       // Name confirmed, clear pending flag and continue
       capture.pendingConfirm = null;
@@ -519,15 +468,42 @@ if (capture.mode === 'name') {
     }
   }
 
-  // 1) If we are currently capturing NAME, handle that WITHOUT GPT
+  // 1) If we are currently capturing NAME (including spelled-out), handle that WITHOUT GPT
   if (capture.mode === 'name') {
-    const candidate = extractNameFromUtterance(safeUserText);
+    const raw = safeUserText || '';
+
+    // First, try to interpret spelled-out names like "r a q u e l"
+    let cleaned = raw
+      .toLowerCase()
+      .replace(/[^a-z\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    let candidate = null;
+    if (cleaned) {
+      const parts = cleaned.split(' ').filter(Boolean);
+
+      // Case 1: they spelled it letter by letter: "r a q u e l"
+      if (
+        parts.length >= 2 &&
+        parts.length <= 12 &&
+        parts.every((p) => p.length === 1)
+      ) {
+        candidate = parts.join('');
+      } else {
+        // Case 2: fall back to natural-name extraction ("I'm Gabriel", "name is Raquel")
+        candidate = extractNameFromUtterance(raw);
+      }
+    }
 
     if (candidate) {
-      if (!callState.booking) callState.booking = {};
-      callState.booking.name = candidate;
+      const proper =
+        candidate.charAt(0).toUpperCase() + candidate.slice(1).toLowerCase();
 
-      const replyText = `Lovely, ${candidate}. Did I get that right?`;
+      if (!callState.booking) callState.booking = {};
+      callState.booking.name = proper;
+
+      const replyText = `Lovely, ${proper}. Did I get that right?`;
 
       capture.mode = 'none';
       capture.pendingConfirm = 'name';
@@ -758,34 +734,33 @@ if (capture.mode === 'name') {
   history.push({ role: 'assistant', content: botText });
 
   // 7) Detect if Gabriel just asked for NAME / PHONE / EMAIL → enable capture mode
-  
-const lower = botText.toLowerCase();
+  const lower = botText.toLowerCase();
 
-// If Gabriel has just asked the caller to spell their name
-if (
-  /spell your name/.test(lower) ||
-  /spell it for me/.test(lower) ||
-  /spell your first name/.test(lower) ||
-  (/letter by letter/.test(lower) && /name/.test(lower))
-) {
-  capture.mode = 'name';
-  capture.buffer = '';
-} else if (
-  /(mobile|phone number|your number|best number|contact number|cell number)/.test(
-    lower
-  )
-) {
-  capture.mode = 'phone';
-  capture.buffer = '';
-  capture.phoneAttempts = 0;
-} else if (/(email|e-mail|e mail)/.test(lower)) {
-  capture.mode = 'email';
-  capture.buffer = '';
-  capture.emailAttempts = 0;
-} else {
-  capture.mode = 'none';
-  capture.buffer = '';
-}
+  // If Gabriel has just asked the caller to spell their name
+  if (
+    /spell your name/.test(lower) ||
+    /spell it for me/.test(lower) ||
+    /spell your first name/.test(lower) ||
+    (/letter by letter/.test(lower) && /name/.test(lower))
+  ) {
+    capture.mode = 'name';
+    capture.buffer = '';
+  } else if (
+    /(mobile|phone number|your number|best number|contact number|cell number)/.test(
+      lower
+    )
+  ) {
+    capture.mode = 'phone';
+    capture.buffer = '';
+    capture.phoneAttempts = 0;
+  } else if (/(email|e-mail|e mail)/.test(lower)) {
+    capture.mode = 'email';
+    capture.buffer = '';
+    capture.emailAttempts = 0;
+  } else {
+    capture.mode = 'none';
+    capture.buffer = '';
+  }
 
   // 8) Detect end-of-call intent from the caller
   let shouldEnd = false;
