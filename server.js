@@ -98,20 +98,22 @@ wss.on('connection', (ws, req) => {
     callSid: null,
     history: [],
     greeted: false,
-    mainSpeaker: null, // Deepgram diarisation: id of the main caller
+    mainSpeaker: null, // (not used in this version, kept for future diarisation)
+    // NEW: simple per-call audio lock so TTS never overlaps
+    audioLock: Promise.resolve(),
   };
 
   // ---- Deepgram connection (STT) ----
-  // Add diarize=true and endpointing to improve robustness in noisy environments.
+  // Using final results only, with VAD/endpointing to reduce choppiness.
   const dgUrl =
     'wss://api.deepgram.com/v1/listen' +
     '?encoding=mulaw' +
     '&sample_rate=8000' +
     '&channels=1' +
-    '&interim_results=false' + 
+    '&interim_results=false' +
     '&vad_events=true' +
-    '&endpointing=800';        
-  
+    '&endpointing=800';
+
   const dgSocket = new WebSocket(dgUrl, {
     headers: {
       Authorization: `Token ${DEEPGRAM_API_KEY}`,
@@ -130,6 +132,34 @@ wss.on('connection', (ws, req) => {
     console.error('Deepgram WS error', err);
   });
 
+  // ---- HELPER: play TTS SEQUENTIALLY (no overlap) ----
+  function queueTtsAndPlay(text) {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return Promise.resolve();
+
+    // Chain onto the previous playback, so only ONE is ever active.
+    callState.audioLock = (callState.audioLock || Promise.resolve()).then(
+      async () => {
+        if (!ws || ws.readyState !== WebSocket.OPEN || !streamSid) return;
+
+        callState.isSpeaking = true;
+        callState.cancelSpeaking = false;
+
+        try {
+          const audioBuffer = await synthesizeWithElevenLabs(trimmed);
+          await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
+        } catch (err) {
+          console.error('Error during TTS or sendAudio:', err);
+        } finally {
+          callState.isSpeaking = false;
+          callState.cancelSpeaking = false;
+        }
+      }
+    );
+
+    return callState.audioLock;
+  }
+
   // ---- HELPER: initial greeting (Gabriel speaks first) ----
   async function sendInitialGreeting() {
     if (callState.greeted) return;
@@ -143,18 +173,8 @@ wss.on('connection', (ws, req) => {
 
     console.log('🤖 Gabriel (greeting):', `"${reply}"`);
 
-    callState.isSpeaking = true;
-    callState.cancelSpeaking = false;
-
-    try {
-      const audioBuffer = await synthesizeWithElevenLabs(reply);
-      await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
-    } catch (err) {
-      console.error('Error during greeting TTS or sendAudio:', err);
-    } finally {
-      callState.isSpeaking = false;
-      callState.cancelSpeaking = false;
-    }
+    // Play via the sequential TTS queue
+    await queueTtsAndPlay(reply);
   }
 
   // ---- HELPER: normal replies after user speaks ----
@@ -200,18 +220,8 @@ wss.on('connection', (ws, req) => {
 
       console.log(`🤖 Gabriel: "${trimmedReply}"`);
 
-      callState.isSpeaking = true;
-      callState.cancelSpeaking = false;
-
-      try {
-        const audioBuffer = await synthesizeWithElevenLabs(trimmedReply);
-        await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
-      } catch (err) {
-        console.error('Error during TTS or sendAudio:', err);
-      } finally {
-        callState.isSpeaking = false;
-        callState.cancelSpeaking = false;
-      }
+      // Play reply via sequential TTS queue (prevents "fan" overlap)
+      await queueTtsAndPlay(trimmedReply);
 
       if (shouldEnd && !callState.hangupRequested) {
         callState.hangupRequested = true;
@@ -234,7 +244,7 @@ wss.on('connection', (ws, req) => {
     }
   }
 
- // Deepgram → transcript handler (with barge-in, no diarisation)
+  // Deepgram → transcript handler (with barge-in, no diarisation)
   dgSocket.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString());
