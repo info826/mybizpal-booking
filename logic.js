@@ -65,20 +65,48 @@ function verbaliseEmail(email) {
 }  
   
 // Name extractor used ONLY when we've just asked for their name.  
-// Uses the older extractName logic which is good at "I'm Gabriel", "Gabriel here", etc.  
+// Safer: avoids junk like "just", "business", "curious", etc.  
 function extractNameFromUtterance(text) {  
   if (!text) return null;  
+  const rawText = String(text).trim();  
+  if (!rawText) return null;  
   
-  // Use shared helper from parsing.js  
-  const raw = extractName(text);  
+  const lower = rawText.toLowerCase();  
+  
+  // Words that should never become names  
+  const badNameWords = new Set([  
+    'hi', 'hello', 'hey', 'yes', 'yeah', 'yep', 'no', 'nope',  
+    'ok', 'okay', 'fine', 'good', 'perfect', 'thanks', 'thank',  
+    'thank you', 'please', 'booking', 'book', 'email', 'mail',  
+    'business', 'curious', 'testing', 'test', 'just', 'only',  
+    'nothing', 'something', 'anything', 'in', 'out', 'there',  
+  ]);  
+  
+  // 1) Explicit patterns: "my name is X", "i'm X", "this is X"  
+  const explicitMatch = lower.match(  
+    /(my name is|i am|i'm|im|this is|it's|its)\s+([a-z][a-z' -]{1,30})/  
+  );  
+  if (explicitMatch && explicitMatch[2]) {  
+    const cand = explicitMatch[2].trim();  
+    const first = cand.split(/[^\w'-]/)[0] || cand;  
+    const cleaned = first.replace(/[^A-Za-z'-]/g, '');  
+    const down = cleaned.toLowerCase();  
+    if (cleaned.length >= 2 && !badNameWords.has(down)) {  
+      return cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();  
+    }  
+  }  
+  
+  // 2) Fallback to shared helper from parsing.js (good at "I'm Gabriel", "Gabriel here")  
+  const raw = extractName(rawText);  
   if (!raw) return null;  
   
-  // Normalise to first token, capitalised  
   const first = raw.split(' ')[0];  
   if (!first) return null;  
   
   const cleaned = first.replace(/[^A-Za-z'-]/g, '');  
+  const down = cleaned.toLowerCase();  
   if (cleaned.length < 2) return null;  
+  if (badNameWords.has(down)) return null;  
   
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();  
 }  
@@ -142,6 +170,11 @@ You sound like a real human with natural rhythm, modulation and emotion:
 ${bookingSummary}  
   
 ${behaviourSummary}  
+
+EARLY CONVERSATION FLOW (KEEP IT CALM)  
+- At the start of the call, do NOT launch into a long pitch unless they explicitly ask “what do you do?” or “explain it to me”.  
+- First, respond briefly to what they said and ask ONE focused question (e.g. “what kind of business do you run?” or “how are you handling calls right now?”).  
+- Keep your tone confident but calm, not over-excited.  
   
 Use this BEHAVIOUR SNAPSHOT to adapt your tone and strategy:  
 - If rapport is low (0–1): be extra warm, simple, and reassuring. Avoid jokes until they relax.  
@@ -207,15 +240,14 @@ EARLY NAME CAPTURE (VERY IMPORTANT)
   - “Okay [Name], let’s sort that out.”  
   
 NAME SPELLING BACKUP (WHEN YOU'RE NOT SURE)  
-- If the caller says you got their name wrong (e.g. they say “no” when you repeat it back), ask them to SPELL it for you:  
-  - “No problem — could you spell your first name for me, letter by letter?”  
-- When they spell it (e.g. “r a q u e l”), you should:  
-  - Turn that into the proper full name (e.g. “Raquel”).  
-  - Repeat it once clearly: “Got it, Raquel. Did I get that right?”  
-- Only ask them to spell it if:  
-  - You’ve just tried their name and they say it’s wrong, OR  
-  - You genuinely can’t understand the name after a couple of tries.  
-- Do NOT keep asking forever — after one good spelling and confirmation, just stick with that name.   
+- Flow for the name:  
+  1) Ask for their name and listen.  
+  2) Repeat it back once and ask “Did I get that right?”.  
+  3) If they say “no” the first time, ask them to SAY it again: “No worries — what should I call you instead? Just your first name.”  
+  4) If they say “no” again, then ask them to SPELL it letter by letter.  
+  5) Turn the spelling into the proper name, repeat it once, ask “Did I get that right?”, then KEEP it for the rest of the call.  
+- Only ask them to spell it after they’ve already said it and corrected you once.  
+- After the spelling step, do NOT keep asking again and again — just stick with that name for the rest of the call.  
   
 CALLER LOCATION & SMALL TALK  
 - Once there’s some rapport, you may casually ask where they’re based:  
@@ -361,6 +393,7 @@ export async function handleTurn({ userText, callState }) {
       emailAttempts: 0,  
       phoneAttempts: 0,  
       nameAttempts: 0,  
+      nameStage: 'initial',  // 'initial' | 'repeat' | 'spell' | 'confirmed'  
       pendingConfirm: null,  // 'email' | 'phone' | 'name' | null  
     };  
   }  
@@ -400,26 +433,54 @@ export async function handleTurn({ userText, callState }) {
   // 0) HANDLE PENDING CONFIRMATIONS (NAME / EMAIL / PHONE) BEFORE ANYTHING ELSE  
   if (capture.pendingConfirm === 'name') {  
     if (noInAnyLang(safeUserText)) {  
-      // Caller said name is wrong → clear and re-capture  
+      // Caller said name is wrong → decide next step based on stage  
       if (!callState.booking) callState.booking = {};  
       callState.booking.name = null;  
   
-      const replyText =  
-        "No worries — what should I call you instead? Just your first name.";  
+      // Stage flow: initial -> repeat -> spell -> then stop pestering  
+      if (capture.nameStage === 'initial') {  
+        const replyText =  
+          "No worries — what should I call you instead? Just your first name.";  
   
-      capture.mode = 'name';  
-      capture.pendingConfirm = null;  
-      capture.nameAttempts += 1;  
+        capture.mode = 'name';  
+        capture.pendingConfirm = null;  
+        capture.nameStage = 'repeat';  
+        capture.nameAttempts += 1;  
   
-      history.push({ role: 'user', content: safeUserText });  
-      history.push({ role: 'assistant', content: replyText });  
+        history.push({ role: 'user', content: safeUserText });  
+        history.push({ role: 'assistant', content: replyText });  
   
-      return { text: replyText, shouldEnd: false };  
+        return { text: replyText, shouldEnd: false };  
+      } else if (capture.nameStage === 'repeat') {  
+        const replyText =  
+          "Got it — could you spell your first name for me, letter by letter?";  
+  
+        capture.mode = 'name';  
+        capture.pendingConfirm = null;  
+        capture.nameStage = 'spell';  
+        capture.nameAttempts += 1;  
+  
+        history.push({ role: 'user', content: safeUserText });  
+        history.push({ role: 'assistant', content: replyText });  
+  
+        return { text: replyText, shouldEnd: false };  
+      } else {  
+        // Already in 'spell' stage and they still said no:  
+        // stop pestering; keep whatever we have next and move on.  
+        capture.pendingConfirm = null;  
+        capture.mode = 'none';  
+        capture.nameStage = 'confirmed';  
+  
+        history.push({ role: 'user', content: safeUserText });  
+        // No extra assistant message here – let GPT carry on.  
+        return { text: '', shouldEnd: false };  
+      }  
     }  
   
     if (yesInAnyLang(safeUserText)) {  
-      // Name confirmed, clear pending flag and continue  
+      // Name confirmed, clear pending flag and mark as confirmed  
       capture.pendingConfirm = null;  
+      capture.nameStage = 'confirmed';  
       // fall through to normal flow  
     }  
   } else if (capture.pendingConfirm === 'email') {  
@@ -511,6 +572,10 @@ export async function handleTurn({ userText, callState }) {
   
       capture.mode = 'none';  
       capture.pendingConfirm = 'name';  
+      // If we were starting fresh, mark stage as initial  
+      if (capture.nameStage === 'confirmed') {  
+        capture.nameStage = 'initial';  
+      }  
   
       history.push({ role: 'user', content: safeUserText });  
       history.push({ role: 'assistant', content: replyText });  
@@ -519,7 +584,7 @@ export async function handleTurn({ userText, callState }) {
     }  
   
     // If they talk a lot but we still don't see a clear name, gently re-ask  
-    if (safeUserText.length > 40 || capture.nameAttempts > 0) {  
+    if (safeUserText.length > 40) {  
       const replyText =  
         "Sorry, I didn’t quite catch your name — could you just say your first name nice and clearly?";  
   
@@ -751,23 +816,39 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // (you could add similar blocks for "got you" / "gotcha" later if it still feels repetitive)
-
+  // (you can extend this pattern later for "got you" / "no worries at all" if needed)  
+  
   history.push({ role: 'user', content: safeUserText });  
   history.push({ role: 'assistant', content: botText });  
   
-  // 7) Detect if Gabriel just asked the caller to SPELL NAME / give PHONE / give EMAIL  
+  // 7) Detect if Gabriel just asked the caller to SPELL NAME / give NAME / PHONE / EMAIL  
   const lower = botText.toLowerCase();  
+  const bookingState = callState.booking || {};  
   
-  // If Gabriel has just asked the caller to spell their name  
+  // NAME: asking to spell, OR asking "what's your name" / "who am I speaking with" / "what should I call you"  
   if (  
-    /spell your name/.test(lower) ||  
-    /spell it for me/.test(lower) ||  
-    /spell your first name/.test(lower) ||  
-    (/letter by letter/.test(lower) && /name/.test(lower))  
+    (  
+      /spell your name/.test(lower) ||  
+      /spell it for me/.test(lower) ||  
+      /spell your first name/.test(lower) ||  
+      (/letter by letter/.test(lower) && /name/.test(lower)) ||  
+      /(what('| i)s your name\??)/.test(lower) ||  
+      /who am i speaking with/.test(lower) ||  
+      /who am i talking to/.test(lower) ||  
+      /your name, by the way/.test(lower) ||  
+      /and your name is\??/.test(lower) ||  
+      /what should i call you/.test(lower)  
+    ) &&  
+    (  
+      !bookingState.name || // only if we don't already have a name  
+      capture.pendingConfirm === 'name' // or we are mid-confirmation  
+    )  
   ) {  
     capture.mode = 'name';  
     capture.buffer = '';  
+    if (capture.nameStage === 'confirmed') {  
+      capture.nameStage = 'initial';  
+    }  
   }  
   // PHONE: only when he clearly asks for their number  
   else if (  
