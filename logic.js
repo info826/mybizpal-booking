@@ -50,34 +50,23 @@ function verbaliseEmail(email) {
   return `${localSpoken} at ${domainSpoken}`;
 }
 
-// Strict, confirmation-friendly name extractor used only during name capture.
-// It does NOT try to be clever on long sentences; it only reacts to clear name answers.
+// Name extractor used ONLY when we've just asked for their name.
+// Uses the older extractName logic which is good at "I'm Gabriel", "Gabriel here", etc.
 function extractNameFromUtterance(text) {
   if (!text) return null;
-  const t = text.trim();
-  if (!t) return null;
 
-  const normalised = t.replace(/\s+/g, ' ');
+  // Use shared helper from parsing.js
+  const raw = extractName(text);
+  if (!raw) return null;
 
-  // Explicit patterns:
-  // "my name is Gabriel", "name is Gabriel", "I'm Gabriel", "I am Gabriel",
-  // "this is John", "it's Sarah", "it is Sarah"
-  let m = normalised.match(
-    /\b(?:my name is|name is|i am|i'm|this is|it's|it is)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
-  );
-  if (m) {
-    const full = m[1].trim().replace(/\s+/g, ' ');
-    return full.split(' ')[0]; // first token as spoken name
-  }
+  // Normalise to first token, capitalised
+  const first = raw.split(' ')[0];
+  if (!first) return null;
 
-  // If the whole reply is just 1–3 words, assume it's their name, e.g. "Gabriel" or "Gabriel Soares"
-  const words = normalised.split(' ');
-  if (words.length <= 3) {
-    const first = words[0].replace(/[^A-Za-z'-]/g, '');
-    if (first.length >= 2) return first;
-  }
+  const cleaned = first.replace(/[^A-Za-z'-]/g, '');
+  if (cleaned.length < 2) return null;
 
-  return null;
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();
 }
 
 function buildSystemPrompt(callState) {
