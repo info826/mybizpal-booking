@@ -13,7 +13,7 @@ import {
   findEarliestAvailableSlot,
   createBookingEvent,
   findExistingBooking,
-  cancelEventById,
+  cancelEventById, // kept imported in case you want auto-reschedule later
   formatSpokenDateTime,
   hasConflict,
 } from './calendar.js';
@@ -51,6 +51,10 @@ function ensureBooking(callState) {
       // Internal flags
       lastPromptWasTimeSuggestion: false,
       needEmailBeforeBooking: false, // "we've already asked for email for this confirmed time"
+
+      // Existing-booking awareness
+      existingBookingSpoken: null,
+      informedAboutExistingBooking: false,
 
       // Notes for calendar / Zoom prep
       summaryNotes: null,
@@ -323,14 +327,30 @@ export async function updateBookingStateFromUtterance({
     }
   }
 
-  // Try parse natural date/time (e.g. "tomorrow morning", "next Tuesday at 3")
-  if (!booking.timeISO) {
-    const nat = parseNaturalDate(raw, timezone);
-    if (nat) {
+  // Try parse natural date/time (user saying things like "tomorrow at 12", "Monday at midday")
+  const nat = parseNaturalDate(raw, timezone);
+  if (nat) {
+    // Does this utterance contain an explicit date/day word?
+    const hasExplicitDate = /\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next|this|\d{1,2}(st|nd|rd|th))\b/i.test(
+      raw
+    );
+
+    if (booking.timeISO && !hasExplicitDate) {
+      // We already have a date; user is probably just changing the time ("12", "half 12", etc.).
+      const prev = new Date(booking.timeISO);
+      const newDT = new Date(nat.iso);
+      prev.setHours(newDT.getHours(), newDT.getMinutes(), 0, 0);
+      booking.timeISO = prev.toISOString();
+      booking.timeSpoken = formatSpokenDateTime(booking.timeISO, timezone);
+    } else {
+      // New date + time request from user
       booking.timeISO = nat.iso;
       booking.timeSpoken = nat.spoken;
-      booking.awaitingTimeConfirm = true;
     }
+
+    // User-provided times are treated as already confirmed (no yes/no needed)
+    booking.awaitingTimeConfirm = false;
+    booking.lastPromptWasTimeSuggestion = false;
   }
 
   // If user wants earliest and we don't yet have a candidate, look it up.
@@ -364,7 +384,7 @@ export async function updateBookingStateFromUtterance({
 /**
  * Step 2: system actions that must happen BEFORE GPT speaks:
  *  - If we already have a confirmed time + phone (+ email), create the event.
- *  - User confirms or rejects a suggested time (natural or earliest).
+ *  - User confirms or rejects a suggested time (earliest suggestion).
  */
 export async function handleSystemActionsFirst({ userText, callState }) {
   const booking = ensureBooking(callState);
@@ -399,6 +419,33 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       // We've already asked for email; let GPT handle the conversation while
       // the email-capture logic does its thing.
       return { intercept: false };
+    }
+
+    // 🔍 Check if this caller already has a booking
+    try {
+      const existing = await findExistingBooking({ phone, email });
+      if (existing && existing.id && !booking.informedAboutExistingBooking) {
+        const existingStartISO =
+          existing.start?.dateTime || existing.start?.date || null;
+        const existingSpoken = existingStartISO
+          ? formatSpokenDateTime(existingStartISO, BUSINESS_TIMEZONE)
+          : 'a previously booked session';
+
+        booking.existingBookingSpoken = existingSpoken;
+        booking.informedAboutExistingBooking = true;
+
+        const replyText =
+          `I can see you already have a MyBizPal session booked for ${existingSpoken}. ` +
+          `I’ll keep that booking as it is for now. If you need to change it or add another session, your human consultant can help when you speak.`;
+
+        return {
+          intercept: true,
+          replyText,
+        };
+      }
+    } catch (e) {
+      console.warn('Existing booking check failed:', e?.message || e);
+      // If this fails, we just carry on and try to create a new event.
     }
 
     // 🔍 Check for conflicts with existing events before booking
@@ -449,17 +496,9 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       };
     }
 
-    // We have time + phone + email and no conflict → create / replace booking now
+    // We have time + phone + email and no conflict → create booking now
     try {
-      const existing = await findExistingBooking({ phone, email });
-      if (existing && existing.id) {
-        try {
-          await cancelEventById(existing.id);
-        } catch (e) {
-          console.warn('Cancel previous booking failed:', e?.message || e);
-        }
-      }
-
+      // NOTE: we no longer auto-cancel previous bookings here.
       // Build smart summary from call history for the calendar notes
       const summaryNotes = await buildSmartSummary(callState);
       booking.summaryNotes = summaryNotes || null;
@@ -510,8 +549,12 @@ export async function handleSystemActionsFirst({ userText, callState }) {
     }
   }
 
-  // B) If we are waiting on a yes/no for a specific time suggestion
-  if (booking.awaitingTimeConfirm && (yesInAnyLang(t) || noInAnyLang(t))) {
+  // B) If we are waiting on a yes/no for one of OUR suggested times (earliest slot)
+  if (
+    booking.awaitingTimeConfirm &&
+    booking.lastPromptWasTimeSuggestion &&
+    (yesInAnyLang(t) || noInAnyLang(t))
+  ) {
     if (yesInAnyLang(t)) {
       // Decide which time to use as the confirmed slot
       const timeISO = booking.timeISO || booking.earliestSlotISO || null;
