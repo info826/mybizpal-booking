@@ -145,6 +145,17 @@ EARLY NAME CAPTURE (VERY IMPORTANT)
   - “Alright [Name], makes sense.”
   - “Okay [Name], let’s sort that out.”
 
+ NAME SPELLING BACKUP (WHEN YOU'RE NOT SURE)
+- If the caller says you got their name wrong (e.g. they say “no” when you repeat it back), ask them to SPELL it for you:
+  - “No problem — could you spell your first name for me, letter by letter?”
+- When they spell it (e.g. “r a q u e l”), you should:
+  - Turn that into the proper full name (e.g. “Raquel”).
+  - Repeat it once clearly: “Got it, Raquel. Did I get that right?”
+- Only ask them to spell it if:
+  - You’ve just tried their name and they say it’s wrong, OR
+  - You genuinely can’t understand the name after a couple of tries.
+- Do NOT keep asking forever — after one good spelling and confirmation, just stick with that name. 
+
 CALLER LOCATION & SMALL TALK
 - Once there’s some rapport, you may casually ask where they’re based:
   - “By the way, where are you calling from today?”
@@ -272,7 +283,58 @@ export async function handleTurn({ userText, callState }) {
 
       return { text: replyText, shouldEnd: false };
     }
+    
+// 1) If we are currently capturing a spelled name, handle that WITHOUT GPT
+if (capture.mode === 'name') {
+  const raw = safeUserText || '';
 
+  let cleaned = raw
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) {
+    return { text: '', shouldEnd: false };
+  }
+
+  const parts = cleaned.split(' ').filter(Boolean);
+  let candidate = null;
+
+  if (
+    parts.length >= 2 &&
+    parts.length <= 12 &&
+    parts.every((p) => p.length === 1)
+  ) {
+    candidate = parts.join('');
+  } else {
+    candidate = parts.find((p) => p.length >= 2 && p.length <= 20) || null;
+  }
+
+  if (!candidate) {
+    const replyText =
+      "Sorry, I still didn’t quite get that — could you spell your first name again, letter by letter?";
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    return { text: replyText, shouldEnd: false };
+  }
+
+  const proper = candidate.charAt(0).toUpperCase() + candidate.slice(1);
+
+  if (!callState.booking) callState.booking = {};
+  callState.booking.name = proper;
+
+  const replyText = `Got it, ${proper}. Did I get that right?`;
+
+  capture.mode = 'none';
+  capture.buffer = '';
+
+  history.push({ role: 'user', content: safeUserText });
+  history.push({ role: 'assistant', content: replyText });
+
+  return { text: replyText, shouldEnd: false };
+}
+    
     if (yesInAnyLang(safeUserText)) {
       // Name confirmed, clear pending flag and continue
       capture.pendingConfirm = null;
