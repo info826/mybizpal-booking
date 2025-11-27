@@ -98,13 +98,13 @@ wss.on('connection', (ws, req) => {
     callSid: null,
     history: [],
     greeted: false,
-    mainSpeaker: null, // (not used in this version, kept for future diarisation)
-    // NEW: simple per-call audio lock so TTS never overlaps
-    audioLock: Promise.resolve(),
+    mainSpeaker: null, // future diarisation
+    lastReplyAt: 0,    // timestamp of last assistant reply
+    pendingTranscript: null,
+    pendingTimer: null,
   };
 
   // ---- Deepgram connection (STT) ----
-  // Using final results only, with VAD/endpointing to reduce choppiness.
   const dgUrl =
     'wss://api.deepgram.com/v1/listen' +
     '?encoding=mulaw' +
@@ -132,49 +132,31 @@ wss.on('connection', (ws, req) => {
     console.error('Deepgram WS error', err);
   });
 
-  // ---- HELPER: play TTS SEQUENTIALLY (no overlap) ----
-  function queueTtsAndPlay(text) {
-    const trimmed = (text || '').trim();
-    if (!trimmed) return Promise.resolve();
-
-    // Chain onto the previous playback, so only ONE is ever active.
-    callState.audioLock = (callState.audioLock || Promise.resolve()).then(
-      async () => {
-        if (!ws || ws.readyState !== WebSocket.OPEN || !streamSid) return;
-
-        callState.isSpeaking = true;
-        callState.cancelSpeaking = false;
-
-        try {
-          const audioBuffer = await synthesizeWithElevenLabs(trimmed);
-          await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
-        } catch (err) {
-          console.error('Error during TTS or sendAudio:', err);
-        } finally {
-          callState.isSpeaking = false;
-          callState.cancelSpeaking = false;
-        }
-      }
-    );
-
-    return callState.audioLock;
-  }
-
   // ---- HELPER: initial greeting (Gabriel speaks first) ----
   async function sendInitialGreeting() {
     if (callState.greeted) return;
-    if (!streamSid) return; // need streamSid set first
+    if (!streamSid) return;
 
     callState.greeted = true;
 
-    // Fixed greeting – no GPT, faster first response
     const reply =
       "Hi, you're speaking with Gabriel from MyBizPal. How can I help you today?";
 
     console.log('🤖 Gabriel (greeting):', `"${reply}"`);
 
-    // Play via the sequential TTS queue
-    await queueTtsAndPlay(reply);
+    callState.isSpeaking = true;
+    callState.cancelSpeaking = false;
+
+    try {
+      const audioBuffer = await synthesizeWithElevenLabs(reply);
+      await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
+    } catch (err) {
+      console.error('Error during greeting TTS or sendAudio:', err);
+    } finally {
+      callState.isSpeaking = false;
+      callState.cancelSpeaking = false;
+      callState.lastReplyAt = Date.now();
+    }
   }
 
   // ---- HELPER: normal replies after user speaks ----
@@ -209,7 +191,7 @@ wss.on('connection', (ws, req) => {
               console.log('📞 Call ended by Gabriel (hangupRequested=true)');
             } catch (e) {
               console.error('Error ending call via Twilio API:', e?.message || e);
-              ws.close(); // fallback
+              ws.close();
             }
           } else {
             ws.close();
@@ -220,20 +202,30 @@ wss.on('connection', (ws, req) => {
 
       console.log(`🤖 Gabriel: "${trimmedReply}"`);
 
-      // Play reply via sequential TTS queue (prevents "fan" overlap)
-      await queueTtsAndPlay(trimmedReply);
+      callState.isSpeaking = true;
+      callState.cancelSpeaking = false;
+
+      try {
+        const audioBuffer = await synthesizeWithElevenLabs(trimmedReply);
+        await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
+      } catch (err) {
+        console.error('Error during TTS or sendAudio:', err);
+      } finally {
+        callState.isSpeaking = false;
+        callState.cancelSpeaking = false;
+        callState.lastReplyAt = Date.now();
+      }
 
       if (shouldEnd && !callState.hangupRequested) {
         callState.hangupRequested = true;
 
-        // Politely end the call via Twilio REST
         if (twilioClient && callState.callSid) {
           try {
             await twilioClient.calls(callState.callSid).update({ status: 'completed' });
             console.log('📞 Call ended by Gabriel (hangupRequested=true)');
           } catch (e) {
             console.error('Error ending call via Twilio API:', e?.message || e);
-            ws.close(); // fallback
+            ws.close();
           }
         } else {
           ws.close();
@@ -244,7 +236,7 @@ wss.on('connection', (ws, req) => {
     }
   }
 
-  // Deepgram → transcript handler (with barge-in, no diarisation)
+  // Deepgram → transcript handler with cooldown & debouncing
   dgSocket.on('message', async (data) => {
     try {
       const msg = JSON.parse(data.toString());
@@ -252,7 +244,6 @@ wss.on('connection', (ws, req) => {
 
       const alt = msg.channel.alternatives[0];
 
-      // We only asked Deepgram for final results, but we still double-check:
       if (!msg.is_final) return;
 
       const transcript = (alt.transcript || '').trim();
@@ -262,10 +253,31 @@ wss.on('connection', (ws, req) => {
       if (callState.isSpeaking) {
         console.log('🚫 Barge-in detected – cancelling current TTS');
         callState.cancelSpeaking = true;
-        // We still continue and process this transcript
       }
 
-      await respondToUser(transcript);
+      // Debounce + cooldown:
+      // - at most one reply every ~900ms
+      // - if multiple transcripts arrive, respond only to the latest
+      const now = Date.now();
+      const minGap = 900;
+
+      if (callState.pendingTimer) {
+        clearTimeout(callState.pendingTimer);
+        callState.pendingTimer = null;
+      }
+
+      if (!callState.lastReplyAt || now - callState.lastReplyAt >= minGap) {
+        await respondToUser(transcript);
+      } else {
+        const delay = callState.lastReplyAt + minGap - now;
+        callState.pendingTranscript = transcript;
+        callState.pendingTimer = setTimeout(async () => {
+          const t = callState.pendingTranscript;
+          callState.pendingTranscript = null;
+          callState.pendingTimer = null;
+          await respondToUser(t);
+        }, delay);
+      }
     } catch (err) {
       console.error('Error handling Deepgram message:', err);
     }
@@ -291,7 +303,6 @@ wss.on('connection', (ws, req) => {
         callSid: callState.callSid,
       });
 
-      // As soon as the stream starts, Gabriel greets straight away.
       sendInitialGreeting().catch((e) =>
         console.error('Greeting error (outer):', e)
       );
@@ -332,6 +343,9 @@ wss.on('connection', (ws, req) => {
     try {
       dgSocket.close();
     } catch {}
+    if (callState.pendingTimer) {
+      clearTimeout(callState.pendingTimer);
+    }
   });
 
   ws.on('error', (err) => {
@@ -339,6 +353,9 @@ wss.on('connection', (ws, req) => {
     try {
       dgSocket.close();
     } catch {}
+    if (callState.pendingTimer) {
+      clearTimeout(callState.pendingTimer);
+    }
   });
 });
 
@@ -381,12 +398,6 @@ async function synthesizeWithElevenLabs(text) {
   return Buffer.concat(chunks);
 }
 
-/**
- * Send mulaw 8k audio back to Twilio over the media stream.
- * Twilio expects 20ms frames of 160 bytes each (PCMU).
- * We also support early cancellation via callState.cancelSpeaking (barge-in).
- * This version uses a steady interval + a 'clear' event to avoid glitchy audio.
- */
 function sendAudioToTwilio(ws, streamSid, audioBuffer, callState) {
   return new Promise((resolve) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -399,12 +410,11 @@ function sendAudioToTwilio(ws, streamSid, audioBuffer, callState) {
       return resolve();
     }
 
-    const chunkSize = 160; // 20ms of 8kHz μ-law
+    const chunkSize = 160;
     const usableLength =
-      audioBuffer.length - (audioBuffer.length % chunkSize); // drop trailing partial frame
+      audioBuffer.length - (audioBuffer.length % chunkSize);
     let offset = 0;
 
-    // Clear any previous audio Twilio might still be buffering
     try {
       ws.send(
         JSON.stringify({
@@ -422,7 +432,6 @@ function sendAudioToTwilio(ws, streamSid, audioBuffer, callState) {
         return resolve();
       }
 
-      // Barge-in cancellation
       if (callState && callState.cancelSpeaking) {
         console.log('🛑 Stopping TTS playback due to barge-in');
         clearInterval(interval);
@@ -456,7 +465,7 @@ function sendAudioToTwilio(ws, streamSid, audioBuffer, callState) {
           return resolve();
         }
       });
-    }, 20); // ~20ms per frame
+    }, 20);
   });
 }
 
