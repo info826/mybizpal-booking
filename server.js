@@ -108,11 +108,10 @@ wss.on('connection', (ws, req) => {
     '?encoding=mulaw' +
     '&sample_rate=8000' +
     '&channels=1' +
-    '&interim_results=true' +
+    '&interim_results=false' + 
     '&vad_events=true' +
-    '&diarize=true' +
-    '&endpointing=1200';
-
+    '&endpointing=800';        
+  
   const dgSocket = new WebSocket(dgUrl, {
     headers: {
       Authorization: `Token ${DEEPGRAM_API_KEY}`,
