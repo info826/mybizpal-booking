@@ -8,7 +8,7 @@ import { google } from 'googleapis';
 import { sendReminderMessage } from './sms.js';
 
 const {
-  GOOGLE_CLIENT_EMAIL,          // <-- use this instead of GOOGLE_SERVICE_ACCOUNT_EMAIL
+  GOOGLE_CLIENT_EMAIL,
   GOOGLE_PRIVATE_KEY,
   GOOGLE_CALENDAR_ID,
   BUSINESS_TIMEZONE,
@@ -58,7 +58,6 @@ function extractPhoneAndNameFromEvent(event) {
   const desc = event.description || '';
 
   if (!phone && desc) {
-    // Look for "Phone: +44..." style
     const m = desc.match(/Phone:\s*([+\d][\d\s\-()]+)/i);
     if (m) {
       phone = m[1].replace(/[^\d+]/g, '');
