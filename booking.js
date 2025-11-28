@@ -17,7 +17,11 @@ import {
   formatSpokenDateTime,
   hasConflict,
 } from './calendar.js';
-import { sendConfirmationAndReminders } from './sms.js';
+import {
+  sendConfirmationAndReminders,
+  sendCancellationNotice,
+  sendRescheduleNotice,
+} from './sms.js';
 import OpenAI from 'openai';
 
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Europe/London';
@@ -517,6 +521,23 @@ export async function handleSystemActionsFirst({ userText, callState }) {
           if (booking.existingEventId) {
             await cancelEventById(booking.existingEventId);
           }
+
+          // 🔔 Send cancellation WhatsApp/SMS if we know the time & phone
+          const phoneForNotice = phone;
+          if (phoneForNotice && booking.existingEventStartISO) {
+            try {
+              await sendCancellationNotice({
+                to: phoneForNotice,
+                startISO: booking.existingEventStartISO,
+                name,
+              });
+            } catch (err) {
+              console.warn(
+                'Error sending cancellation notice:',
+                err?.message || err
+              );
+            }
+          }
         } catch (err) {
           console.error('Error cancelling existing event (no new time):', err);
         }
@@ -551,6 +572,8 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       const newSpoken = formatSpokenDateTime(timeCandidate, BUSINESS_TIMEZONE);
 
       try {
+        const oldStartISO = booking.existingEventStartISO || null;
+
         if (booking.existingEventId) {
           await cancelEventById(booking.existingEventId);
         }
@@ -569,11 +592,29 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
         const startISO = event.start?.dateTime || timeCandidate;
 
+        // Standard confirmation (card + reminders)
         await sendConfirmationAndReminders({
           to: phone,
           startISO,
           name,
         });
+
+        // 🔔 Extra reschedule notice (short plain text)
+        if (phone && oldStartISO) {
+          try {
+            await sendRescheduleNotice({
+              to: phone,
+              oldStartISO,
+              newStartISO: startISO,
+              name,
+            });
+          } catch (err) {
+            console.warn(
+              'Error sending reschedule notice:',
+              err?.message || err
+            );
+          }
+        }
 
         booking.bookingConfirmed = true;
         booking.lastEventId = event.id;
