@@ -276,6 +276,14 @@ WHAT MYBIZPAL DOES (YOUR CORE PITCH)
   - Call logs, transcripts, who called, what they asked for, and what was booked.  
 - When appropriate, invite them to visit the website:  
   “If you want to have a look later, you can hop on mybizpal dot ai.”  
+
+WHEN THEY ASK “WHAT DO YOU DO?” OR “WHAT IS THIS?”  
+- First, give a SIMPLE, SHORT explanation (1–2 sentences max) of what MyBizPal does for businesses.  
+- Immediately follow with ONE qualifying question, such as:  
+  - “Out of curiosity, what kind of business are you running at the moment?”  
+  - or “How are you handling your calls at the moment — is it you, a receptionist, or a call centre?”  
+- Never end a “what do you do” explanation without a question that helps you qualify the caller and move towards a booking.  
+- Keep control: you explain briefly, then YOU ask the next question — don’t wait for them to drive the conversation.  
   
 POSITIONING VS COMPETITORS  
 - Many tools are just basic AI receptionists that only pick up the phone.  
@@ -816,14 +824,70 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // (you can extend this pattern later for "got you" / "no worries at all" if needed)  
+  // Booking state snapshot for post-processing
+  const bookingState = callState.booking || {};
+
+  // 8) Detect end-of-call intent from the caller (before enforcing questions)
+  let shouldEnd = false;  
+
+  if (  
+    /\b(no, that'?s all|that'?s all|nothing else|no more|all good|we'?re good)\b/.test(  
+      userLower  
+    ) ||  
+    /\b(no thanks|no thank you|i'?m good|i am good)\b/.test(userLower) ||  
+    /\b(ok bye|bye|goodbye|cheers,? bye)\b/.test(userLower)  
+  ) {  
+    shouldEnd = true;  
   
+    // Make sure the reply is a short sign-off  
+    if (  
+      !/bye|goodbye|speak soon|have a great day|have a good day/i.test(botText)  
+    ) {  
+      botText =  
+        'No worries at all — thanks for calling MyBizPal, have a great day.';  
+    }  
+  }  
+
+  // 9) SALES SAFETY NET: always end with a question when the call is ongoing
+  if (!shouldEnd) {
+    const askedWhatDo =
+      /what.*(you (guys )?do|do you do)/i.test(userLower) ||
+      /what is mybizpal/i.test(userLower) ||
+      /what is this/i.test(userLower);
+
+    // If they asked "what do you do" and Gabriel didn't ask a question, add a qualifier
+    if (askedWhatDo && !/[?？！]/.test(botText)) {
+      // Normalise ending punctuation
+      botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
+      botText += ' Out of curiosity, what kind of business are you running at the moment?';
+    }
+
+    // Generic fallback: if reply still has no question mark, append a soft qualifier/booking nudge
+    if (!/[?？！]/.test(botText)) {
+      let extraQ;
+      if (
+        bookingState.intent === 'wants_booking' ||
+        bookingState.timeSpoken ||
+        bookingState.earliestSlotSpoken
+      ) {
+        extraQ =
+          ' What day usually works best for you for a quick 20–30 minute call?';
+      } else {
+        extraQ =
+          ' What kind of business are you running at the moment?';
+      }
+
+      botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
+      botText += extraQ;
+    }
+  }
+
+  // Now that botText is final, store it in history
   history.push({ role: 'user', content: safeUserText });  
   history.push({ role: 'assistant', content: botText });  
-  
-  // 7) Detect if Gabriel just asked the caller to SPELL NAME / give NAME / PHONE / EMAIL  
+
+  // 10) Detect if Gabriel just asked the caller to SPELL NAME / give NAME / PHONE / EMAIL  
   const lower = botText.toLowerCase();  
-  const bookingState = callState.booking || {};  
   
   // NAME: asking to spell, OR asking "what's your name" / "who am I speaking with" / "what should I call you"  
   if (  
@@ -879,27 +943,6 @@ export async function handleTurn({ userText, callState }) {
     } else {  
       capture.mode = 'none';  
       capture.buffer = '';  
-    }  
-  }  
-  
-  // 8) Detect end-of-call intent from the caller  
-  let shouldEnd = false;  
-  
-  if (  
-    /\b(no, that'?s all|that'?s all|nothing else|no more|all good|we'?re good)\b/.test(  
-      userLower  
-    ) ||  
-    /\b(no thanks|no thank you|i'?m good|i am good)\b/.test(userLower) ||  
-    /\b(ok bye|bye|goodbye|cheers,? bye)\b/.test(userLower)  
-  ) {  
-    shouldEnd = true;  
-  
-    // Make sure the reply is a short sign-off  
-    if (  
-      !/bye|goodbye|speak soon|have a great day|have a good day/i.test(botText)  
-    ) {  
-      botText =  
-        'No worries at all — thanks for calling MyBizPal, have a great day.';  
     }  
   }  
   
