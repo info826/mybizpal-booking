@@ -110,6 +110,21 @@ function extractNameFromUtterance(text) {
   
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();  
 }  
+
+// ---------- STRONG "THIS IS WRONG" DETECTOR FOR CONFIRMATIONS ----------
+//
+// Treat phrases like:
+//   "not correct", "now it's not correct", "that's wrong", "it's wrong",
+//   "incorrect", "isn't right", "doesn't look right", "not quite right"
+// as a NO for confirmation purposes – even if there's a "yes" in the sentence.
+function hasStrongNoCorrection(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+
+  return /\b(not\s+(correct|right)|isn'?t\s+(correct|right)|wrong|incorrect|doesn'?t\s+look\s+right|not\s+quite\s+right)\b/.test(
+    t
+  );
+}
   
 function buildSystemPrompt(callState) {  
   const booking = callState.booking || {};  
@@ -440,7 +455,9 @@ export async function handleTurn({ userText, callState }) {
   
   // 0) HANDLE PENDING CONFIRMATIONS (NAME / EMAIL / PHONE) BEFORE ANYTHING ELSE  
   if (capture.pendingConfirm === 'name') {  
-    if (noInAnyLang(safeUserText)) {  
+    const strongNo = hasStrongNoCorrection(safeUserText);  
+
+    if (strongNo || noInAnyLang(safeUserText)) {  
       // Caller said name is wrong → decide next step based on stage  
       if (!callState.booking) callState.booking = {};  
       callState.booking.name = null;  
@@ -485,14 +502,16 @@ export async function handleTurn({ userText, callState }) {
       }  
     }  
   
-    if (yesInAnyLang(safeUserText)) {  
+    if (!hasStrongNoCorrection(safeUserText) && yesInAnyLang(safeUserText)) {  
       // Name confirmed, clear pending flag and mark as confirmed  
       capture.pendingConfirm = null;  
       capture.nameStage = 'confirmed';  
       // fall through to normal flow  
     }  
   } else if (capture.pendingConfirm === 'email') {  
-    if (noInAnyLang(safeUserText)) {  
+    const strongNo = hasStrongNoCorrection(safeUserText);  
+
+    if (strongNo || noInAnyLang(safeUserText)) {  
       // Caller said email is wrong → clear and re-capture  
       if (!callState.booking) callState.booking = {};  
       callState.booking.email = null;  
@@ -511,13 +530,15 @@ export async function handleTurn({ userText, callState }) {
       return { text: replyText, shouldEnd: false };  
     }  
   
-    if (yesInAnyLang(safeUserText)) {  
+    if (!strongNo && yesInAnyLang(safeUserText)) {  
       // Email confirmed, clear pending flag and continue  
       capture.pendingConfirm = null;  
       // fall through to normal flow  
     }  
   } else if (capture.pendingConfirm === 'phone') {  
-    if (noInAnyLang(safeUserText)) {  
+    const strongNo = hasStrongNoCorrection(safeUserText);  
+
+    if (strongNo || noInAnyLang(safeUserText)) {  
       if (!callState.booking) callState.booking = {};  
       callState.booking.phone = null;  
   
@@ -535,7 +556,7 @@ export async function handleTurn({ userText, callState }) {
       return { text: replyText, shouldEnd: false };  
     }  
   
-    if (yesInAnyLang(safeUserText)) {  
+    if (!strongNo && yesInAnyLang(safeUserText)) {  
       capture.pendingConfirm = null;  
       // continue into normal flow  
     }  
