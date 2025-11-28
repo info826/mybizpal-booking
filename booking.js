@@ -26,6 +26,8 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// --------- SMALL HELPERS ----------
+
 function ensureBooking(callState) {
   if (!callState.booking) {
     callState.booking = {
@@ -55,6 +57,9 @@ function ensureBooking(callState) {
       // Existing-booking awareness
       existingBookingSpoken: null,
       informedAboutExistingBooking: false,
+      existingEventId: null,
+      existingEventStartISO: null,
+      pendingExistingAction: null, // 'decide_move_keep_extra'
 
       // Notes for calendar / Zoom prep
       summaryNotes: null,
@@ -84,7 +89,18 @@ function detectEarliestRequest(text) {
   );
 }
 
-// ---- SMART SUMMARY BUILDER ----
+function isSameMinute(isoA, isoB) {
+  if (!isoA || !isoB) return false;
+  const a = new Date(isoA);
+  const b = new Date(isoB);
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate() &&
+    a.getHours() === b.getHours() &&
+    a.getMinutes() === b.getMinutes()
+  );
+}
 
 function isBoringSentence(str = '') {
   const t = str.trim().toLowerCase();
@@ -132,7 +148,9 @@ function buildFallbackSummary(callState) {
 
   const behaviour = callState?.behaviour || {};
   const interest = behaviour.interestLevel || 'unknown';
-  const pain = behaviour.painPointsMentioned ? 'some pain points around calls or operations' : null;
+  const pain = behaviour.painPointsMentioned
+    ? 'some pain points around calls or operations'
+    : null;
 
   const sentences = [];
 
@@ -144,9 +162,7 @@ function buildFallbackSummary(callState) {
 
   if (extraPoints.length) {
     const trimmed = extraPoints.slice(0, 3).join(' | ');
-    sentences.push(
-      `During the conversation they also mentioned: ${trimmed}.`
-    );
+    sentences.push(`During the conversation they also mentioned: ${trimmed}.`);
   }
 
   if (pain) {
@@ -264,8 +280,7 @@ ${behaviourContext}
       ],
     });
 
-    let summary =
-      completion.choices?.[0]?.message?.content?.trim() || '';
+    let summary = completion.choices?.[0]?.message?.content?.trim() || '';
 
     if (!summary) {
       return buildFallbackSummary(callState);
@@ -383,7 +398,7 @@ export async function updateBookingStateFromUtterance({
 
 /**
  * Step 2: system actions that must happen BEFORE GPT speaks:
- *  - If we already have a confirmed time + phone (+ email), create the event.
+ *  - If we already have a confirmed time + phone (+ email), create or move events.
  *  - User confirms or rejects a suggested time (earliest suggestion).
  */
 export async function handleSystemActionsFirst({ userText, callState }) {
@@ -396,9 +411,150 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
   // Time that we would book if confirmed
   const timeCandidate = booking.timeISO || booking.earliestSlotISO || null;
+  const isUserSpecifiedTime =
+    !!booking.timeISO && booking.timeISO === timeCandidate;
 
-  // A) If we already have a CONFIRMED time (awaitingTimeConfirm = false),
-  //    plus phone, and no booking yet, handle email + booking.
+  // ---------- EXISTING BOOKING DECISION FLOW (MOVE / CANCEL / KEEP) ----------
+
+  // If we previously asked what to do with an existing booking
+  if (booking.pendingExistingAction === 'decide_move_keep_extra') {
+    // CANCEL / MOVE TO NEW TIME
+    if (/cancel|change|move|instead|earlier|rather/i.test(t) || yesInAnyLang(t)) {
+      if (!timeCandidate) {
+        // No new time to move to – just cancel and ask for a new time
+        try {
+          if (booking.existingEventId) {
+            await cancelEventById(booking.existingEventId);
+          }
+        } catch (err) {
+          console.error('Error cancelling existing event (no new time):', err);
+        }
+
+        const existingSpoken =
+          booking.existingEventStartISO
+            ? formatSpokenDateTime(
+                booking.existingEventStartISO,
+                BUSINESS_TIMEZONE
+              )
+            : 'your previous session';
+
+        booking.pendingExistingAction = null;
+        booking.existingEventId = null;
+        booking.existingEventStartISO = null;
+        booking.informedAboutExistingBooking = true;
+
+        return {
+          intercept: true,
+          replyText: `No worries, I’ve cancelled your previous booking for ${existingSpoken}. What day and time would you like your new session to be?`,
+        };
+      }
+
+      // We have a timeCandidate → move booking to this new time
+      const existingSpoken =
+        booking.existingEventStartISO
+          ? formatSpokenDateTime(
+              booking.existingEventStartISO,
+              BUSINESS_TIMEZONE
+            )
+          : 'your previous session';
+      const newSpoken = formatSpokenDateTime(timeCandidate, BUSINESS_TIMEZONE);
+
+      try {
+        if (booking.existingEventId) {
+          await cancelEventById(booking.existingEventId);
+        }
+
+        const summaryNotes = await buildSmartSummary(callState);
+        booking.summaryNotes = summaryNotes || null;
+
+        const event = await createBookingEvent({
+          startISO: timeCandidate,
+          durationMinutes: 30,
+          name,
+          email,
+          phone,
+          summaryNotes,
+        });
+
+        const startISO = event.start?.dateTime || timeCandidate;
+
+        await sendConfirmationAndReminders({
+          to: phone,
+          startISO,
+          name,
+        });
+
+        booking.bookingConfirmed = true;
+        booking.lastEventId = event.id;
+        booking.awaitingTimeConfirm = false;
+        booking.lastPromptWasTimeSuggestion = false;
+        booking.needEmailBeforeBooking = false;
+        booking.timeISO = startISO;
+        booking.timeSpoken = formatSpokenDateTime(
+          startISO,
+          BUSINESS_TIMEZONE
+        );
+        booking.pendingExistingAction = null;
+        booking.existingEventId = null;
+        booking.existingEventStartISO = null;
+        booking.informedAboutExistingBooking = true;
+
+        const replyText =
+          name
+            ? `All sorted, ${name} — I’ve cancelled your previous booking for ${existingSpoken} and moved it to ${newSpoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
+            : `All sorted — I’ve cancelled your previous booking for ${existingSpoken} and moved it to ${newSpoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
+
+        return {
+          intercept: true,
+          replyText,
+        };
+      } catch (err) {
+        console.error('Error moving existing booking to new time:', err);
+        booking.pendingExistingAction = null;
+        return {
+          intercept: true,
+          replyText:
+            'I tried to move that booking but something didn’t quite go through on my side. I’ll note your details and follow up, but is there anything else I can help with for now?',
+        };
+      }
+    }
+
+    // KEEP EXISTING TIME (no extra)
+    if (/keep|leave it|as it is|don'?t change/i.test(t) || noInAnyLang(t)) {
+      const existingSpoken =
+        booking.existingEventStartISO
+          ? formatSpokenDateTime(
+              booking.existingEventStartISO,
+              BUSINESS_TIMEZONE
+            )
+          : 'your booked session';
+
+      booking.pendingExistingAction = null;
+      booking.timeISO = booking.existingEventStartISO;
+      booking.timeSpoken = existingSpoken;
+      booking.earliestSlotISO = null;
+      booking.earliestSlotSpoken = null;
+      booking.awaitingTimeConfirm = false;
+      booking.lastPromptWasTimeSuggestion = false;
+
+      const replyText =
+        name
+          ? `No problem, ${name} — we’ll keep your booking at ${existingSpoken} just as it is. If you’d like to add another session at a different time, just let me know.`
+          : `No problem — we’ll keep your booking at ${existingSpoken} just as it is. If you’d like to add another session at a different time, just let me know.`;
+
+      return {
+        intercept: true,
+        replyText,
+      };
+    }
+
+    // If they say something else, let GPT handle it but keep the state
+    return { intercept: false };
+  }
+
+  // ---------- MAIN BOOKING FLOW ----------
+
+  // A) If we already have a CONFIRMED time candidate + phone, and no booking yet
   if (
     timeCandidate &&
     phone &&
@@ -424,7 +580,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
     // 🔍 Check if this caller already has a booking
     try {
       const existing = await findExistingBooking({ phone, email });
-      if (existing && existing.id && !booking.informedAboutExistingBooking) {
+      if (existing && existing.id) {
         const existingStartISO =
           existing.start?.dateTime || existing.start?.date || null;
         const existingSpoken = existingStartISO
@@ -432,11 +588,38 @@ export async function handleSystemActionsFirst({ userText, callState }) {
           : 'a previously booked session';
 
         booking.existingBookingSpoken = existingSpoken;
+        booking.existingEventId = existing.id;
+        booking.existingEventStartISO = existingStartISO;
+
+        // If the requested time is exactly the same as the existing one,
+        // just confirm it instead of creating a new event.
+        if (existingStartISO && timeCandidate && isSameMinute(existingStartISO, timeCandidate)) {
+          booking.bookingConfirmed = true;
+          booking.lastEventId = existing.id;
+          booking.timeISO = existingStartISO;
+          booking.timeSpoken = existingSpoken;
+          booking.informedAboutExistingBooking = true;
+
+          const replyText =
+            name
+              ? `You’re already booked in for ${existingSpoken}, ${name}, so you’re all set. Anything else I can help with today?`
+              : `You’re already booked in for ${existingSpoken}, so you’re all set. Anything else I can help with today?`;
+
+          return { intercept: true, replyText };
+        }
+
+        // Otherwise, ask clearly what they want to do with the existing booking.
+        const newSpoken = formatSpokenDateTime(
+          timeCandidate,
+          BUSINESS_TIMEZONE
+        );
+
+        booking.pendingExistingAction = 'decide_move_keep_extra';
         booking.informedAboutExistingBooking = true;
 
         const replyText =
           `I can see you already have a MyBizPal session booked for ${existingSpoken}. ` +
-          `I’ll keep that booking as it is for now. If you need to change it or add another session, your human consultant can help when you speak.`;
+          `Do you want me to move that booking to ${newSpoken}, keep it where it is, or are you trying to book an extra session as well?`;
 
         return {
           intercept: true,
@@ -448,57 +631,64 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       // If this fails, we just carry on and try to create a new event.
     }
 
-    // 🔍 Check for conflicts with existing events before booking
-    const conflict = await hasConflict({ startISO: timeCandidate, durationMin: 30 });
-
-    if (conflict) {
-      // Try to find the next available 30-min slot starting from this time
-      const nextSlot = await findEarliestAvailableSlot({
-        timezone: BUSINESS_TIMEZONE,
-        durationMinutes: 30,
-        daysAhead: 7,
-        fromISO: timeCandidate,
+    // 🔍 Check for conflicts ONLY for system-suggested times.
+    // If the caller explicitly asked for a time (booking.timeISO),
+    // we trust that and avoid auto-moving them to "next available".
+    if (!isUserSpecifiedTime) {
+      const conflict = await hasConflict({
+        startISO: timeCandidate,
+        durationMin: 30,
       });
 
-      if (nextSlot && nextSlot.iso) {
+      if (conflict) {
+        // Try to find the next available 30-min slot starting from this time
+        const nextSlot = await findEarliestAvailableSlot({
+          timezone: BUSINESS_TIMEZONE,
+          durationMinutes: 30,
+          daysAhead: 7,
+          fromISO: timeCandidate,
+        });
+
+        if (nextSlot && nextSlot.iso) {
+          booking.timeISO = null;
+          booking.timeSpoken = null;
+          booking.earliestSlotISO = nextSlot.iso;
+          booking.earliestSlotSpoken =
+            nextSlot.spoken ||
+            formatSpokenDateTime(nextSlot.iso, BUSINESS_TIMEZONE);
+          booking.awaitingTimeConfirm = true;
+          booking.lastPromptWasTimeSuggestion = true;
+          booking.needEmailBeforeBooking = false;
+
+          const replyText = `It looks like that exact time has just been taken. The next available slot I can see is ${booking.earliestSlotSpoken}. Would you like me to book you in for then?`;
+
+          return {
+            intercept: true,
+            replyText,
+          };
+        }
+
+        // No free slots found at all
         booking.timeISO = null;
         booking.timeSpoken = null;
-        booking.earliestSlotISO = nextSlot.iso;
-        booking.earliestSlotSpoken =
-          nextSlot.spoken || formatSpokenDateTime(nextSlot.iso, BUSINESS_TIMEZONE);
-        booking.awaitingTimeConfirm = true;
-        booking.lastPromptWasTimeSuggestion = true;
+        booking.earliestSlotISO = null;
+        booking.earliestSlotSpoken = null;
+        booking.awaitingTimeConfirm = false;
+        booking.lastPromptWasTimeSuggestion = false;
         booking.needEmailBeforeBooking = false;
 
-        const replyText = `It looks like that exact time has just been taken. The next available slot I can see is ${booking.earliestSlotSpoken}. Would you like me to book you in for then?`;
+        const replyText =
+          "It looks like we’re fully booked around that time. What other day and time would work for you (Monday to Friday, 9 to 5 UK time)?";
 
         return {
           intercept: true,
           replyText,
         };
       }
-
-      // No free slots found at all
-      booking.timeISO = null;
-      booking.timeSpoken = null;
-      booking.earliestSlotISO = null;
-      booking.earliestSlotSpoken = null;
-      booking.awaitingTimeConfirm = false;
-      booking.lastPromptWasTimeSuggestion = false;
-      booking.needEmailBeforeBooking = false;
-
-      const replyText =
-        "It looks like we’re fully booked around that time. What other day and time would work for you (Monday to Friday, 9 to 5 UK time)?";
-
-      return {
-        intercept: true,
-        replyText,
-      };
     }
 
-    // We have time + phone + email and no conflict → create booking now
+    // We have time + phone + email and either no conflict or we trust user time → create booking now
     try {
-      // NOTE: we no longer auto-cancel previous bookings here.
       // Build smart summary from call history for the calendar notes
       const summaryNotes = await buildSmartSummary(callState);
       booking.summaryNotes = summaryNotes || null;
@@ -525,8 +715,10 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       booking.awaitingTimeConfirm = false;
       booking.lastPromptWasTimeSuggestion = false;
       booking.needEmailBeforeBooking = false;
+      booking.timeISO = startISO;
+      booking.timeSpoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
 
-      const spoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
+      const spoken = booking.timeSpoken;
       const replyText =
         name
           ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
@@ -599,4 +791,4 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
   // No special system action needed
   return { intercept: false };
-}
+            }
