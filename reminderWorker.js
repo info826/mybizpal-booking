@@ -8,7 +8,7 @@ import { google } from 'googleapis';
 import { sendReminderMessage } from './sms.js';
 
 const {
-  GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  GOOGLE_CLIENT_EMAIL,          // <-- use this instead of GOOGLE_SERVICE_ACCOUNT_EMAIL
   GOOGLE_PRIVATE_KEY,
   GOOGLE_CALENDAR_ID,
   BUSINESS_TIMEZONE,
@@ -17,15 +17,15 @@ const {
 const TZ = BUSINESS_TIMEZONE || 'Europe/London';
 
 function getJwtClient() {
-  if (!GOOGLE_SERVICE_ACCOUNT_EMAIL || !GOOGLE_PRIVATE_KEY) {
-    console.error('❌ Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_PRIVATE_KEY');
+  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
+    console.error('❌ Missing GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY');
     process.exit(1);
   }
 
   const key = GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
 
   return new google.auth.JWT(
-    GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    GOOGLE_CLIENT_EMAIL,
     undefined,
     key,
     ['https://www.googleapis.com/auth/calendar.readonly']
