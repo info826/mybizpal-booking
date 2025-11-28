@@ -125,6 +125,49 @@ function buildConfirmationSms({ startISO, name }) {
   return lines.join('\n');
 }
 
+// NEW: Cancellation SMS text
+function buildCancellationSms({ startISO, name }) {
+  const when = formatDateForSms(startISO);
+  const safeName = safeDisplayName(name);
+  const who = safeName && safeName !== 'Guest' ? `${safeName}, ` : '';
+
+  const lines = [
+    `❌ ${who}your MyBizPal consultation has been cancelled.`,
+    `Previous time: ${when}`,
+    'If this was a mistake or you’d like to book a new time, just reply here or contact us via mybizpal.ai.',
+  ];
+
+  return lines.join('\n');
+}
+
+// NEW: Reschedule SMS text
+function buildRescheduleSms({ oldStartISO, newStartISO, name }) {
+  const oldWhen = formatDateForSms(oldStartISO);
+  const newWhen = formatDateForSms(newStartISO);
+  const safeName = safeDisplayName(name);
+  const who = safeName && safeName !== 'Guest' ? `${safeName}, ` : '';
+
+  const zoomLink = ZOOM_LINK || '';
+  const zoomId = ZOOM_MEETING_ID || '';
+  const zoomPass = ZOOM_PASSCODE || '';
+
+  const lines = [
+    `🔁 ${who}your MyBizPal consultation has been rescheduled.`,
+    `Old time: ${oldWhen}`,
+    `New time: ${newWhen}`,
+  ];
+
+  if (zoomLink) {
+    lines.push(`Zoom: ${zoomLink}`);
+    if (zoomId || zoomPass) {
+      lines.push(`ID: ${zoomId}  Passcode: ${zoomPass}`);
+    }
+  }
+
+  lines.push('If this new time doesn’t work, reply CHANGE and we’ll sort another slot.');
+  return lines.join('\n');
+}
+
 function buildReminderText({ startISO }) {
   const when = formatDateForSms(startISO);
   const zoomLink = ZOOM_LINK || '';
@@ -353,5 +396,55 @@ export async function sendConfirmationAndReminders({ to, startISO, name }) {
         }
       }, delay);
     }
+  }
+}
+
+// NEW: send cancellation notice (WhatsApp text preferred, then SMS)
+export async function sendCancellationNotice({ to, startISO, name }) {
+  if (!twilioClient || !to) {
+    console.warn('Cancellation notice not sent — missing Twilio client or recipient');
+    return;
+  }
+
+  const e164 = normaliseE164(to);
+  if (!e164) {
+    console.warn('Cancellation notice not sent — invalid recipient:', to);
+    return;
+  }
+
+  const body = buildCancellationSms({ startISO, name });
+
+  let usedWhatsApp = false;
+  if (WHATSAPP_FROM_NUMBER) {
+    usedWhatsApp = await sendWhatsAppText({ to: e164, body });
+  }
+
+  if (!usedWhatsApp) {
+    await sendSmsMessage({ to: e164, body });
+  }
+}
+
+// NEW: send reschedule notice (WhatsApp text preferred, then SMS)
+export async function sendRescheduleNotice({ to, oldStartISO, newStartISO, name }) {
+  if (!twilioClient || !to) {
+    console.warn('Reschedule notice not sent — missing Twilio client or recipient');
+    return;
+  }
+
+  const e164 = normaliseE164(to);
+  if (!e164) {
+    console.warn('Reschedule notice not sent — invalid recipient:', to);
+    return;
+  }
+
+  const body = buildRescheduleSms({ oldStartISO, newStartISO, name });
+
+  let usedWhatsApp = false;
+  if (WHATSAPP_FROM_NUMBER) {
+    usedWhatsApp = await sendWhatsAppText({ to: e164, body });
+  }
+
+  if (!usedWhatsApp) {
+    await sendSmsMessage({ to: e164, body });
   }
 }
