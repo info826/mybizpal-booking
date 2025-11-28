@@ -368,6 +368,97 @@ export async function updateBookingStateFromUtterance({
     booking.lastPromptWasTimeSuggestion = false;
   }
 
+  // --- EXTRA FALLBACK: basic weekday + time detection if parseNaturalDate missed it ---
+  if (!nat) {
+    // 1) If we don't yet have any date, but they mention a weekday,
+    //    set the date to the *next* occurrence of that weekday at 9:00.
+    if (!booking.timeISO) {
+      const weekdayMatch = raw.match(
+        /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i
+      );
+      if (weekdayMatch) {
+        const weekday = weekdayMatch[1].toLowerCase();
+        const dayMap = {
+          sunday: 0,
+          monday: 1,
+          tuesday: 2,
+          wednesday: 3,
+          thursday: 4,
+          friday: 5,
+          saturday: 6,
+        };
+        const targetDow = dayMap[weekday];
+        if (targetDow !== undefined) {
+          const now = new Date();
+          const todayDow = now.getDay();
+          let delta = (targetDow - todayDow + 7) % 7;
+          if (delta === 0) delta = 7; // always move to *next* occurrence
+          const dt = new Date(now);
+          dt.setDate(now.getDate() + delta);
+          dt.setHours(9, 0, 0, 0); // default 9:00
+          booking.timeISO = dt.toISOString();
+          booking.timeSpoken = formatSpokenDateTime(booking.timeISO, timezone);
+          booking.awaitingTimeConfirm = false;
+          booking.lastPromptWasTimeSuggestion = false;
+        }
+      }
+    }
+
+    // 2) If we already have a date, but this utterance is likely a time-only answer
+    //    like "nine o'clock", "9", "9am", "9:30", update the time on that date.
+    if (booking.timeISO) {
+      let hour = null;
+      let minute = 0;
+
+      // Digits pattern: "9", "9:30", "14:00", maybe with am/pm
+      let m = raw.match(/\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b/i);
+      if (m) {
+        hour = parseInt(m[1], 10);
+        minute = m[2] ? parseInt(m[2], 10) : 0;
+        const ampm = m[3] ? m[3].toLowerCase() : null;
+        if (ampm === 'pm' && hour < 12) hour += 12;
+        if (ampm === 'am' && hour === 12) hour = 0;
+      } else {
+        // Words pattern: "nine o'clock", "ten o clock"
+        const wordMap = {
+          one: 1,
+          two: 2,
+          three: 3,
+          four: 4,
+          five: 5,
+          six: 6,
+          seven: 7,
+          eight: 8,
+          nine: 9,
+          ten: 10,
+          eleven: 11,
+          twelve: 12,
+        };
+        const wordMatch = raw.match(
+          /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b.*(o['’]?clock)?/i
+        );
+        if (wordMatch) {
+          const word = wordMatch[1].toLowerCase();
+          hour = wordMap[word];
+          minute = 0;
+        }
+      }
+
+      if (hour !== null) {
+        // Clamp roughly into business hours window (9–17)
+        if (hour < 9) hour = 9;
+        if (hour > 17) hour = 17;
+
+        const prev = new Date(booking.timeISO);
+        prev.setHours(hour, minute, 0, 0);
+        booking.timeISO = prev.toISOString();
+        booking.timeSpoken = formatSpokenDateTime(booking.timeISO, timezone);
+        booking.awaitingTimeConfirm = false;
+        booking.lastPromptWasTimeSuggestion = false;
+      }
+    }
+  }
+
   // If user wants earliest and we don't yet have a candidate, look it up.
   // If they mentioned a day ("tomorrow", "next Tuesday"), use that as a starting point.
   if (
@@ -791,4 +882,4 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
   // No special system action needed
   return { intercept: false };
-            }
+}
