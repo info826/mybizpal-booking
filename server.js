@@ -145,16 +145,49 @@ wss.on('connection', (ws, req) => {
     if (!t) return true;
 
     // Very short nothingness
-    if (t.length <= 1) return true;
+    if (t.length <= 2) return true;
 
-    const boringSet = new Set(['hi', 'hello', 'hey', 'ok', 'okay', 'yes', 'yeah', 'no']);
+    // Common back-channel / reflex utterances
+    const boringSet = new Set([
+      'hi',
+      'hello',
+      'hey',
+      'ok',
+      'okay',
+      'yes',
+      'yeah',
+      'yep',
+      'no',
+      'nope',
+      'mm',
+      'mmm',
+      'uh',
+      'uhh',
+      'uh huh',
+      'hmm',
+      'right',
+      'sure',
+      'alright',
+      'alrighty',
+      'got it',
+    ]);
+
     if (boringSet.has(t)) {
       const now = Date.now();
       const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
 
-      // If they say "hello/yes/ok" within 2 seconds of Gabriel speaking,
+      // If they say "hello/yes/ok/etc." within ~2.5s of Gabriel speaking,
       // it's probably echo or reflex → ignore.
-      if (sinceBot < 2000) return true;
+      if (sinceBot < 2500) return true;
+    }
+
+    // Very short (1–2 word) utterances immediately after Gabriel spoke
+    // that don't carry much meaning → ignore as likely reflex.
+    const words = t.split(/\s+/);
+    if (words.length <= 2) {
+      const now = Date.now();
+      const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
+      if (sinceBot < 2500) return true;
     }
 
     return false;
@@ -297,17 +330,23 @@ wss.on('connection', (ws, req) => {
       if (!streamSid) return;
       if (callState.isSpeaking) return;
 
+      const now = Date.now();
       const lastUser = callState.timing.lastUserSpeechAt || 0;
+      const lastBot = callState.timing.lastBotReplyAt || 0;
+
       if (!lastUser) return; // no user speech yet
 
-      const now = Date.now();
-      const idle = now - lastUser;
+      const idleSinceUser = now - lastUser;
+      const idleSinceBot = now - lastBot;
+
+      // Extra safety: don't nag if Gabriel has spoken very recently.
+      if (idleSinceBot < 5000) return;
 
       // Stage thresholds:
       //  - 6 seconds  → "Are you still there?"
       //  - 14 seconds → "This is Gabriel at MyBizPal, are you still there?"
       //  - 22 seconds → polite goodbye + hang up
-      if (callState.silenceStage === 0 && idle >= 6000 && idle < 14000) {
+      if (callState.silenceStage === 0 && idleSinceUser >= 6000 && idleSinceUser < 14000) {
         callState.silenceStage = 1;
 
         const reply = 'Are you still there?';
@@ -328,7 +367,7 @@ wss.on('connection', (ws, req) => {
           callState.lastReplyAt = t;
           callState.timing.lastBotReplyAt = t;
         }
-      } else if (callState.silenceStage === 1 && idle >= 14000 && idle < 22000) {
+      } else if (callState.silenceStage === 1 && idleSinceUser >= 14000 && idleSinceUser < 22000) {
         callState.silenceStage = 2;
 
         const reply = 'This is Gabriel at MyBizPal, are you still there?';
@@ -349,7 +388,7 @@ wss.on('connection', (ws, req) => {
           callState.lastReplyAt = t;
           callState.timing.lastBotReplyAt = t;
         }
-      } else if (callState.silenceStage === 2 && idle >= 22000) {
+      } else if (callState.silenceStage === 2 && idleSinceUser >= 22000) {
         // Final goodbye and hang up
         callState.silenceStage = 3; // prevent repeating
         callState.hangupRequested = true;
@@ -454,9 +493,9 @@ wss.on('connection', (ws, req) => {
       }
 
       // Debounce + cooldown:
-      // - at most one reply every ~900ms
+      // - at most one reply every ~1800ms (more patient)
       // - if multiple transcripts arrive, respond only to the latest
-      const minGap = 900;
+      const minGap = 1800;
 
       if (callState.pendingTimer) {
         clearTimeout(callState.pendingTimer);
