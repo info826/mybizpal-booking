@@ -301,14 +301,19 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
 
 async function sendWhatsAppText({ to, body }) {
   if (!twilioClient || !WHATSAPP_FROM_NUMBER) {
+    console.warn('WhatsApp text not sent — missing Twilio client or WHATSAPP_FROM_NUMBER');
     return false;
   }
+
   const waTo = makeWhatsAppTo(to);
-  if (!waTo) return false;
+  if (!waTo) {
+    console.warn('WhatsApp text not sent — invalid recipient:', to);
+    return false;
+  }
 
   const from = WHATSAPP_FROM_NUMBER;
 
-  console.log('📲 WhatsApp REMINDER DEBUG', { from, to: waTo });
+  console.log('📲 WhatsApp TEXT DEBUG', { from, to: waTo, body });
 
   try {
     await twilioClient.messages.create({
