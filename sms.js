@@ -205,19 +205,10 @@ function makeWhatsAppTo(to) {
 
 async function sendSmsMessage({ to, body }) {
   if (!twilioClient || !SMS_FROM_NUMBER || !to) {
-    console.warn('SMS not sent — missing Twilio config or recipient', {
-      hasClient: !!twilioClient,
-      SMS_FROM_NUMBER,
-      to,
-    });
+    console.warn('SMS not sent — missing Twilio config or recipient');
     return false;
   }
   try {
-    console.log('📩 Sending SMS', {
-      from: SMS_FROM_NUMBER,
-      to,
-      preview: body.slice(0, 80),
-    });
     await twilioClient.messages.create({
       to,
       from: SMS_FROM_NUMBER,
@@ -243,8 +234,7 @@ async function sendSmsMessage({ to, body }) {
 async function sendWhatsAppTemplate({ to, startISO, name }) {
   if (!twilioClient || !WHATSAPP_FROM_NUMBER || !WA_TEMPLATE_SID) {
     console.warn(
-      'WhatsApp template not sent — missing config (client, WHATSAPP_FROM_NUMBER, or WA_TEMPLATE_SID)',
-      { hasClient: !!twilioClient, WHATSAPP_FROM_NUMBER, WA_TEMPLATE_SID }
+      'WhatsApp template not sent — missing config (client, WHATSAPP_FROM_NUMBER, or WA_TEMPLATE_SID)'
     );
     return false;
   }
@@ -279,7 +269,7 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
   const from = WHATSAPP_FROM_NUMBER;
 
   // DEBUG: see exactly what we send to Twilio
-  console.log('📲 WhatsApp TEMPLATE DEBUG', {
+  console.log('📲 WhatsApp DEBUG', {
     from,
     to: waTo,
     contentSid: WA_TEMPLATE_SID,
@@ -298,7 +288,7 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
   } catch (e) {
     console.error('❌ WhatsApp template send error:', e?.message || e);
     if (e) {
-      console.error('WhatsApp template Twilio error details:', {
+      console.error('WhatsApp Twilio error details:', {
         code: e.code,
         status: e.status,
         moreInfo: e.moreInfo,
@@ -311,10 +301,7 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
 
 async function sendWhatsAppText({ to, body }) {
   if (!twilioClient || !WHATSAPP_FROM_NUMBER) {
-    console.warn('WhatsApp text not sent — missing Twilio client or WHATSAPP_FROM_NUMBER', {
-      hasClient: !!twilioClient,
-      WHATSAPP_FROM_NUMBER,
-    });
+    console.warn('WhatsApp text not sent — missing Twilio client or WHATSAPP_FROM_NUMBER');
     return false;
   }
 
@@ -326,11 +313,7 @@ async function sendWhatsAppText({ to, body }) {
 
   const from = WHATSAPP_FROM_NUMBER;
 
-  console.log('📲 WhatsApp TEXT DEBUG', {
-    from,
-    to: waTo,
-    preview: body.slice(0, 80),
-  });
+  console.log('📲 WhatsApp TEXT DEBUG', { from, to: waTo, body });
 
   try {
     await twilioClient.messages.create({
@@ -357,10 +340,7 @@ async function sendWhatsAppText({ to, body }) {
 
 export async function sendConfirmationAndReminders({ to, startISO, name }) {
   if (!twilioClient || !to) {
-    console.warn('Messaging not sent — missing Twilio client or recipient', {
-      hasClient: !!twilioClient,
-      to,
-    });
+    console.warn('Messaging not sent — missing Twilio client or recipient');
     return;
   }
 
@@ -369,11 +349,6 @@ export async function sendConfirmationAndReminders({ to, startISO, name }) {
     console.warn('Messaging not sent — invalid recipient:', to);
     return;
   }
-
-  console.log('✅ Booking confirmed, sending confirmation message', {
-    to: e164,
-    startISO,
-  });
 
   let usedWhatsApp = false;
 
@@ -392,55 +367,47 @@ export async function sendConfirmationAndReminders({ to, startISO, name }) {
     await sendSmsMessage({ to: e164, body });
   }
 
-  // ⛔ Reminders are now handled by the external reminder worker (cron),
-  // not via in-process setTimeout timers.
-}
+  // 3) Best-effort in-memory reminders (may not fire if server sleeps)
+  const startMs = new Date(startISO).getTime();
+  const nowMs = Date.now();
 
-// NEW: standalone reminder sender (used by the reminder worker)
-export async function sendReminderMessage({ to, startISO, name, label = 'generic' }) {
-  if (!twilioClient || !to) {
-    console.warn('Reminder not sent — missing Twilio client or recipient', {
-      hasClient: !!twilioClient,
-      to,
-      label,
-    });
-    return;
-  }
+  const reminderTimes = [
+    startMs - 24 * 60 * 60 * 1000, // 24h
+    startMs - 60 * 60 * 1000,      // 60m
+  ];
 
-  const e164 = normaliseE164(to);
-  if (!e164) {
-    console.warn('Reminder not sent — invalid recipient:', to, { label });
-    return;
-  }
+  for (const fireAt of reminderTimes) {
+    const delay = fireAt - nowMs;
+    if (delay > 0 && delay < 7 * 24 * 60 * 60 * 1000) {
+      setTimeout(async () => {
+        try {
+          const bodyRem = buildReminderText({ startISO });
 
-  const bodyRem = buildReminderText({ startISO });
-
-  console.log('⏰ Sending reminder via worker', {
-    label,
-    to: e164,
-    startISO,
-  });
-
-  let usedWhatsApp = false;
-  if (WHATSAPP_FROM_NUMBER) {
-    usedWhatsApp = await sendWhatsAppText({
-      to: e164,
-      body: bodyRem,
-    });
-  }
-
-  if (!usedWhatsApp) {
-    await sendSmsMessage({ to: e164, body: bodyRem });
+          if (usedWhatsApp && WHATSAPP_FROM_NUMBER) {
+            // Try WhatsApp reminder first
+            const ok = await sendWhatsAppText({
+              to: e164,
+              body: bodyRem,
+            });
+            if (!ok) {
+              await sendSmsMessage({ to: e164, body: bodyRem });
+            }
+          } else {
+            // SMS-only path
+            await sendSmsMessage({ to: e164, body: bodyRem });
+          }
+        } catch (e) {
+          console.error('Reminder send error:', e?.message || e);
+        }
+      }, delay);
+    }
   }
 }
 
 // NEW: send cancellation notice (WhatsApp text preferred, then SMS)
 export async function sendCancellationNotice({ to, startISO, name }) {
   if (!twilioClient || !to) {
-    console.warn('Cancellation notice not sent — missing Twilio client or recipient', {
-      hasClient: !!twilioClient,
-      to,
-    });
+    console.warn('Cancellation notice not sent — missing Twilio client or recipient');
     return;
   }
 
@@ -465,10 +432,7 @@ export async function sendCancellationNotice({ to, startISO, name }) {
 // NEW: send reschedule notice (WhatsApp text preferred, then SMS)
 export async function sendRescheduleNotice({ to, oldStartISO, newStartISO, name }) {
   if (!twilioClient || !to) {
-    console.warn('Reschedule notice not sent — missing Twilio client or recipient', {
-      hasClient: !!twilioClient,
-      to,
-    });
+    console.warn('Reschedule notice not sent — missing Twilio client or recipient');
     return;
   }
 
@@ -487,5 +451,30 @@ export async function sendRescheduleNotice({ to, oldStartISO, newStartISO, name 
 
   if (!usedWhatsApp) {
     await sendSmsMessage({ to: e164, body });
+  }
+}
+
+// NEW: helper used by the reminder worker
+export async function sendReminderMessage({ to, startISO, name, label }) {
+  if (!twilioClient || !to) {
+    console.warn(`[${label}] Reminder not sent — missing Twilio client or recipient`);
+    return;
+  }
+
+  const e164 = normaliseE164(to);
+  if (!e164) {
+    console.warn(`[${label}] Reminder not sent — invalid recipient:`, to);
+    return;
+  }
+
+  const bodyRem = buildReminderText({ startISO });
+
+  let usedWhatsApp = false;
+  if (WHATSAPP_FROM_NUMBER) {
+    usedWhatsApp = await sendWhatsAppText({ to: e164, body: bodyRem });
+  }
+
+  if (!usedWhatsApp) {
+    await sendSmsMessage({ to: e164, body: bodyRem });
   }
 }
