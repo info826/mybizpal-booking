@@ -10,6 +10,8 @@ import twilio from 'twilio';
 import { google } from 'googleapis';
 import { handleTurn } from './logic.js';
 import { registerOutboundRoutes } from './outbound.js';
+// NEW: session memory
+import { getSessionForPhone, saveSessionForPhone } from './sessionStore.js';
 
 // ---------- CONFIG ----------
 
@@ -26,6 +28,7 @@ const {
   GOOGLE_CLIENT_EMAIL,
   GOOGLE_PRIVATE_KEY,
   GOOGLE_CALENDAR_ID,
+  TWILIO_NUMBER,
 } = process.env;
 
 if (!PUBLIC_BASE_URL) {
@@ -153,8 +156,16 @@ app.post('/twilio/voice', (req, res) => {
 
   const wsUrl = baseUrl.replace(/^http/, 'ws') + '/media-stream';
 
+  const from = req.body.From || '';
+
   const connect = twiml.connect();
-  connect.stream({ url: wsUrl });
+  // Pass caller number into the stream as a custom parameter
+  connect.stream({
+    url: wsUrl,
+    parameter: [
+      { name: 'caller', value: from },
+    ],
+  });
 
   res.type('text/xml');
   res.send(twiml.toString());
@@ -176,6 +187,14 @@ app.post('/whatsapp/inbound', async (req, res) => {
     body: bodyRaw,
   });
 
+  // Load or initialise session for this phone
+  let session =
+    getSessionForPhone(fromPhone) || {
+      history: [],
+      lastChannel: 'whatsapp',
+      profile: {},
+    };
+
   const msgTwiml = new twilio.twiml.MessagingResponse();
   const reply = msgTwiml.message();
 
@@ -183,6 +202,47 @@ app.post('/whatsapp/inbound', async (req, res) => {
     reply.body(
       "Hi, it's Gabriel from MyBizPal. I couldn't see your phone number properly — could you try again or call me instead?"
     );
+    res.type('text/xml').send(msgTwiml.toString());
+    return;
+  }
+
+  // Record user message into history
+  session.history.push({
+    at: new Date().toISOString(),
+    channel: 'whatsapp',
+    from: 'user',
+    text,
+  });
+
+  // --- CALL ME FLOW ---
+  if (lower.includes('call me')) {
+    if (twilioClient && TWILIO_NUMBER) {
+      try {
+        await twilioClient.calls.create({
+          to: fromPhone,
+          from: TWILIO_NUMBER,
+          url: `${PUBLIC_BASE_URL || ''}/twilio/voice`,
+        });
+        reply.body(
+          "Got it — I'm calling you now. Just pick up and I'll continue where we left off."
+        );
+      } catch (err) {
+        console.error('❌ Error creating outbound call from WhatsApp:', err);
+        reply.body(
+          "I tried to call you but something went wrong with the phone system. A human will check it shortly."
+        );
+      }
+    } else {
+      reply.body(
+        "I’d love to call you, but the phone system isn’t fully configured yet. Please try again later or use the booking link on mybizpal.ai."
+      );
+    }
+
+    // Save session and respond
+    session.lastChannel = 'whatsapp';
+    session.lastUpdated = new Date().toISOString();
+    saveSessionForPhone(fromPhone, session);
+
     res.type('text/xml').send(msgTwiml.toString());
     return;
   }
@@ -210,6 +270,11 @@ app.post('/whatsapp/inbound', async (req, res) => {
       );
     }
 
+    session.lastIntent = 'cancel';
+    session.lastChannel = 'whatsapp';
+    session.lastUpdated = new Date().toISOString();
+    saveSessionForPhone(fromPhone, session);
+
     res.type('text/xml').send(msgTwiml.toString());
     return;
   }
@@ -219,14 +284,25 @@ app.post('/whatsapp/inbound', async (req, res) => {
     reply.body(
       "Got it — you’d like to reschedule.\n\nRight now I can cancel your existing booking and you can pick a new time via the booking page on mybizpal.ai.\n\nIf you’d like me to cancel the current one first, just reply with the word *cancel*."
     );
+
+    session.lastIntent = 'reschedule';
+    session.lastChannel = 'whatsapp';
+    session.lastUpdated = new Date().toISOString();
+    saveSessionForPhone(fromPhone, session);
+
     res.type('text/xml').send(msgTwiml.toString());
     return;
   }
 
   // --- DEFAULT FALLBACK ---
   reply.body(
-    "Hi, you’re chatting with Gabriel, the MyBizPal AI agent 🤖.\n\nFor now I can help with:\n• *cancel* – cancel your upcoming booking\n• *reschedule* – I’ll help you clear the current slot so you can pick a new one\n\nJust reply with one of those keywords."
+    "Hi, you’re chatting with Gabriel, the MyBizPal AI agent 🤖.\n\nFor now I can help with:\n• *cancel* – cancel your upcoming booking\n• *reschedule* – I’ll help you clear the current slot so you can pick a new one\n• *call me* – I’ll give you a call on this number\n\nJust reply with one of those keywords."
   );
+
+  session.lastIntent = 'help';
+  session.lastChannel = 'whatsapp';
+  session.lastUpdated = new Date().toISOString();
+  saveSessionForPhone(fromPhone, session);
 
   res.type('text/xml').send(msgTwiml.toString());
 });
@@ -298,7 +374,7 @@ wss.on('connection', (ws, req) => {
   });
 
   dgSocket.on('close', () => {
-    console.log('🔒 Deepgram stream closed');
+    console.log('🎧 Deepgram stream closed');
   });
 
   dgSocket.on('error', (err) => {
@@ -700,10 +776,24 @@ wss.on('connection', (ws, req) => {
     if (event === 'start') {
       streamSid = msg.start.streamSid;
       callState.callSid = msg.start.callSid || null;
+      // NEW: get caller phone from customParameters
+      callState.callerNumber =
+        (msg.start.customParameters && msg.start.customParameters.caller) || null;
+
       console.log('▶️  Twilio stream started', {
         streamSid,
         callSid: callState.callSid,
+        callerNumber: callState.callerNumber,
       });
+
+      // Load any previous session for this phone
+      if (callState.callerNumber) {
+        const previous = getSessionForPhone(callState.callerNumber);
+        if (previous) {
+          callState.history = previous.history || [];
+          callState.lastUserTranscript = previous.lastUserTranscript || '';
+        }
+      }
 
       sendInitialGreeting().catch((e) =>
         console.error('Greeting error (outer):', e)
@@ -750,6 +840,16 @@ wss.on('connection', (ws, req) => {
     }
     if (callState.silenceTimer) {
       clearInterval(callState.silenceTimer);
+    }
+
+    // Save session for this caller (if we know the number)
+    if (callState.callerNumber) {
+      saveSessionForPhone(callState.callerNumber, {
+        history: callState.history,
+        lastUserTranscript: callState.lastUserTranscript,
+        lastChannel: 'voice',
+        lastUpdated: new Date().toISOString(),
+      });
     }
   });
 
