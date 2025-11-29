@@ -7,6 +7,7 @@ import bodyParser from 'body-parser';
 import http from 'http';
 import WebSocket, { WebSocketServer } from 'ws';
 import twilio from 'twilio';
+import { google } from 'googleapis';
 import { handleTurn } from './logic.js';
 import { registerOutboundRoutes } from './outbound.js';
 
@@ -21,6 +22,10 @@ const {
   ELEVENLABS_VOICE_ID,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
+  // NEW: Google Calendar creds for WhatsApp cancel/reschedule
+  GOOGLE_CLIENT_EMAIL,
+  GOOGLE_PRIVATE_KEY,
+  GOOGLE_CALENDAR_ID,
 } = process.env;
 
 if (!PUBLIC_BASE_URL) {
@@ -36,6 +41,96 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
 } else {
   console.warn('⚠️ TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN missing — hang-up via API disabled.');
+}
+
+// ---------- GOOGLE CALENDAR HELPERS (for WhatsApp cancel/reschedule) ----------
+
+function getGoogleJwtClient() {
+  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
+    console.warn('⚠️ GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY missing – WhatsApp cancel will be disabled.');
+    return null;
+  }
+
+  const key = GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
+
+  return new google.auth.JWT(
+    GOOGLE_CLIENT_EMAIL,
+    undefined,
+    key,
+    ['https://www.googleapis.com/auth/calendar']
+  );
+}
+
+// Normalise phone for comparison: keep digits and leading +
+function normalisePhoneDigits(p) {
+  return (p || '').replace(/[^\d+]/g, '');
+}
+
+async function findLatestUpcomingEventByPhone(phoneE164) {
+  if (!GOOGLE_CALENDAR_ID) {
+    console.warn('⚠️ GOOGLE_CALENDAR_ID missing – cannot search calendar for WhatsApp cancel.');
+    return null;
+  }
+
+  const auth = getGoogleJwtClient();
+  if (!auth) return null;
+
+  await auth.authorize();
+  const calendar = google.calendar({ version: 'v3', auth });
+
+  const nowISO = new Date().toISOString();
+
+  const res = await calendar.events.list({
+    calendarId: GOOGLE_CALENDAR_ID,
+    timeMin: nowISO,
+    singleEvents: true,
+    orderBy: 'startTime',
+    maxResults: 20,
+  });
+
+  const events = res.data.items || [];
+  const targetPhone = normalisePhoneDigits(phoneE164);
+
+  let best = null;
+
+  for (const ev of events) {
+    const priv = ev.extendedProperties?.private || {};
+    const storedPhone = normalisePhoneDigits(priv.phone || '');
+
+    // Try exact / suffix match on phone (last digits usually enough).
+    if (storedPhone && (storedPhone === targetPhone || storedPhone.endsWith(targetPhone))) {
+      best = ev;
+      break;
+    }
+
+    // Fallback: try to find phone in description if we didn't already match
+    if (!best && ev.description) {
+      const descDigits = normalisePhoneDigits(ev.description);
+      if (descDigits && descDigits.includes(targetPhone.replace('+', ''))) {
+        best = ev;
+      }
+    }
+  }
+
+  return best;
+}
+
+async function cancelLatestUpcomingEventForPhone(phoneE164) {
+  const event = await findLatestUpcomingEventByPhone(phoneE164);
+  if (!event) return null;
+
+  const auth = getGoogleJwtClient();
+  if (!auth) return null;
+
+  await auth.authorize();
+  const calendar = google.calendar({ version: 'v3', auth });
+
+  await calendar.events.delete({
+    calendarId: GOOGLE_CALENDAR_ID,
+    eventId: event.id,
+  });
+
+  return event;
 }
 
 // ---------- EXPRESS APP ----------
@@ -63,6 +158,77 @@ app.post('/twilio/voice', (req, res) => {
 
   res.type('text/xml');
   res.send(twiml.toString());
+});
+
+// ---------- WHATSAPP INBOUND WEBHOOK (text-mode Gabriel) ----------
+
+app.post('/whatsapp/inbound', async (req, res) => {
+  const fromRaw = req.body.From || '';
+  const bodyRaw = req.body.Body || '';
+
+  const fromPhone = fromRaw.replace(/^whatsapp:/, '');
+  const text = bodyRaw.trim();
+  const lower = text.toLowerCase();
+
+  console.log('📩 Incoming WhatsApp message', {
+    fromRaw,
+    fromPhone,
+    body: bodyRaw,
+  });
+
+  const msgTwiml = new twilio.twiml.MessagingResponse();
+  const reply = msgTwiml.message();
+
+  if (!fromPhone) {
+    reply.body(
+      "Hi, it's Gabriel from MyBizPal. I couldn't see your phone number properly — could you try again or call me instead?"
+    );
+    res.type('text/xml').send(msgTwiml.toString());
+    return;
+  }
+
+  // --- CANCEL FLOW ---
+  if (lower.includes('cancel')) {
+    try {
+      const cancelledEvent = await cancelLatestUpcomingEventForPhone(fromPhone);
+
+      if (cancelledEvent) {
+        const start =
+          cancelledEvent.start?.dateTime || cancelledEvent.start?.date || '';
+        reply.body(
+          `No problem — your upcoming MyBizPal consultation has been cancelled.\n\nPrevious time: ${start}\n\nIf you change your mind, you can always book again any time at mybizpal.ai.`
+        );
+      } else {
+        reply.body(
+          "I couldn't find any upcoming booking under this WhatsApp number. If you booked with a different phone, just reply here with that number or use the booking link on mybizpal.ai."
+        );
+      }
+    } catch (err) {
+      console.error('❌ Error cancelling via WhatsApp:', err);
+      reply.body(
+        "Something went wrong while trying to cancel your booking. A human will take a look and confirm it for you shortly."
+      );
+    }
+
+    res.type('text/xml').send(msgTwiml.toString());
+    return;
+  }
+
+  // --- RESCHEDULE FLOW (for now: explain + ask them to pick a new time manually) ---
+  if (lower.includes('resched')) {
+    reply.body(
+      "Got it — you’d like to reschedule.\n\nRight now I can cancel your existing booking and you can pick a new time via the booking page on mybizpal.ai.\n\nIf you’d like me to cancel the current one first, just reply with the word *cancel*."
+    );
+    res.type('text/xml').send(msgTwiml.toString());
+    return;
+  }
+
+  // --- DEFAULT FALLBACK ---
+  reply.body(
+    "Hi, you’re chatting with Gabriel, the MyBizPal AI agent 🤖.\n\nFor now I can help with:\n• *cancel* – cancel your upcoming booking\n• *reschedule* – I’ll help you clear the current slot so you can pick a new one\n\nJust reply with one of those keywords."
+  );
+
+  res.type('text/xml').send(msgTwiml.toString());
 });
 
 // Outbound /start-call endpoint (from outbound.js)
