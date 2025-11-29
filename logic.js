@@ -14,7 +14,7 @@ import {
   yesInAnyLang,  
   noInAnyLang,  
 } from './parsing.js';  
-import { getSessionForPhone, saveSessionForPhone } from './sessionstore.js';
+import { getSessionForPhone, saveSessionForPhone } from './sessionStore.js';
 
 const openai = new OpenAI({  
   apiKey: process.env.OPENAI_API_KEY,  
