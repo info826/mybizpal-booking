@@ -253,6 +253,17 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
   }
 }
 
+// ---------- LOOP NORMALISER (for anti-repeat) ----------
+
+function normalizeForLoop(text) {
+  if (!text) return '';
+  return String(text)
+    .toLowerCase()
+    .replace(/[\s\n\r]+/g, ' ')
+    .replace(/[.,!?'"“”‘’\-]/g, '')
+    .trim();
+}
+
 // ---------- SYSTEM PROMPT ----------
 
 function buildSystemPrompt(callState) {
@@ -1007,6 +1018,29 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
+  // ---------- ANTI-LOOP GUARD (FUNDAMENTAL FIX) ----------
+
+  const lastAssistant = [...history].slice().reverse()
+    .find((m) => m.role === 'assistant');
+
+  if (lastAssistant) {
+    const prevNorm = normalizeForLoop(lastAssistant.content);
+    const newNorm = normalizeForLoop(botText);
+
+    if (prevNorm && newNorm && prevNorm === newNorm) {
+      // We are about to repeat ourselves → switch to a different, more helpful move
+      if (profile.businessType) {
+        botText =
+          `Got it, that helps. For your ${profile.businessType}, would you like me to give you a quick example ` +
+          'of how MyBizPal would handle your calls, or go straight to booking a short demo with an advisor?';
+      } else {
+        botText =
+          'Got it, that helps. Would you like a quick plain-English overview of how MyBizPal works, ' +
+          'or an example of how it is helping another business?';
+      }
+    }
+  }
+
   let lowerBot = botText.toLowerCase();
 
   if (/how can i help/.test(lowerBot)) {
@@ -1069,9 +1103,9 @@ export async function handleTurn({ userText, callState }) {
     /\b(ok bye|bye|goodbye|cheers,? bye)\b/.test(userLower);
 
   if (!endByPhrase && /^\s*no\s*$/i.test(userLower)) {
-    const lastAssistant = [...history].slice().reverse()
+    const lastAssistForNo = [...history].slice().reverse()
       .find((m) => m.role === 'assistant');
-    if (lastAssistant && /anything else i can help/i.test(lastAssistant.content.toLowerCase())) {
+    if (lastAssistForNo && /anything else i can help/i.test(lastAssistForNo.content.toLowerCase())) {
       endByPhrase = true;
     }
   }
