@@ -552,6 +552,8 @@ export async function handleTurn({ userText, callState }) {
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
 
+  const bookingState = callState.booking || {};
+
   updateProfileFromUserReply({ safeUserText, history, profile });
 
   if (/thank(s| you)/.test(userLower)) {
@@ -724,8 +726,18 @@ export async function handleTurn({ userText, callState }) {
           capture.nameStage = 'initial';
         }
       } else {
-        // CHAT: keep the flow going after capturing the name
-        replyText = `Lovely, ${proper}. What are you most curious about with MyBizPal right now?`;
+        // CHAT: next step depends on whether we're in booking mode
+        if (
+          bookingState.intent === 'wants_booking' ||
+          bookingState.timeSpoken ||
+          bookingState.earliestSlotSpoken
+        ) {
+          replyText =
+            `Lovely, ${proper}. What day usually works best for you for a quick 20-30 minute call?`;
+        } else {
+          replyText =
+            `Lovely, ${proper}. What are you most curious about with MyBizPal right now?`;
+        }
         capture.pendingConfirm = null;
         capture.nameStage = 'confirmed';
       }
@@ -1020,15 +1032,13 @@ export async function handleTurn({ userText, callState }) {
 
   // ---------- ANTI-LOOP GUARD (FUNDAMENTAL FIX) ----------
 
-  const lastAssistant = [...history].slice().reverse()
-    .find((m) => m.role === 'assistant');
-
-  if (lastAssistant) {
-    const prevNorm = normalizeForLoop(lastAssistant.content);
+  const lastAssistants = history.filter((m) => m.role === 'assistant').slice(-3);
+  if (lastAssistants.length) {
     const newNorm = normalizeForLoop(botText);
-
-    if (prevNorm && newNorm && prevNorm === newNorm) {
-      // We are about to repeat ourselves → switch to a different, more helpful move
+    const repeated = lastAssistants.some(
+      (m) => normalizeForLoop(m.content) === newNorm
+    );
+    if (repeated) {
       if (profile.businessType) {
         botText =
           `Got it, that helps. For your ${profile.businessType}, would you like me to give you a quick example ` +
@@ -1089,7 +1099,27 @@ export async function handleTurn({ userText, callState }) {
     lowerBot = botText.toLowerCase();
   }
 
-  const bookingState = callState.booking || {};
+  // ---------- STRONG "EXPLAIN MYBIZPAL" OVERRIDE ----------
+
+  const wantsExplanation =
+    /what is mybizpal|what is it\??|how does it work|how it works|how this works|explain (it|this|mybizpal)|tell me more|overview of mybizpal|what do you guys do/i.test(
+      userLower
+    );
+
+  if (wantsExplanation) {
+    if (profile.businessType) {
+      botText =
+        `Of course. MyBizPal gives you an always-on agent like me for your ${profile.businessType} – ` +
+        'it answers your calls 24/7, handles enquiries, answers common questions and turns more of those calls into real bookings in your calendar. ' +
+        'Out of curiosity, how are you handling your calls at the moment?';
+    } else {
+      botText =
+        'Sure. MyBizPal gives you an always-on agent like me for your business – ' +
+        'it answers your calls 24/7, handles enquiries, answers common questions and turns more of those calls into real bookings in your calendar. ' +
+        'Out of curiosity, how are you handling your calls at the moment?';
+    }
+    lowerBot = botText.toLowerCase();
+  }
 
   // ---------- END-OF-CALL DETECTION ----------
 
