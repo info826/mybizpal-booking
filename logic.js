@@ -43,7 +43,7 @@ function ensureBehaviourState(callState) {
   return callState.behaviour;
 }
 
-// NEW: simple caller profile (longer-term context beyond a single call)
+// simple caller profile (longer-term context beyond a single call)
 function ensureProfile(callState) {
   if (!callState.profile) {
     callState.profile = {
@@ -58,7 +58,6 @@ function ensureProfile(callState) {
 // ---------- CHANNEL HELPER: VOICE vs CHAT ----------
 
 function getChannelInfo(callState) {
-  // You can set callState.channel in your integration, or via env
   const channel =
     callState.channel ||
     callState.transport ||
@@ -82,8 +81,6 @@ function getChannelInfo(callState) {
 
 // ---------- SIMPLE LONG-TERM MEMORY (PER PHONE, ~30 DAYS) ----------
 
-// Try to get a stable phone key for this caller.
-// Prefer the booking.phone (E.164) once we have it; fall back to callerNumber if present.
 function getPhoneKeyFromState(callState) {
   const bookingPhone = callState.booking?.phone;
   const rawCaller = callState.callerNumber;
@@ -92,7 +89,6 @@ function getPhoneKeyFromState(callState) {
   return String(phone).trim();
 }
 
-// Hydrate callState from saved session once per phone.
 function loadSessionForCallIfNeeded(callState) {
   const phoneKey = getPhoneKeyFromState(callState);
   if (!phoneKey) return null;
@@ -103,7 +99,6 @@ function loadSessionForCallIfNeeded(callState) {
 
   const saved = getSessionForPhone(phoneKey);
   if (saved) {
-    // Merge booking / behaviour / capture / profile gently
     if (saved.booking) {
       callState.booking = { ...(saved.booking || {}), ...(callState.booking || {}) };
     }
@@ -117,7 +112,6 @@ function loadSessionForCallIfNeeded(callState) {
       callState.profile = { ...(saved.profile || {}), ...(callState.profile || {}) };
     }
     if (saved.history && Array.isArray(saved.history) && saved.history.length) {
-      // Start from previous short history; new turns will be appended
       callState.history = [...saved.history];
     }
   }
@@ -126,7 +120,6 @@ function loadSessionForCallIfNeeded(callState) {
   return phoneKey;
 }
 
-// Snapshot latest state back into memory (last 40 messages to avoid bloat)
 function snapshotSessionFromCall(callState) {
   const phoneKey = getPhoneKeyFromState(callState);
   if (!phoneKey) return;
@@ -234,20 +227,15 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 
   const lastAssistant = [...history].slice().reverse()
     .find((m) => m.role === 'assistant');
+  if (!lastAssistant) return;
 
-  const la = lastAssistant ? lastAssistant.content.toLowerCase() : '';
+  const la = lastAssistant.content.toLowerCase();
 
-  // If we just asked "what kind of business", store their reply as businessType
-  if (!profile.businessType && /what (kind|type|sort) of business/.test(la)) {
+  if (
+    !profile.businessType &&
+    /what (kind|type|sort) of business/.test(la)
+  ) {
     profile.businessType = trimmed;
-  }
-
-  // Simple direct detection of common business words even if we didn't ask
-  if (!profile.businessType) {
-    const bizMatch = trimmed.match(/\b(clinic|salon|spa|practice|restaurant|cafe|shop|store)\b/i);
-    if (bizMatch && bizMatch[1]) {
-      profile.businessType = bizMatch[1].toLowerCase();
-    }
   }
 
   if (
@@ -258,8 +246,7 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
   }
 }
 
-// ---------- LOOP NORMALISER (for anti-repeat) ----------
-
+// small helper for loop detection
 function normalizeForLoop(text) {
   if (!text) return '';
   return String(text)
@@ -371,10 +358,10 @@ FIRST IMPRESSION RULES (IMPORTANT)
   - If timeOfDay = "morning": start with "Good morning".
   - If timeOfDay = "afternoon": start with "Good afternoon".
   - If timeOfDay = "evening" or "late": start with "Good evening".
-- Your very first line should normally be:
+- Your first line should normally be:
   - "Good afternoon, I'm Gabriel from MyBizPal. How can I help you today?"
   (swap "afternoon" for the correct time of day).
-- Do NOT immediately stack another question like "What has brought you through to me today?" on top of that. One clear "How can I help you today?" is enough.
+- Do NOT stack multiple openers like "How are you doing today?" + "What has brought you through to me today?". One clear "How can I help you today?" is enough.
 
 CORE MEMORY RULES (CRITICAL)
 - Assume the conversation history you see is accurate. If a question has already been clearly answered in the history, do NOT ask it again.
@@ -560,9 +547,9 @@ export async function handleTurn({ userText, callState }) {
 
   updateProfileFromUserReply({ safeUserText, history, profile });
 
+  // behaviour tweaks
   if (/thank(s| you)/.test(userLower)) {
-    behaviour.rapportLevel = Number(behaviour.rapportLevel || 0) + 1;
-    behaviour.rapportLevel = Math.min(5, behaviour.rapportLevel);
+    behaviour.rapportLevel = Math.min(5, Number(behaviour.rapportLevel || 0) + 1);
   }
 
   if (/just looking|just curious|having a look/.test(userLower)) {
@@ -577,13 +564,34 @@ export async function handleTurn({ userText, callState }) {
   }
 
   if (/how much|price|cost|expensive|too pricey/.test(userLower)) {
-    behaviour.scepticismLevel =
-      behaviour.scepticismLevel === 'unknown' ? 'medium' : behaviour.scepticismLevel;
+    if (behaviour.scepticismLevel === 'unknown') {
+      behaviour.scepticismLevel = 'medium';
+    }
   }
 
   if (/i own|my business|i run|i'm the owner|i am the owner/.test(userLower)) {
     behaviour.decisionPower = 'decision-maker';
   }
+
+  // asked-about-services flag (used later for overrides & safety-net)
+  const askedWhatDo =
+    /what.*(you (guys )?do|do you do|you offer)/i.test(userLower) ||
+    /what is mybizpal/i.test(userLower) ||
+    /what is this/i.test(userLower) ||
+    /enquir(e|ing) (about|regarding) your services/i.test(userLower) ||
+    /check(ing)? your services/i.test(userLower);
+
+  const wantsExplanation =
+    askedWhatDo ||
+    /how it works|how this works|how does it work|tell me more|overview of mybizpal/i.test(
+      userLower
+    );
+
+  const userHasPain =
+    behaviour.painPointsMentioned ||
+    /miss(ed)? calls?|lost leads?|too many calls|slipping through|slip through|too busy|overwhelmed|appointments?/.test(
+      userLower
+    );
 
   // ---------- PENDING CONFIRMATIONS ----------
 
@@ -730,18 +738,7 @@ export async function handleTurn({ userText, callState }) {
           capture.nameStage = 'initial';
         }
       } else {
-        // CHAT: next step depends on whether we're in booking mode
-        if (
-          bookingState.intent === 'wants_booking' ||
-          bookingState.timeSpoken ||
-          bookingState.earliestSlotSpoken
-        ) {
-          replyText =
-            `Lovely, ${proper}. What day usually works best for you for a quick 20-30 minute call?`;
-        } else {
-          replyText =
-            `Lovely, ${proper}. What are you most curious about with MyBizPal right now?`;
-        }
+        replyText = `Lovely, ${proper}.`;
         capture.pendingConfirm = null;
         capture.nameStage = 'confirmed';
       }
@@ -989,16 +986,19 @@ export async function handleTurn({ userText, callState }) {
     completion.choices?.[0]?.message?.content?.trim() ||
     'Alright, thanks for that. How can I help you now?';
 
-  // SPECIAL FIX: replace "How can I help you now?" with a more guided question
-  if (/how can i help you now\??/i.test(botText)) {
+  // ---------- HIGH-LEVEL OVERRIDES FOR SALES LOGIC ----------
+
+  // 1) Strong override when they directly ask about services / what MyBizPal does
+  if (wantsExplanation) {
     if (profile.businessType) {
       botText =
-        `Alright, thanks for sharing that. Are you mainly just curious about how MyBizPal could support your ${profile.businessType}, ` +
-        'or are you thinking ahead for when you start taking more calls?';
+        `MyBizPal gives you an always-on agent like me for your ${profile.businessType} – ` +
+        'it answers your calls 24/7, handles enquiries, answers common questions and turns more of those calls into actual bookings or leads in your calendar. ' +
+        `Out of curiosity, what tends to happen with calls in your ${profile.businessType} at the moment?`;
     } else {
       botText =
-        'Alright, thanks for sharing that. Are you mainly just curious about how MyBizPal works, ' +
-        'or are you thinking ahead to when you might want something like this for your business?';
+        'MyBizPal gives you an always-on agent like me for your business – it answers your calls 24/7, handles enquiries, answers common questions and turns more of those calls into actual bookings or leads in your calendar. ' +
+        'Out of curiosity, how are you handling your calls at the moment?';
     }
   }
 
@@ -1011,7 +1011,7 @@ export async function handleTurn({ userText, callState }) {
   // Turn " - " mid-sentence into a comma
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
-  // EXTRA SAFETY: in chat, strip "digit by digit" / "slowly"
+  // extra: chat channel should not say "digit by digit" / "slowly"
   if (isChat) {
     botText = botText
       .replace(/,\s*(digit by digit|slowly)/gi, '')
@@ -1034,8 +1034,56 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // ---------- ANTI-LOOP GUARD (FUNDAMENTAL FIX) ----------
+  let lowerBot = botText.toLowerCase();
 
+  // 2) Fix the "are you mainly just curious..." line when they clearly shared a pain
+  if (/are you mainly just curious about how mybizpal works/i.test(lowerBot) && userHasPain) {
+    if (profile.businessType) {
+      botText =
+        `Got it, that does sound frustrating when things slip through because you are busy. ` +
+        `For your ${profile.businessType}, MyBizPal can pick up calls 24/7, handle enquiries and lock in appointments even when you are tied up. ` +
+        'Would you like me to walk you through how that would look in practice, or go straight to booking a quick demo call to see it live?';
+    } else {
+      botText =
+        'Got it, that does sound frustrating when things slip through because you are busy. ' +
+        'MyBizPal can pick up calls 24/7, handle enquiries and lock in appointments even when you are tied up. ' +
+        'Would you like me to walk you through how that would look for your business, or go straight to booking a quick demo call to see it live?';
+    }
+    lowerBot = botText.toLowerCase();
+  }
+
+  // 3) Handle follow-up when we already asked "overview or example?" and they chose one
+  if (/would you like a quick plain-english overview of how mybizpal works|plain-english overview of how mybizpal works/i.test(lowerBot)) {
+    const lastAssistant = [...history].slice().reverse().find(
+      (m) =>
+        m.role === 'assistant' &&
+        /would you like a quick plain-english overview of how mybizpal works|plain-english overview of how mybizpal works/i.test(
+          m.content.toLowerCase()
+        )
+    );
+
+    if (lastAssistant) {
+      const wantsExample = /example|for instance|case study/i.test(userLower);
+      const wantsOverview = /overview|how it works|how this works|explain/i.test(
+        userLower
+      );
+
+      if (wantsExample) {
+        botText =
+          'Sure. For example, one of our clients runs a busy clinic. Their MyBizPal agent answers every call, asks a few key questions to see what the caller needs, offers the right appointment slots and books them straight into the calendar. Even when the team is with patients or closed, they wake up to a list of confirmed bookings instead of missed calls.';
+      } else if (wantsOverview) {
+        botText =
+          'Of course. In simple terms, MyBizPal picks up your calls 24/7, answers common questions, qualifies the caller and then either books an appointment or passes you a warm, qualified lead. You decide the script, the types of appointments and when you want people booked in.';
+      } else {
+        botText =
+          'No problem. Let me give you a quick example from another business we work with, and you can tell me if it sounds relevant.';
+      }
+
+      lowerBot = botText.toLowerCase();
+    }
+  }
+
+  // Loop-guard: avoid repeating the exact same line twice in a row
   const lastAssistants = history.filter((m) => m.role === 'assistant').slice(-3);
   if (lastAssistants.length) {
     const newNorm = normalizeForLoop(botText);
@@ -1043,40 +1091,8 @@ export async function handleTurn({ userText, callState }) {
       (m) => normalizeForLoop(m.content) === newNorm
     );
     if (repeated) {
-      if (profile.businessType) {
-        botText =
-          `Got it, that helps. For your ${profile.businessType}, would you like me to give you a quick example ` +
-          'of how MyBizPal would handle your calls, or go straight to booking a short demo with an advisor?';
-      } else {
-        botText =
-          'Got it, that helps. Would you like a quick plain-English overview of how MyBizPal works, ' +
-          'or an example of how it is helping another business?';
-      }
-    }
-  }
-
-  let lowerBot = botText.toLowerCase();
-
-  // Pain-aware fix for the "are you mainly just curious..." line
-  const userHasPain =
-    behaviour.painPointsMentioned ||
-    /miss(ed)?|lost|slipping through|slip through|too busy|overwhelmed|too many calls|appointments?/.test(
-      userLower
-    );
-
-  if (/are you mainly just curious about how mybizpal works/i.test(lowerBot)) {
-    if (userHasPain) {
-      if (profile.businessType) {
-        botText =
-          `Got it, that does sound frustrating when things slip through because you're busy. ` +
-          `For your ${profile.businessType}, MyBizPal can pick up calls 24/7, handle enquiries and lock in appointments even when you're tied up. ` +
-          'Would you like me to walk you through how that would look in practice, or go straight to booking a quick demo call to see it live?';
-      } else {
-        botText =
-          'Got it, that does sound frustrating when things slip through because you are busy. ' +
-          'MyBizPal can pick up calls 24/7, handle enquiries and lock in appointments even when you are tied up. ' +
-          'Would you like me to walk you through how that would look for your business, or go straight to booking a quick demo call to see it live?';
-      }
+      botText =
+        'Got it, that helps. Let me take what you have just said and show you how MyBizPal could actually handle more of those calls for you, instead of just talking about it in theory.';
       lowerBot = botText.toLowerCase();
     }
   }
@@ -1111,7 +1127,6 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // NEW: fix "what would you like to chat about" after they already shared pain/goal
   if (/what would you like to chat about\??/.test(lowerBot)) {
     if (profile.businessType) {
       botText = botText.replace(
@@ -1123,28 +1138,6 @@ export async function handleTurn({ userText, callState }) {
         /alright,?\s*thanks for that\.?\s*what would you like to chat about\??\s*now\??/i,
         'Alright, that helps. Would you like me to explain how MyBizPal could handle more of those calls for you, or would you prefer to book a quick call with an advisor?'
       );
-    }
-    lowerBot = botText.toLowerCase();
-  }
-
-  // ---------- STRONG "EXPLAIN MYBIZPAL" OVERRIDE ----------
-
-  const wantsExplanation =
-    /what is mybizpal|what is it\??|how does it work|how it works|how this works|explain (it|this|mybizpal)|tell me more|overview of mybizpal|what do you guys do/i.test(
-      userLower
-    );
-
-  if (wantsExplanation) {
-    if (profile.businessType) {
-      botText =
-        `Of course. MyBizPal gives you an always-on agent like me for your ${profile.businessType} – ` +
-        'it answers your calls 24/7, handles enquiries, answers common questions and turns more of those calls into real bookings in your calendar. ' +
-        'Out of curiosity, how are you handling your calls at the moment?';
-    } else {
-      botText =
-        'Sure. MyBizPal gives you an always-on agent like me for your business – ' +
-        'it answers your calls 24/7, handles enquiries, answers common questions and turns more of those calls into real bookings in your calendar. ' +
-        'Out of curiosity, how are you handling your calls at the moment?';
     }
     lowerBot = botText.toLowerCase();
   }
@@ -1161,9 +1154,9 @@ export async function handleTurn({ userText, callState }) {
     /\b(ok bye|bye|goodbye|cheers,? bye)\b/.test(userLower);
 
   if (!endByPhrase && /^\s*no\s*$/i.test(userLower)) {
-    const lastAssistForNo = [...history].slice().reverse()
+    const lastAssistant = [...history].slice().reverse()
       .find((m) => m.role === 'assistant');
-    if (lastAssistForNo && /anything else i can help/i.test(lastAssistForNo.content.toLowerCase())) {
+    if (lastAssistant && /anything else i can help/i.test(lastAssistant.content.toLowerCase())) {
       endByPhrase = true;
     }
   }
@@ -1183,13 +1176,6 @@ export async function handleTurn({ userText, callState }) {
   // ---------- SALES SAFETY NET (KEEP QUESTION) ----------
 
   if (!shouldEnd) {
-    const askedWhatDo =
-      /what.*(you (guys )?do|do you do|you offer)/i.test(userLower) ||
-      /what is mybizpal/i.test(userLower) ||
-      /what is this/i.test(userLower) ||
-      /enquir(e|ing) (about|regarding) your services/i.test(userLower) ||
-      /check(ing)? your services/i.test(userLower);
-
     if (askedWhatDo && !/[?？！]/.test(botText)) {
       botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
       if (!profile.businessType) {
