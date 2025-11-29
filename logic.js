@@ -713,7 +713,8 @@ export async function handleTurn({ userText, callState }) {
           capture.nameStage = 'initial';
         }
       } else {
-        replyText = `Lovely, ${proper}.`;
+        // CHAT: keep the flow going after capturing the name
+        replyText = `Lovely, ${proper}. What are you most curious about with MyBizPal right now?`;
         capture.pendingConfirm = null;
         capture.nameStage = 'confirmed';
       }
@@ -961,6 +962,19 @@ export async function handleTurn({ userText, callState }) {
     completion.choices?.[0]?.message?.content?.trim() ||
     'Alright, thanks for that. How can I help you now?';
 
+  // SPECIAL FIX: replace "How can I help you now?" with a more guided question
+  if (/how can i help you now\??/i.test(botText)) {
+    if (profile.businessType) {
+      botText =
+        `Alright, thanks for sharing that. Are you mainly just curious about how MyBizPal could support your ${profile.businessType}, ` +
+        'or are you thinking ahead for when you start taking more calls?';
+    } else {
+      botText =
+        'Alright, thanks for sharing that. Are you mainly just curious about how MyBizPal works, ' +
+        'or are you thinking ahead to when you might want something like this for your business?';
+    }
+  }
+
   // ---------- POST-PROCESSING ----------
 
   // Normalise em dashes and multi-dots
@@ -969,6 +983,15 @@ export async function handleTurn({ userText, callState }) {
 
   // Turn " - " mid-sentence into a comma
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
+
+  // EXTRA SAFETY: in chat, strip "digit by digit" / "slowly"
+  if (isChat) {
+    botText = botText
+      .replace(/,\s*(digit by digit|slowly)/gi, '')
+      .replace(/\b(digit by digit|slowly)\b/gi, '')
+      .replace(/\s\s+/g, ' ')
+      .trim();
+  }
 
   if (botText.length > 260) {
     const cut = botText.slice(0, 260);
