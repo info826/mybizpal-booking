@@ -178,7 +178,7 @@ app.post('/whatsapp/inbound', async (req, res) => {
   const bodyRaw = req.body.Body || '';
 
   const fromPhone = fromRaw.replace(/^whatsapp:/, '');
-  const text = bodyRaw.trim();
+  const text = (bodyRaw || '').trim();
   const lower = text.toLowerCase();
 
   console.log('📩 Incoming WhatsApp message', {
@@ -187,122 +187,182 @@ app.post('/whatsapp/inbound', async (req, res) => {
     body: bodyRaw,
   });
 
-  // Load or initialise session for this phone
-  let session =
-    getSessionForPhone(fromPhone) || {
-      history: [],
-      lastChannel: 'whatsapp',
-      profile: {},
-    };
-
   const msgTwiml = new twilio.twiml.MessagingResponse();
   const reply = msgTwiml.message();
 
-  if (!fromPhone) {
+  if (!fromPhone || !text) {
     reply.body(
-      "Hi, it's Gabriel from MyBizPal. I couldn't see your phone number properly — could you try again or call me instead?"
+      "Hi, it's Gabriel from MyBizPal. I couldn't quite see your number or message properly — could you try again?"
     );
     res.type('text/xml').send(msgTwiml.toString());
     return;
   }
 
-  // Record user message into history
-  session.history.push({
-    at: new Date().toISOString(),
-    channel: 'whatsapp',
-    from: 'user',
-    text,
-  });
+  // ---- LIGHTWEIGHT INTENT DETECTION ----
+  const isRescheduleIntent =
+    /\bresched/i.test(lower) ||
+    /re-?schedule/.test(lower) ||
+    /move (my|the)? (booking|appointment|meeting)/.test(lower) ||
+    /change (the )?(time|day|date)/.test(lower) ||
+    /another time/.test(lower) ||
+    /different time/.test(lower) ||
+    /amend (my|the)? (booking|appointment|meeting)/.test(lower);
 
-  // --- CALL ME FLOW ---
-  if (lower.includes('call me')) {
-    if (twilioClient && TWILIO_NUMBER) {
-      try {
-        await twilioClient.calls.create({
-          to: fromPhone,
-          from: TWILIO_NUMBER,
-          url: `${PUBLIC_BASE_URL || ''}/twilio/voice`,
-        });
+  const isCancelIntent =
+    /\bcancel\b/.test(lower) ||
+    /can't make/.test(lower) ||
+    /cannot make/.test(lower) ||
+    /won't be able to make/.test(lower) ||
+    /don'?t want to attend/.test(lower) ||
+    /do not want to attend/.test(lower) ||
+    /don'?t think this is for me/.test(lower) ||
+    /this isn'?t for me/.test(lower) ||
+    /call it off/.test(lower);
+
+  const isCallMeIntent =
+    /call me/.test(lower) ||
+    /give me a call/.test(lower) ||
+    /ring me/.test(lower) ||
+    /phone me/.test(lower) ||
+    /can you call/.test(lower) ||
+    /could you call/.test(lower);
+
+  // --- RESCHEDULE FLOW (priority over cancel if both appear) ---
+  if (isRescheduleIntent) {
+    try {
+      const existing = await cancelLatestUpcomingEventForPhone(fromPhone);
+
+      if (existing) {
+        const startRaw =
+          existing.start?.dateTime || existing.start?.date || '';
+        let niceTime = startRaw;
+        if (startRaw) {
+          const d = new Date(startRaw);
+          niceTime = d.toLocaleString('en-GB', {
+            weekday: 'long',
+            day: 'numeric',
+            month: 'short',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+        }
+
         reply.body(
-          "Got it — I'm calling you now. Just pick up and I'll continue where we left off."
+          `No problem at all — I’ve cancelled your MyBizPal consultation that was booked for ${niceTime}.\n\nWhen would you like to move it to instead? You can say something like “Wednesday at 10am” or “next Thursday afternoon”.`
         );
-      } catch (err) {
-        console.error('❌ Error creating outbound call from WhatsApp:', err);
+      } else {
         reply.body(
-          "I tried to call you but something went wrong with the phone system. A human will check it shortly."
+          "I couldn’t see an upcoming booking under this WhatsApp number, but I can still help you set one up. What day and time would usually work best for you?"
         );
       }
-    } else {
+    } catch (err) {
+      console.error('❌ Error handling WhatsApp reschedule:', err);
       reply.body(
-        "I’d love to call you, but the phone system isn’t fully configured yet. Please try again later or use the booking link on mybizpal.ai."
+        "I tried to adjust your booking but something went a bit wrong on my side. A human will double-check it and confirm, but if you like you can also rebook any time at mybizpal.ai."
       );
     }
-
-    // Save session and respond
-    session.lastChannel = 'whatsapp';
-    session.lastUpdated = new Date().toISOString();
-    saveSessionForPhone(fromPhone, session);
 
     res.type('text/xml').send(msgTwiml.toString());
     return;
   }
 
   // --- CANCEL FLOW ---
-  if (lower.includes('cancel')) {
+  if (isCancelIntent) {
     try {
       const cancelledEvent = await cancelLatestUpcomingEventForPhone(fromPhone);
 
       if (cancelledEvent) {
-        const start =
+        const startRaw =
           cancelledEvent.start?.dateTime || cancelledEvent.start?.date || '';
+        let niceTime = startRaw;
+        if (startRaw) {
+          const d = new Date(startRaw);
+          niceTime = d.toLocaleString('en-GB', {
+            weekday: 'long',
+            day: 'numeric',
+            month: 'short',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+        }
+
         reply.body(
-          `No problem — your upcoming MyBizPal consultation has been cancelled.\n\nPrevious time: ${start}\n\nIf you change your mind, you can always book again any time at mybizpal.ai.`
+          `Oh, okay — no worries at all. I’ve cancelled your MyBizPal consultation that was booked for ${niceTime}.\n\nIf you ever change your mind, just send me a message here or book again at mybizpal.ai.`
         );
       } else {
         reply.body(
-          "I couldn't find any upcoming booking under this WhatsApp number. If you booked with a different phone, just reply here with that number or use the booking link on mybizpal.ai."
+          "All good — I couldn’t find any upcoming booking under this WhatsApp number, so there’s nothing to cancel.\n\nIf you did book with a different number or email, just let me know which one and I’ll check that instead."
         );
       }
     } catch (err) {
       console.error('❌ Error cancelling via WhatsApp:', err);
       reply.body(
-        "Something went wrong while trying to cancel your booking. A human will take a look and confirm it for you shortly."
+        "Something went a bit wrong while I was trying to cancel that. A human will double-check and confirm it for you shortly."
       );
     }
 
-    session.lastIntent = 'cancel';
-    session.lastChannel = 'whatsapp';
-    session.lastUpdated = new Date().toISOString();
-    saveSessionForPhone(fromPhone, session);
+    res.type('text/xml').send(msgTwiml.toString());
+    return;
+  }
+
+  // --- CALL ME FLOW ---
+  if (isCallMeIntent) {
+    try {
+      const baseUrl =
+        PUBLIC_BASE_URL ||
+        `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers.host}`;
+
+      if (twilioClient && TWILIO_NUMBER) {
+        await twilioClient.calls.create({
+          to: fromPhone,
+          from: TWILIO_NUMBER,
+          url: `${baseUrl}/twilio/voice`,
+        });
+
+        reply.body(
+          "Got it — I’ll give you a quick call on this number now. If it doesn’t ring in the next minute, just send me another message."
+        );
+      } else {
+        console.warn(
+          '⚠️ Cannot place outbound call from WhatsApp: missing TWILIO_NUMBER or Twilio client'
+        );
+        reply.body(
+          "I’d love to ring you, but I don’t have my outbound number set up properly yet. For now, you can call the MyBizPal line directly and I’ll pick up there."
+        );
+      }
+    } catch (err) {
+      console.error('❌ Error starting outbound call from WhatsApp:', err);
+      reply.body(
+        "I tried to ring you but something went wrong on my side. Could you try calling the MyBizPal number directly instead?"
+      );
+    }
 
     res.type('text/xml').send(msgTwiml.toString());
     return;
   }
 
-  // --- RESCHEDULE FLOW (for now: explain + ask them to pick a new time manually) ---
-  if (lower.includes('resched')) {
+  // --- DEFAULT: FULL GABRIEL BRAIN OVER WHATSAPP ---
+  try {
+    const callState = {
+      callerNumber: fromPhone,
+      channel: 'whatsapp',
+    };
+
+    const { text: replyText } = await handleTurn({
+      userText: text,
+      callState,
+    });
+
     reply.body(
-      "Got it — you’d like to reschedule.\n\nRight now I can cancel your existing booking and you can pick a new time via the booking page on mybizpal.ai.\n\nIf you’d like me to cancel the current one first, just reply with the word *cancel*."
+      replyText ||
+        "Got you — could you tell me a bit more about what you’re looking for?"
     );
-
-    session.lastIntent = 'reschedule';
-    session.lastChannel = 'whatsapp';
-    session.lastUpdated = new Date().toISOString();
-    saveSessionForPhone(fromPhone, session);
-
-    res.type('text/xml').send(msgTwiml.toString());
-    return;
+  } catch (err) {
+    console.error('❌ Error in WhatsApp -> handleTurn:', err);
+    reply.body(
+      "Sorry, something went a bit funny on my side there. Could you try that again in a slightly different way?"
+    );
   }
-
-  // --- DEFAULT FALLBACK ---
-  reply.body(
-    "Hi, you’re chatting with Gabriel, the MyBizPal AI agent 🤖.\n\nFor now I can help with:\n• *cancel* – cancel your upcoming booking\n• *reschedule* – I’ll help you clear the current slot so you can pick a new one\n• *call me* – I’ll give you a call on this number\n\nJust reply with one of those keywords."
-  );
-
-  session.lastIntent = 'help';
-  session.lastChannel = 'whatsapp';
-  session.lastUpdated = new Date().toISOString();
-  saveSessionForPhone(fromPhone, session);
 
   res.type('text/xml').send(msgTwiml.toString());
 });
