@@ -338,6 +338,7 @@ async function sendWhatsAppText({ to, body }) {
 
 // ------------ PUBLIC API ------------
 
+// 1) Confirmation when booking is created by the agent
 export async function sendConfirmationAndReminders({ to, startISO, name }) {
   if (!twilioClient || !to) {
     console.warn('Messaging not sent — missing Twilio client or recipient');
@@ -367,44 +368,10 @@ export async function sendConfirmationAndReminders({ to, startISO, name }) {
     await sendSmsMessage({ to: e164, body });
   }
 
-  // 3) Best-effort in-memory reminders (may not fire if server sleeps)
-  const startMs = new Date(startISO).getTime();
-  const nowMs = Date.now();
-
-  const reminderTimes = [
-    startMs - 24 * 60 * 60 * 1000, // 24h
-    startMs - 60 * 60 * 1000,      // 60m
-  ];
-
-  for (const fireAt of reminderTimes) {
-    const delay = fireAt - nowMs;
-    if (delay > 0 && delay < 7 * 24 * 60 * 60 * 1000) {
-      setTimeout(async () => {
-        try {
-          const bodyRem = buildReminderText({ startISO });
-
-          if (usedWhatsApp && WHATSAPP_FROM_NUMBER) {
-            // Try WhatsApp reminder first
-            const ok = await sendWhatsAppText({
-              to: e164,
-              body: bodyRem,
-            });
-            if (!ok) {
-              await sendSmsMessage({ to: e164, body: bodyRem });
-            }
-          } else {
-            // SMS-only path
-            await sendSmsMessage({ to: e164, body: bodyRem });
-          }
-        } catch (e) {
-          console.error('Reminder send error:', e?.message || e);
-        }
-      }, delay);
-    }
-  }
+  // ⏰ Reminders are now handled by the separate reminderWorker cron job.
 }
 
-// NEW: send cancellation notice (WhatsApp text preferred, then SMS)
+// 2) Cancellation notice (WhatsApp text preferred, then SMS)
 export async function sendCancellationNotice({ to, startISO, name }) {
   if (!twilioClient || !to) {
     console.warn('Cancellation notice not sent — missing Twilio client or recipient');
@@ -429,7 +396,7 @@ export async function sendCancellationNotice({ to, startISO, name }) {
   }
 }
 
-// NEW: send reschedule notice (WhatsApp text preferred, then SMS)
+// 3) Reschedule notice (WhatsApp text preferred, then SMS)
 export async function sendRescheduleNotice({ to, oldStartISO, newStartISO, name }) {
   if (!twilioClient || !to) {
     console.warn('Reschedule notice not sent — missing Twilio client or recipient');
@@ -454,7 +421,7 @@ export async function sendRescheduleNotice({ to, oldStartISO, newStartISO, name 
   }
 }
 
-// NEW: helper used by the reminder worker
+// 4) Helper used by the reminder worker for 24h / 60m messages
 export async function sendReminderMessage({ to, startISO, name, label }) {
   if (!twilioClient || !to) {
     console.warn(`[${label}] Reminder not sent — missing Twilio client or recipient`);
