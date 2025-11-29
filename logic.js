@@ -47,9 +47,10 @@ function ensureBehaviourState(callState) {
 function ensureProfile(callState) {
   if (!callState.profile) {
     callState.profile = {
-      businessType: null,  // e.g. "clinic", "plumbing company"
-      location: null,      // e.g. "London", "Manchester"
-      notes: [],           // free-form short facts if we want later
+      businessType: null,      // e.g. "clinic", "plumbing company"
+      hasBusiness: 'unknown',  // 'unknown' | 'yes' | 'no'
+      location: null,          // e.g. "London", "Manchester"
+      notes: [],               // free-form short facts if we want later
     };
   }
   return callState.profile;
@@ -217,6 +218,16 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
   const trimmed = (safeUserText || '').trim();
   if (!trimmed) return;
 
+  const lower = trimmed.toLowerCase();
+
+  // Detect explicit "I don't run a business / I'm just enquiring" etc.
+  const noBizRegex =
+    /i (don['’]?t|do not) run a business|i (don['’]?t|do not) have a business|no business|not a business owner|just (looking|curious|enquiring|having a look)|i'?m just enquiring/;
+  if (noBizRegex.test(lower)) {
+    profile.hasBusiness = 'no';
+    profile.businessType = null;
+  }
+
   const lastAssistant = [...history].slice().reverse()
     .find((m) => m.role === 'assistant');
   if (!lastAssistant) return;
@@ -229,6 +240,9 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
     /what (kind|type|sort) of business/.test(la)
   ) {
     profile.businessType = trimmed;
+    if (profile.hasBusiness !== 'no') {
+      profile.hasBusiness = 'yes';
+    }
   }
 
   // Location: "where are you based / calling from / located"
@@ -294,6 +308,7 @@ Current behavioural signals (for you, Gabriel, not to be read out):
 Known caller profile (from this and previous conversations — do NOT read this out):
 - First name: ${name || 'unknown'}
 - Business type: ${profile.businessType || 'unknown'}
+- Has business: ${profile.hasBusiness || 'unknown'}
 - Location: ${profile.location || 'unknown'}
 `.trim();
 
@@ -315,6 +330,7 @@ ${profileSummary}
 CORE MEMORY RULES (CRITICAL)
 - Assume the conversation history you see is accurate. If a question has already been clearly answered in the history, do NOT ask it again.
 - If the business type is known (e.g. "clinic"), NEVER ask "what kind of business are you running?" again. Instead, reuse it naturally: "for your clinic".
+- If the caller has said they do NOT run a business (hasBusiness = 'no'), do NOT keep asking what kind of business they run. Treat them as someone who is curious or planning ahead.
 - If the name is known, NEVER ask "what's your name?" again in this conversation.
 - If location is already known, don't ask "where are you based?" again unless the caller directly invites you to.
 - Only ask for missing information when it is genuinely needed to move the conversation forward.
@@ -482,7 +498,7 @@ Use the behavioural summary to adapt:
     - “If this worked the way you wanted, what would ‘great’ look like for you?”
 - If BOOKING READINESS is medium/high:
   - Move towards booking confidently:
-    - “Sounds like this is important to fix — shall we book a quick session with a MyBizPal expert so we can map it out properly for your business?”
+    - “Sounds like this is important to fix — shall we book a quick session with a MyBizPal expert so we can map this out properly for your business?”
 
 BOOKING BEHAVIOUR (MON–FRI, 9:00–17:00 ONLY)
 - If they want to book, guide them smoothly into a consultation or demo.
@@ -987,7 +1003,7 @@ export async function handleTurn({ userText, callState }) {
 
   let botText =
     completion.choices?.[0]?.message?.content?.trim() ||
-    'Got it — let me know what you’d like to focus on.';
+    'Alright — how can I help you today?';
 
   // HARD CAP on response length in characters as a safety net
   if (botText.length > 260) {
@@ -1004,6 +1020,23 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
+  // --- Output normaliser: remove robotic stock phrases ---
+  let cleaned = botText.trim();
+
+  // Strip leading "Got it —" style openers
+  cleaned = cleaned.replace(/^got it\s*[—\-:,]?\s*/i, '').trimStart();
+
+  // Remove "let me know what you'd like to focus on"
+  cleaned = cleaned
+    .replace(/let me know what you('?|’)?d like to focus on\.?/i, '')
+    .trim();
+
+  if (!cleaned) {
+    cleaned = 'Alright.';
+  }
+
+  botText = cleaned;
+
   // --- De-duplicate annoying phrases like "how can I help" second time onwards ---
   const lowerBot = botText.toLowerCase();
 
@@ -1016,7 +1049,7 @@ export async function handleTurn({ userText, callState }) {
     if (alreadyAsked) {
       botText = botText.replace(
         /how can i help( you)?\??/i,
-        'what would you like to focus on?'
+        'what would you like to explore?'
       );
     }
   }
@@ -1056,10 +1089,13 @@ export async function handleTurn({ userText, callState }) {
     if (askedWhatDo && !/[?？！]/.test(botText)) {
       // Normalise ending punctuation
       botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
-      if (!profile.businessType) {
-        botText += ' Out of curiosity, what kind of business are you running at the moment?';
-      } else {
+
+      if (profile.hasBusiness === 'yes' && profile.businessType) {
         botText += ` Out of curiosity, what tends to happen with calls in your ${profile.businessType}?`;
+      } else if (profile.hasBusiness === 'no') {
+        botText += ' Are you mainly just curious how this works, or thinking about starting something later on?';
+      } else {
+        botText += ' Out of curiosity, are you running a business at the moment, or just exploring ideas for the future?';
       }
     }
 
@@ -1073,12 +1109,15 @@ export async function handleTurn({ userText, callState }) {
       ) {
         extraQ =
           ' What day usually works best for you for a quick 20–30 minute call?';
-      } else if (!profile.businessType) {
+      } else if (profile.hasBusiness === 'yes' && profile.businessType) {
         extraQ =
-          ' What kind of business are you running at the moment?';
+          ` What would you like to improve first with your ${profile.businessType}?`;
+      } else if (profile.hasBusiness === 'no') {
+        extraQ =
+          ' Are you just curious how this could work, or do you have a future project in mind?';
       } else {
         extraQ =
-          ` What would you like to focus on with your ${profile.businessType} right now?`;
+          ' What kind of business are you running at the moment, if any?';
       }
 
       botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
