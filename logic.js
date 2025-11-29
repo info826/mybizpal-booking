@@ -43,7 +43,7 @@ function ensureBehaviourState(callState) {
   return callState.behaviour;
 }
 
-// NEW: simple caller profile (longer-term context beyond a single call)
+// simple caller profile (longer-term context beyond a single call)
 function ensureProfile(callState) {
   if (!callState.profile) {
     callState.profile = {
@@ -399,9 +399,9 @@ EARLY NAME CAPTURE (VERY IMPORTANT)
 - Expect full names like “Gabriel De Ornelas” — that’s fine. Use the FIRST name when speaking to them.
 - Use natural, human phrasing:
   - “By the way, what’s your name?”
-  - “Before I dive in — who am I speaking with?”
-  - “Got you — and what’s your name, by the way?”
-  - “Ah fair enough — and your name is?”
+  - “Before I dive in, who am I speaking with?”
+  - “Got you, and what’s your name, by the way?”
+  - “Ah fair enough, and your name is?”
 - NEVER say “for verification”.
 - When you learn the name, USE IT naturally throughout the call to build rapport.
 - Never overuse their name; sprinkle it:
@@ -418,7 +418,7 @@ NAME SPELLING BACKUP (WHEN YOU'RE NOT SURE)
 - Flow for the name:
   1) Ask for their name and listen.
   2) Repeat it back once and ask “Did I get that right?”.
-  3) If they say “no” the first time, ask them to SAY it again: “No worries — what should I call you instead? Just your first name.”
+  3) If they say “no” the first time, ask them to SAY it again: “No worries, what should I call you instead? Just your first name.”
   4) If they say “no” again, then ask them to SPELL it letter by letter.
   5) Turn the spelling into the proper name, repeat it once, ask “Did I get that right?”, then KEEP it for the rest of the call.
 - Only ask them to spell it after they’ve already said it and corrected you once.
@@ -456,18 +456,18 @@ WHEN THEY ASK “WHAT DO YOU DO?” OR “WHAT IS THIS?”
 - First, give a SIMPLE, SHORT explanation (1–2 sentences max) of what MyBizPal does for businesses.
 - Immediately follow with ONE qualifying question, such as:
   - “Out of curiosity, how are you handling calls at the moment?”
-  - or “How are you handling your calls at the moment — is it you, a receptionist, or a call centre?”
+  - or “How are you handling your calls at the moment, is it you, a receptionist, or a call centre?”
 - Never end a “what do you do” explanation without a question that helps you qualify the caller and move towards a booking.
 - Keep control: you explain briefly, then YOU ask the next question — don’t wait for them to drive the conversation.
 
 POSITIONING VS COMPETITORS
 - Many tools are just basic AI receptionists that only pick up the phone.
 - MyBizPal is a full lead-capture and sales assistant:
-  - It doesn’t just answer; it drives the conversation towards a booked call or sale.
+  - It doesn’t just answer, it drives the conversation towards a booked call or sale.
   - It qualifies leads so humans spend time only on serious prospects.
   - It can be customised to each business (scripts, offers, pricing style, tone of voice).
 - When explaining this, keep it simple and concrete:
-  - “We don’t just take messages — we turn more of your calls into real bookings.”
+  - “We don’t just take messages, we turn more of your calls into real bookings.”
 
 DEMONSTRATING THE PRODUCT (VERY IMPORTANT)
 - When the moment is right, tell them:
@@ -498,7 +498,7 @@ Use the behavioural summary to adapt:
     - “If this worked the way you wanted, what would ‘great’ look like for you?”
 - If BOOKING READINESS is medium/high:
   - Move towards booking confidently:
-    - “Sounds like this is important to fix — shall we book a quick session with a MyBizPal expert so we can map this out properly for your business?”
+    - “Sounds like this is important to fix, shall we book a quick session with a MyBizPal expert so we can map it out properly for your business?”
 
 BOOKING BEHAVIOUR (MON–FRI, 9:00–17:00 ONLY)
 - If they want to book, guide them smoothly into a consultation or demo.
@@ -526,7 +526,7 @@ CONTACT DETAILS (EXTREMELY IMPORTANT)
   - Say something like: “Can I grab your best email, slowly, all in one go?”
   - Let them finish the whole thing before you reply.
   - When repeating it, spell it out clearly with “at” and “dot”, and don’t rush:
-    - “So that’s four two two seven four three five j w at gmail dot com — is that right?”
+    - “So that’s four two two seven four three five j w at gmail dot com, is that right?”
   - Confirm correctness before continuing.
   - If they say they do NOT have an email address, say “No worries at all” and continue the booking WITHOUT email.
   - Do NOT keep asking again and again if the system already shows a valid email and they confirmed it.
@@ -534,7 +534,7 @@ CONTACT DETAILS (EXTREMELY IMPORTANT)
 HUMOUR & CHUCKLES
 - Use quick, light humour when appropriate:
   - “Let’s sort this quicker than you can make a cuppa.”
-  - “No stress at all — I’ve got you.”
+  - “No stress at all, I’ve got you.”
   - “Phones always ring at the worst possible time, don’t they?”
 - You may occasionally include very small human touches like:
   - “heh”, “haha”, “(laughs softly)”
@@ -548,7 +548,7 @@ PUSHING TOWARDS A BOOKING (WITHOUT BEING PUSHY)
   - “On a scale of 1 to 10, how important is fixing this for you?”
   - “If we could solve that reliably, would that be worth exploring properly on a short call?”
 - When it makes sense, be confidently directive:
-  - “Let’s do this — I’ll book you a quick session with a MyBizPal expert so we can map this out properly. What day works best for you?”
+  - “Let’s do this, I’ll book you a quick session with a MyBizPal expert so we can map this out properly. What day works best for you?”
 
 CALL ENDING + HANGUP TRIGGER
 - Before ending, always ask: “Is there anything else I can help with today?”
@@ -639,7 +639,7 @@ export async function handleTurn({ userText, callState }) {
       // Stage flow: initial -> repeat -> spell -> then stop pestering
       if (capture.nameStage === 'initial') {
         const replyText =
-          "No worries — what should I call you instead? Just your first name.";
+          "No worries, what should I call you instead? Just your first name.";
 
         capture.mode = 'name';
         capture.pendingConfirm = null;
@@ -653,7 +653,7 @@ export async function handleTurn({ userText, callState }) {
         return { text: replyText, shouldEnd: false };
       } else if (capture.nameStage === 'repeat') {
         const replyText =
-          "Got it — could you spell your first name for me, letter by letter?";
+          "Got it, could you spell your first name for me, letter by letter?";
 
         capture.mode = 'name';
         capture.pendingConfirm = null;
@@ -694,7 +694,7 @@ export async function handleTurn({ userText, callState }) {
       callState.booking.email = null;
 
       const replyText =
-        'No problem at all — let’s do that email again. Could you give me your full email address, slowly, all in one go from the very start?';
+        'No problem at all, let’s do that email again. Could you give me your full email address, slowly, all in one go from the very start?';
 
       capture.mode = 'email';
       capture.buffer = '';
@@ -795,7 +795,7 @@ export async function handleTurn({ userText, callState }) {
     // If they talk a lot but we still don't see a clear name, gently re-ask
     if (safeUserText.length > 40) {
       const replyText =
-        "Sorry, I didn’t quite catch your name — could you just say your first name nice and clearly?";
+        "Sorry, I didn’t quite catch your name, could you just say your first name nice and clearly?";
 
       capture.mode = 'name';
       capture.nameAttempts += 1;
@@ -863,7 +863,7 @@ export async function handleTurn({ userText, callState }) {
       const variants = [
         "I’m not sure I caught that cleanly. Could you repeat your mobile slowly for me, digit by digit, from the start?",
         "Sorry, I don’t think I got that whole number. Can you give me the full mobile again, nice and slowly, from the beginning?",
-        "Let’s try that one more time — full mobile number, digit by digit, from the very start.",
+        "Let’s try that one more time, full mobile number, digit by digit, from the very start.",
       ];
       const idx = capture.phoneAttempts % variants.length;
       const replyText = variants[idx];
@@ -895,7 +895,7 @@ export async function handleTurn({ userText, callState }) {
       callState.booking.email = null;
 
       const replyText =
-        'No worries at all — we can still book you in without an email address.';
+        'No worries at all, we can still book you in without an email address.';
 
       capture.mode = 'none';
       capture.buffer = '';
@@ -938,7 +938,7 @@ export async function handleTurn({ userText, callState }) {
       const variants = [
         "I might’ve mangled that email a bit. Could you give it to me one more time, slowly, all in one go?",
         "Sorry, I don’t think I caught the full email. Could you say the whole address again from the very beginning, nice and slowly?",
-        "Let’s try that again — full email address, from the start, slowly and all in one go.",
+        "Let’s try that again, full email address from the start, slowly and all in one go.",
       ];
       const idx = capture.emailAttempts % variants.length;
       const replyText = variants[idx];
@@ -973,12 +973,36 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // 5) Update booking state with latest utterance (phone/email/time/earliest)
-  //    (We no longer try to auto-guess names here — name is handled via explicit capture.)
   await updateBookingStateFromUtterance({
     userText: safeUserText,
     callState,
     timezone: TZ,
   });
+
+  // 5.5) SPECIAL: handle "what do you do / your services" with a hand-crafted answer
+  const asksWhatWeDo =
+    /what (do you guys do|do you do|are you|is this)|what.*your services|enquir(e|ing) about your services|what do you offer|what services do you offer|what exactly do you do/i.test(
+      userLower
+    );
+
+  if (asksWhatWeDo) {
+    let reply =
+      'Nice one, happy to explain. MyBizPal sets up a 24/7 phone agent like me that answers calls, handles common questions and books appointments straight into your calendar. ';
+
+    if (profile.hasBusiness === 'yes' && profile.businessType) {
+      reply += `For a ${profile.businessType}, it mainly means fewer missed enquiries and more proper booked calls without you chasing the phone. `;
+      reply += 'Out of curiosity, what tends to happen at the moment when you miss a call?';
+    } else if (profile.hasBusiness === 'no') {
+      reply += 'Are you mainly just curious how it works, or thinking about starting something in the future?';
+    } else {
+      reply += 'Are you running a business right now, or just exploring ideas for later on?';
+    }
+
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: reply });
+    snapshotSessionFromCall(callState);
+    return { text: reply, shouldEnd: false };
+  }
 
   // 6) Build GPT-5.1 prompt
   const systemPrompt = buildSystemPrompt(callState);
@@ -1003,7 +1027,7 @@ export async function handleTurn({ userText, callState }) {
 
   let botText =
     completion.choices?.[0]?.message?.content?.trim() ||
-    'Alright — how can I help you today?';
+    'Alright, how can I help you today?';
 
   // HARD CAP on response length in characters as a safety net
   if (botText.length > 260) {
@@ -1020,11 +1044,14 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // --- Output normaliser: remove robotic stock phrases ---
+  // --- Output normaliser: remove robotic stock phrases & odd punctuation ---
   let cleaned = botText.trim();
 
-  // Strip leading "Got it —" style openers
-  cleaned = cleaned.replace(/^got it\s*[—\-:,]?\s*/i, '').trimStart();
+  // Normalise em-dash / en-dash to comma space
+  cleaned = cleaned.replace(/\s[—–]\s/g, ', ');
+
+  // Strip leading "Got it," style openers
+  cleaned = cleaned.replace(/^got it[,:\-]?\s*/i, '').trimStart();
 
   // Remove "let me know what you'd like to focus on"
   cleaned = cleaned
@@ -1037,7 +1064,7 @@ export async function handleTurn({ userText, callState }) {
 
   botText = cleaned;
 
-  // --- De-duplicate annoying phrases like "how can I help" second time onwards ---
+  // --- De-duplicate annoying phrases like "how can I help" or "what would you like to explore" ---
   const lowerBot = botText.toLowerCase();
 
   if (/how can i help/.test(lowerBot)) {
@@ -1049,7 +1076,21 @@ export async function handleTurn({ userText, callState }) {
     if (alreadyAsked) {
       botText = botText.replace(
         /how can i help( you)?\??/i,
-        'what would you like to explore?'
+        'what would you like to know about MyBizPal?'
+      );
+    }
+  }
+
+  if (/what would you like to explore/.test(lowerBot)) {
+    const alreadyExplore = history.some(
+      (m) =>
+        m.role === 'assistant' &&
+        /what would you like to explore/.test(m.content.toLowerCase())
+    );
+    if (alreadyExplore) {
+      botText = botText.replace(
+        /what would you like to explore[^?]*\?/i,
+        'what would you like to know about our services?'
       );
     }
   }
@@ -1074,7 +1115,7 @@ export async function handleTurn({ userText, callState }) {
       !/bye|goodbye|speak soon|have a great day|have a good day/i.test(botText)
     ) {
       botText =
-        'No worries at all — thanks for calling MyBizPal, have a great day.';
+        'No worries at all, thanks for calling MyBizPal, have a great day.';
     }
   }
 
@@ -1085,9 +1126,9 @@ export async function handleTurn({ userText, callState }) {
       /what is mybizpal/i.test(userLower) ||
       /what is this/i.test(userLower);
 
-    // If they asked "what do you do" and Gabriel didn't ask a question, add a qualifier
     if (askedWhatDo && !/[?？！]/.test(botText)) {
-      // Normalise ending punctuation
+      // In this branch most "what do you do" is already handled above,
+      // so we just gently follow up if needed.
       botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
 
       if (profile.hasBusiness === 'yes' && profile.businessType) {
@@ -1095,7 +1136,7 @@ export async function handleTurn({ userText, callState }) {
       } else if (profile.hasBusiness === 'no') {
         botText += ' Are you mainly just curious how this works, or thinking about starting something later on?';
       } else {
-        botText += ' Out of curiosity, are you running a business at the moment, or just exploring ideas for the future?';
+        botText += ' Are you running a business at the moment, or just exploring ideas for the future?';
       }
     }
 
