@@ -173,7 +173,6 @@ function verbaliseEmail(email) {
 }
 
 // Name extractor used ONLY when we've just asked for their name.
-// Safer: avoids junk like "just", "business", "curious", etc.
 function extractNameFromUtterance(text) {
   if (!text) return null;
   const rawText = String(text).trim();
@@ -181,7 +180,6 @@ function extractNameFromUtterance(text) {
 
   const lower = rawText.toLowerCase();
 
-  // Words that should never become names
   const badNameWords = new Set([
     'hi', 'hello', 'hey', 'yes', 'yeah', 'yep', 'no', 'nope',
     'ok', 'okay', 'fine', 'good', 'perfect', 'thanks', 'thank',
@@ -190,7 +188,6 @@ function extractNameFromUtterance(text) {
     'nothing', 'something', 'anything', 'in', 'out', 'there',
   ]);
 
-  // 1) Explicit patterns: "my name is X", "i'm X", "this is X"
   const explicitMatch = lower.match(
     /(my name is|i am|i'm|im|this is|it's|its)\s+([a-z][a-z' -]{1,30})/
   );
@@ -204,7 +201,6 @@ function extractNameFromUtterance(text) {
     }
   }
 
-  // 2) Fallback to shared helper from parsing.js (good at "I'm Gabriel", "Gabriel here")
   const raw = extractName(rawText);
   if (!raw) return null;
 
@@ -219,12 +215,8 @@ function extractNameFromUtterance(text) {
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();
 }
 
-// ---------- STRONG "THIS IS WRONG" DETECTOR FOR CONFIRMATIONS ----------
-//
-// Treat phrases like:
-//   "not correct", "now it's not correct", "that's wrong", "it's wrong",
-//   "incorrect", "isn't right", "doesn't look right", "not quite right"
-// as a NO for confirmation purposes – even if there's a "yes" in the sentence.
+// ---------- STRONG "THIS IS WRONG" DETECTOR ----------
+
 function hasStrongNoCorrection(text) {
   if (!text) return false;
   const t = String(text).toLowerCase();
@@ -236,8 +228,6 @@ function hasStrongNoCorrection(text) {
 
 // ---------- PROFILE UPDATER FROM USER REPLIES ----------
 
-// If the last assistant message asked for a specific fact (business, location),
-// store the user's answer into profile so we don't ask again.
 function updateProfileFromUserReply({ safeUserText, history, profile }) {
   const trimmed = (safeUserText || '').trim();
   if (!trimmed) return;
@@ -248,7 +238,6 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 
   const la = lastAssistant.content.toLowerCase();
 
-  // Business type: questions like "what kind of business..." etc.
   if (
     !profile.businessType &&
     /what (kind|type|sort) of business/.test(la)
@@ -256,7 +245,6 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
     profile.businessType = trimmed;
   }
 
-  // Location: "where are you based / calling from / located"
   if (
     !profile.location &&
     /(where are you (calling from|based)|where.*located)/.test(la)
@@ -409,37 +397,6 @@ WHEN THEY ASK "WHAT DO YOU DO?" OR "WHAT DO YOU OFFER?"
 - Never reply with "How can I help?" or another question without first explaining what MyBizPal offers.
 - Always link your question to what they said (for example if they say "I am enquiring about your services", answer and then ask "How are you handling calls at the moment?").
 
-Use this BEHAVIOUR SNAPSHOT to adapt your tone and strategy:
-- If rapport is low (0–1): be extra warm, simple, and reassuring. Avoid jokes until they relax.
-- If rapport is medium (2–3): you can use light humour and a bit more personality.
-- If rapport is high (4–5): you can be more relaxed, playful, and direct about booking the consultation.
-- If interest is "low": ask open questions to discover problems and goals before pitching.
-- If interest is "medium": connect their situation to clear benefits, then invite them to a call.
-- If interest is "high": move efficiently towards locking in a time for the consultation.
-- If scepticism is "medium" or "high": give specific, concrete examples and social proof; avoid hype.
-- If painPointsMentioned is true: keep looping back to those pains and show how MyBizPal fixes them.
-- If decisionPower is "influencer": give them phrasing they can repeat to their boss or partner.
-- If bookingReadiness is "low": focus on education and clarity first, then gently test for next steps.
-- If bookingReadiness is "medium": invite them to a call but do not be pushy; handle objections calmly.
-- If bookingReadiness is "high": confidently propose a specific time and move the call towards booking.
-
-RESPONSE LENGTH (CRITICAL)
-- Usually 1–2 short sentences.
-- Maximum 3 short sentences if really needed.
-- Never go into long speeches or big monologues.
-- For simple questions, answer with one clear sentence.
-
-ALWAYS KEEP THE CONVERSATION MOVING
-- Almost every reply (except your final goodbye) should end with a QUESTION or a clear next step.
-- Do not leave the caller hanging in silence.
-- Ask one focused question at a time to keep them talking and to qualify them.
-- Use soft, natural questions:
-  - "How are you handling that at the moment?"
-  - "What happens if nothing changes there?"
-  - "Is this something you want to fix sooner rather than later?"
-- Avoid repeating the same question or phrase ("how can I help?", "got you", "no worries at all") more than once or twice in a call.
-- Always respond directly to what they just said before you ask your next question.
-
 IMPORTANT BRAND AND IDENTITY RULES
 - Never say "AI assistant". You are just "Gabriel from MyBizPal".
 - You may explain that the caller can have an "AI agent like me" for their business.
@@ -533,9 +490,6 @@ DEMONSTRATING THE PRODUCT
   - "You can actually have an agent just like me for your business."
   - "What you are hearing now is the type of agent we set up for clients."
 
-SALES / QUALIFICATION FLOW (BEHAVIOUR ENGINE)
-Use the behavioural summary to adapt as before.
-
 BOOKING BEHAVIOUR (MON–FRI, 9:00–17:00 ONLY)
 - If they want to book, guide them smoothly into a consultation or demo.
 - You can collect details in any order: name, mobile, email, time.
@@ -560,12 +514,10 @@ and amazes callers with how human he sounds, while keeping replies short and cle
 // ---------- MAIN TURN HANDLER ----------
 
 export async function handleTurn({ userText, callState }) {
-  // Make sure containers exist before we load memory
   ensureHistory(callState);
   ensureBehaviourState(callState);
   ensureProfile(callState);
 
-  // Hydrate from long-term memory (based on phone) if available
   loadSessionForCallIfNeeded(callState);
 
   const history = ensureHistory(callState);
@@ -573,7 +525,6 @@ export async function handleTurn({ userText, callState }) {
   const profile = ensureProfile(callState);
   const { isChat, isVoice } = getChannelInfo(callState);
 
-  // Ensure capture state for phone/email/name
   if (!callState.capture) {
     callState.capture = {
       mode: 'none',          // 'none' | 'phone' | 'email' | 'name'
@@ -590,10 +541,7 @@ export async function handleTurn({ userText, callState }) {
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
 
-  // Update profile from this reply based on what we asked previously
   updateProfileFromUserReply({ safeUserText, history, profile });
-
-  // ---- Light Autonomous Behaviour Updates ----
 
   if (/thank(s| you)/.test(userLower)) {
     behaviour.rapportLevel = Number(behaviour.rapportLevel || 0) + 1;
@@ -620,7 +568,8 @@ export async function handleTurn({ userText, callState }) {
     behaviour.decisionPower = 'decision-maker';
   }
 
-  // 0) HANDLE PENDING CONFIRMATIONS (NAME / EMAIL / PHONE) BEFORE ANYTHING ELSE
+  // ---------- PENDING CONFIRMATIONS ----------
+
   if (capture.pendingConfirm === 'name') {
     const strongNo = hasStrongNoCorrection(safeUserText);
 
@@ -723,7 +672,8 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // 1) NAME CAPTURE
+  // ---------- NAME CAPTURE ----------
+
   if (capture.mode === 'name') {
     const raw = safeUserText || '';
 
@@ -795,7 +745,8 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // 2) PHONE CAPTURE
+  // ---------- PHONE CAPTURE ----------
+
   if (capture.mode === 'phone') {
     capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
 
@@ -882,7 +833,8 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // 3) EMAIL CAPTURE
+  // ---------- EMAIL CAPTURE ----------
+
   if (capture.mode === 'email') {
     if (
       /no email|don.?t have an email|do not have an email|i don.?t use email/.test(
@@ -965,7 +917,8 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // 4) System-level booking actions first (yes/no on suggested time, etc.)
+  // ---------- SYSTEM-LEVEL BOOKING ACTIONS ----------
+
   const systemAction = await handleSystemActionsFirst({
     userText: safeUserText,
     callState,
@@ -979,23 +932,21 @@ export async function handleTurn({ userText, callState }) {
     return { text: systemAction.replyText, shouldEnd: false };
   }
 
-  // 5) Update booking state with latest utterance
   await updateBookingStateFromUtterance({
     userText: safeUserText,
     callState,
     timezone: TZ,
   });
 
-  // 6) Build GPT-5.1 prompt
+  // ---------- OPENAI CALL ----------
+
   const systemPrompt = buildSystemPrompt(callState);
 
   const messages = [{ role: 'system', content: systemPrompt }];
-
   const recent = history.slice(-12);
   for (const msg of recent) {
     messages.push({ role: msg.role, content: msg.content });
   }
-
   messages.push({ role: 'user', content: safeUserText });
 
   const completion = await openai.chat.completions.create({
@@ -1010,9 +961,13 @@ export async function handleTurn({ userText, callState }) {
     completion.choices?.[0]?.message?.content?.trim() ||
     'Alright, thanks for that. How can I help you now?';
 
-  // Normalise em dashes to simple punctuation and clean spacing
+  // ---------- POST-PROCESSING ----------
+
+  // Normalise em dashes and multi-dots
   botText = botText.replace(/—/g, '-');
-  // Turn " - " mid-sentence into a comma (looks more human in chat)
+  botText = botText.replace(/\.{2,}/g, '.');
+
+  // Turn " - " mid-sentence into a comma
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
   if (botText.length > 260) {
@@ -1054,16 +1009,33 @@ export async function handleTurn({ userText, callState }) {
     );
     if (alreadyAskedExplore) {
       botText = botText.replace(
-        /alright,?\s*what would you like to explore( today)?\??/i,
-        'since you mentioned our services, I can give you a quick overview or focus on one area. Which would you prefer?'
+        /alright,?\s*thanks for that\.?\s*what would you like to explore( today)?\??/i,
+        'Since you mentioned our services, I can give you a quick overview or focus on one area. Which would you prefer?'
       );
       lowerBot = botText.toLowerCase();
     }
   }
 
+  // NEW: fix "what would you like to chat about" after they already shared pain/goal
+  if (/what would you like to chat about\??/.test(lowerBot)) {
+    if (profile.businessType) {
+      botText = botText.replace(
+        /alright,?\s*thanks for that\.?\s*what would you like to chat about\??\s*now\??/i,
+        `Alright, that helps. Would you like to see how MyBizPal could handle more of the calls for your ${profile.businessType}, or would you prefer to book a quick call with an advisor to map it out properly?`
+      );
+    } else {
+      botText = botText.replace(
+        /alright,?\s*thanks for that\.?\s*what would you like to chat about\??\s*now\??/i,
+        'Alright, that helps. Would you like me to explain how MyBizPal could handle more of those calls for you, or would you prefer to book a quick call with an advisor?'
+      );
+    }
+    lowerBot = botText.toLowerCase();
+  }
+
   const bookingState = callState.booking || {};
 
-  // 8) Detect end-of-call intent from the caller
+  // ---------- END-OF-CALL DETECTION ----------
+
   let shouldEnd = false;
 
   let endByPhrase =
@@ -1073,7 +1045,6 @@ export async function handleTurn({ userText, callState }) {
     /\b(no thanks|no thank you|i'?m good|i am good)\b/.test(userLower) ||
     /\b(ok bye|bye|goodbye|cheers,? bye)\b/.test(userLower);
 
-  // Special case: user just replies "no" after "anything else I can help with"
   if (!endByPhrase && /^\s*no\s*$/i.test(userLower)) {
     const lastAssistant = [...history].slice().reverse()
       .find((m) => m.role === 'assistant');
@@ -1094,7 +1065,8 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // 9) SALES SAFETY NET: always end with a question when the call is ongoing
+  // ---------- SALES SAFETY NET (KEEP QUESTION) ----------
+
   if (!shouldEnd) {
     const askedWhatDo =
       /what.*(you (guys )?do|do you do|you offer)/i.test(userLower) ||
