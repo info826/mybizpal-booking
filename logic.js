@@ -234,15 +234,20 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 
   const lastAssistant = [...history].slice().reverse()
     .find((m) => m.role === 'assistant');
-  if (!lastAssistant) return;
 
-  const la = lastAssistant.content.toLowerCase();
+  const la = lastAssistant ? lastAssistant.content.toLowerCase() : '';
 
-  if (
-    !profile.businessType &&
-    /what (kind|type|sort) of business/.test(la)
-  ) {
+  // If we just asked "what kind of business", store their reply as businessType
+  if (!profile.businessType && /what (kind|type|sort) of business/.test(la)) {
     profile.businessType = trimmed;
+  }
+
+  // Simple direct detection of common business words even if we didn't ask
+  if (!profile.businessType) {
+    const bizMatch = trimmed.match(/\b(clinic|salon|spa|practice|restaurant|cafe|shop|store)\b/i);
+    if (bizMatch && bizMatch[1]) {
+      profile.businessType = bizMatch[1].toLowerCase();
+    }
   }
 
   if (
@@ -366,11 +371,10 @@ FIRST IMPRESSION RULES (IMPORTANT)
   - If timeOfDay = "morning": start with "Good morning".
   - If timeOfDay = "afternoon": start with "Good afternoon".
   - If timeOfDay = "evening" or "late": start with "Good evening".
-- First line should be something like:
-  - "Good afternoon, I am Gabriel from MyBizPal. How are you doing today?"
-- Follow that with one simple opener:
-  - "What has brought you through to me today?" or
-  - "How can I help you today?"
+- Your very first line should normally be:
+  - "Good afternoon, I'm Gabriel from MyBizPal. How can I help you today?"
+  (swap "afternoon" for the correct time of day).
+- Do NOT immediately stack another question like "What has brought you through to me today?" on top of that. One clear "How can I help you today?" is enough.
 
 CORE MEMORY RULES (CRITICAL)
 - Assume the conversation history you see is accurate. If a question has already been clearly answered in the history, do NOT ask it again.
@@ -565,7 +569,7 @@ export async function handleTurn({ userText, callState }) {
     behaviour.interestLevel = 'low';
   }
 
-  if (/miss(ed)? calls?|lost leads?|too many calls|overwhelmed/.test(userLower)) {
+  if (/miss(ed)? calls?|lost leads?|too many calls|overwhelmed|slipping through|slip through/.test(userLower)) {
     behaviour.painPointsMentioned = true;
     if (behaviour.interestLevel === 'unknown') {
       behaviour.interestLevel = 'medium';
@@ -1052,6 +1056,30 @@ export async function handleTurn({ userText, callState }) {
   }
 
   let lowerBot = botText.toLowerCase();
+
+  // Pain-aware fix for the "are you mainly just curious..." line
+  const userHasPain =
+    behaviour.painPointsMentioned ||
+    /miss(ed)?|lost|slipping through|slip through|too busy|overwhelmed|too many calls|appointments?/.test(
+      userLower
+    );
+
+  if (/are you mainly just curious about how mybizpal works/i.test(lowerBot)) {
+    if (userHasPain) {
+      if (profile.businessType) {
+        botText =
+          `Got it, that does sound frustrating when things slip through because you're busy. ` +
+          `For your ${profile.businessType}, MyBizPal can pick up calls 24/7, handle enquiries and lock in appointments even when you're tied up. ` +
+          'Would you like me to walk you through how that would look in practice, or go straight to booking a quick demo call to see it live?';
+      } else {
+        botText =
+          'Got it, that does sound frustrating when things slip through because you are busy. ' +
+          'MyBizPal can pick up calls 24/7, handle enquiries and lock in appointments even when you are tied up. ' +
+          'Would you like me to walk you through how that would look for your business, or go straight to booking a quick demo call to see it live?';
+      }
+      lowerBot = botText.toLowerCase();
+    }
+  }
 
   if (/how can i help/.test(lowerBot)) {
     const alreadyAsked = history.some(
