@@ -22,6 +22,13 @@ const openai = new OpenAI({
 
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
+// small helper for more natural variation
+function pickRandom(arr) {
+  if (!arr || !arr.length) return '';
+  const idx = Math.floor(Math.random() * arr.length);
+  return arr[idx];
+}
+
 // ---------- BASIC STATE HELPERS ----------
 
 function ensureHistory(callState) {
@@ -549,6 +556,12 @@ export async function handleTurn({ userText, callState }) {
     behaviour.rapportLevel = Math.min(5, behaviour.rapportLevel);
   }
 
+  const userWasCurious =
+    /\bcurious\b/.test(userLower) || /just (being )?curious/.test(userLower);
+  if (userWasCurious && behaviour.interestLevel === 'unknown') {
+    behaviour.interestLevel = 'medium';
+  }
+
   // expanded pain-point detection (missed / lost / wasted / "loosing" leads)
   if (
     /miss(ed)? calls?|lost leads?|losing leads?|loosing leads?|wasting leads?/.test(
@@ -968,7 +981,7 @@ export async function handleTurn({ userText, callState }) {
 
   let botText =
     completion.choices?.[0]?.message?.content?.trim() ||
-    'Alright, thanks for that. Let me think about the best way I can help – what is the main thing you want to improve with your calls right now?';
+    'Got you. In simple terms, MyBizPal gives your business an agent like me who answers calls 24/7, handles questions and books people into your calendar. Would you like a quick example of how that would work for you?';
 
   // ---------- POST-PROCESSING ----------
 
@@ -1005,19 +1018,55 @@ export async function handleTurn({ userText, callState }) {
   let lowerBot = botText.toLowerCase();
   const bookingState = callState.booking || {};
 
-  // helper to pivot from probing question into a value + next-step reply
+  // --------- SALES PITCH HELPERS ----------
+
   function buildPainToPitchReply() {
-    if (profile.businessType) {
-      return `Got it, that really helps. So in your ${profile.businessType} it sounds like some calls and leads are slipping through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for you, or shall we look at times for a short consultation with one of the team?`;
-    }
-    return 'Got it, that really helps. It sounds like some calls and leads are slipping through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for your business, or shall we look at times for a short consultation with one of the team?';
+    const bt = profile.businessType;
+    const opening = pickRandom([
+      'Got it, that really helps.',
+      'Alright, that makes sense.',
+      'Okay, that gives me a good picture.',
+    ]);
+
+    const middle = bt
+      ? ` In your ${bt} it is easy for calls and leads to slip through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities.`
+      : ' It is very easy for calls and leads to slip through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities.';
+
+    const closing = pickRandom([
+      ' Would you like a quick plain-English overview of how that would work for you?',
+      ' Do you want me to walk you through how that could plug into your setup?',
+      ' Would it help if I gave you a quick example of how that works in practice?',
+    ]);
+
+    return (opening + middle + closing).trim();
+  }
+
+  function buildCuriousReply() {
+    const bt = profile.businessType;
+    const opener = pickRandom([
+      'Love that, curiosity is where it starts.',
+      'Nice, I like curious.',
+      'Fair enough, a bit of curiosity is always good.',
+    ]);
+
+    const middle = bt
+      ? ` In simple terms, MyBizPal gives your ${bt} an agent like me who answers calls 24/7, handles questions and books people straight into your calendar so you can focus on the work, not the phone.`
+      : ' In simple terms, MyBizPal gives your business an agent like me who answers calls 24/7, handles questions and books people straight into your calendar so you can focus on the work, not the phone.';
+
+    const closing = pickRandom([
+      ' Would you like a quick example of how that would work for you, or are you just testing me out today?',
+      ' Do you want me to run through a quick example, or are you mainly just checking how I sound?',
+      ' Shall I give you a short example of how this works in real life, or are you just having a play with me today?',
+    ]);
+
+    return (opener + middle + closing).trim();
   }
 
   // If GPT outputs exactly the same thing as last time, break the loop with a pitch
   const lastAssistantMsg = [...history].slice().reverse()
     .find((m) => m.role === 'assistant');
   if (lastAssistantMsg && lastAssistantMsg.content.trim() === botText.trim()) {
-    botText = buildPainToPitchReply();
+    botText = userWasCurious ? buildCuriousReply() : buildPainToPitchReply();
     lowerBot = botText.toLowerCase();
   }
 
@@ -1040,21 +1089,15 @@ export async function handleTurn({ userText, callState }) {
       (m) => m.role === 'assistant' && curiousPattern.test(m.content.toLowerCase())
     );
     if (alreadyAskedCurious || behaviour.painPointsMentioned || bookingState.intent === 'wants_booking') {
-      botText = buildPainToPitchReply();
+      botText = userWasCurious ? buildCuriousReply() : buildPainToPitchReply();
       lowerBot = botText.toLowerCase();
     }
   }
 
-  // HARD BLOCK: do not ask the "main thing you want to improve" question more than once
+  // HARD BAN: replace the "main thing you want to improve" line with something more natural
   const improveQuestionText = 'what is the main thing you want to improve with your calls right now';
-  const timesAskedImprove = history.filter(
-    (m) =>
-      m.role === 'assistant' &&
-      m.content.toLowerCase().includes(improveQuestionText)
-  ).length;
-
-  if (lowerBot.includes(improveQuestionText) && timesAskedImprove >= 1) {
-    botText = buildPainToPitchReply();
+  if (lowerBot.includes(improveQuestionText)) {
+    botText = userWasCurious ? buildCuriousReply() : buildPainToPitchReply();
     lowerBot = botText.toLowerCase();
   }
 
