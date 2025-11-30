@@ -32,30 +32,29 @@ function ensureHistory(callState) {
 function ensureBehaviourState(callState) {
   if (!callState.behaviour) {
     callState.behaviour = {
-      rapportLevel: 0,            // how warm/comfortable the caller feels
-      interestLevel: 'unknown',   // unknown | low | medium | high
-      scepticismLevel: 'unknown', // unknown | low | medium | high
-      painPointsMentioned: false, // have they mentioned real problems?
-      decisionPower: 'unknown',   // unknown | decision-maker | influencer
-      bookingReadiness: 'unknown' // unknown | low | medium | high
+      rapportLevel: 0,
+      interestLevel: 'unknown',
+      scepticismLevel: 'unknown',
+      painPointsMentioned: false,
+      decisionPower: 'unknown',
+      bookingReadiness: 'unknown',
     };
   }
   return callState.behaviour;
 }
 
-// simple caller profile (longer-term context beyond a single call)
 function ensureProfile(callState) {
   if (!callState.profile) {
     callState.profile = {
-      businessType: null,  // e.g. "clinic", "plumbing company"
-      location: null,      // e.g. "London", "Manchester"
-      notes: [],           // free-form short facts if we want later
+      businessType: null,
+      location: null,
+      notes: [],
     };
   }
   return callState.profile;
 }
 
-// ---------- CHANNEL HELPER: VOICE vs CHAT ----------
+// ---------- CHANNEL HELPER ----------
 
 function getChannelInfo(callState) {
   const channel =
@@ -79,7 +78,7 @@ function getChannelInfo(callState) {
   };
 }
 
-// ---------- SIMPLE LONG-TERM MEMORY (PER PHONE, ~30 DAYS) ----------
+// ---------- SIMPLE LONG-TERM MEMORY ----------
 
 function getPhoneKeyFromState(callState) {
   const bookingPhone = callState.booking?.phone;
@@ -93,9 +92,7 @@ function loadSessionForCallIfNeeded(callState) {
   const phoneKey = getPhoneKeyFromState(callState);
   if (!phoneKey) return null;
 
-  if (callState._sessionLoadedForPhone === phoneKey) {
-    return phoneKey;
-  }
+  if (callState._sessionLoadedForPhone === phoneKey) return phoneKey;
 
   const saved = getSessionForPhone(phoneKey);
   if (saved) {
@@ -141,7 +138,7 @@ function snapshotSessionFromCall(callState) {
   saveSessionForPhone(phoneKey, snapshot);
 }
 
-// ---------- VERBALISERS FOR CLEAR READ-BACK (VOICE) ----------
+// ---------- VERBALISERS ----------
 
 function verbalisePhone(number) {
   if (!number) return '';
@@ -165,7 +162,8 @@ function verbaliseEmail(email) {
   return `${localSpoken} at ${domainSpoken}`;
 }
 
-// Name extractor used ONLY when we've just asked for their name.
+// ---------- NAME EXTRACTION ----------
+
 function extractNameFromUtterance(text) {
   if (!text) return null;
   const rawText = String(text).trim();
@@ -208,18 +206,15 @@ function extractNameFromUtterance(text) {
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();
 }
 
-// ---------- STRONG "THIS IS WRONG" DETECTOR ----------
+// ---------- UTILITIES ----------
 
 function hasStrongNoCorrection(text) {
   if (!text) return false;
   const t = String(text).toLowerCase();
-
   return /\b(not\s+(correct|right)|isn'?t\s+(correct|right)|wrong|incorrect|doesn'?t\s+look\s+right|not\s+quite\s+right)\b/.test(
     t
   );
 }
-
-// ---------- PROFILE UPDATER FROM USER REPLIES ----------
 
 function updateProfileFromUserReply({ safeUserText, history, profile }) {
   const trimmed = (safeUserText || '').trim();
@@ -231,22 +226,15 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 
   const la = lastAssistant.content.toLowerCase();
 
-  if (
-    !profile.businessType &&
-    /what (kind|type|sort) of business/.test(la)
-  ) {
+  if (!profile.businessType && /what (kind|type|sort) of business/.test(la)) {
     profile.businessType = trimmed;
   }
 
-  if (
-    !profile.location &&
-    /(where are you (calling from|based)|where.*located)/.test(la)
-  ) {
+  if (!profile.location && /(where are you (calling from|based)|where.*located)/.test(la)) {
     profile.location = trimmed;
   }
 }
 
-// small helper for loop detection
 function normalizeForLoop(text) {
   if (!text) return '';
   return String(text)
@@ -314,12 +302,12 @@ Current booking context:
 
   const behaviourSummary = `
 Current behavioural signals (for you, Gabriel, not to be read out):
-- Rapport level: ${behaviour.rapportLevel ?? 0} (higher = warmer, more relaxed)
-- Interest level: ${behaviour.interestLevel || 'unknown'}  (unknown | low | medium | high)
-- Scepticism level: ${behaviour.scepticismLevel || 'unknown'} (unknown | low | medium | high)
+- Rapport level: ${behaviour.rapportLevel ?? 0}
+- Interest level: ${behaviour.interestLevel || 'unknown'}
+- Scepticism level: ${behaviour.scepticismLevel || 'unknown'}
 - Pain points mentioned: ${behaviour.painPointsMentioned ? 'yes' : 'no'}
-- Decision power: ${behaviour.decisionPower || 'unknown'}  (decision-maker | influencer | unknown)
-- Booking readiness: ${behaviour.bookingReadiness || 'unknown'} (unknown | low | medium | high)
+- Decision power: ${behaviour.decisionPower || 'unknown'}
+- Booking readiness: ${behaviour.bookingReadiness || 'unknown'}
 `.trim();
 
   const profileSummary = `
@@ -336,13 +324,7 @@ Channel information:
 `.trim();
 
   return `
-You are "Gabriel" from MyBizPal, a smart, confident, very human-sounding British sales professional
-who speaks like a real person.
-
-You sound human with natural rhythm, modulation and emotion:
-- You vary your pace slightly when emphasising important points.
-- You react to what the caller says with small, natural interjections ("oh wow", "nice", "fair enough").
-- You never sound robotic or scripted.
+You are "Gabriel" from MyBizPal, a smart, confident, very human-sounding British sales professional.
 
 ${bookingSummary}
 
@@ -352,164 +334,74 @@ ${profileSummary}
 
 ${channelSummary}
 
-FIRST IMPRESSION RULES (IMPORTANT)
-- On a first conversation with a new caller (very short history), always introduce yourself clearly.
-- Use a time-of-day greeting based on the time label:
-  - If timeOfDay = "morning": start with "Good morning".
-  - If timeOfDay = "afternoon": start with "Good afternoon".
-  - If timeOfDay = "evening" or "late": start with "Good evening".
+FIRST IMPRESSION RULES
+- On a first conversation with a new caller, introduce yourself clearly.
+- Use the time-of-day greeting:
+  - morning / afternoon / evening / late.
 - Your first line should normally be:
-  - "Good afternoon, I'm Gabriel from MyBizPal. How can I help you today?"
-  (swap "afternoon" for the correct time of day).
-- Do NOT stack multiple openers like "How are you doing today?" + "What has brought you through to me today?". One clear "How can I help you today?" is enough.
+  "Good ${timeOfDay}, I'm Gabriel from MyBizPal. How can I help you today?"
+- Do NOT stack multiple openers like "How are you doing" + "What brought you here". One clear "How can I help you today?" is enough.
 
-CORE MEMORY RULES (CRITICAL)
-- Assume the conversation history you see is accurate. If a question has already been clearly answered in the history, do NOT ask it again.
-- If the business type is known (for example "clinic"), NEVER ask "what kind of business are you running?" again. Instead, reuse it naturally: "for your clinic".
-- If the name is known, NEVER ask "what is your name?" again in this conversation.
-- If location is already known, do not ask "where are you based?" again unless the caller directly invites you to.
-- Only ask for missing information when it is genuinely needed to move the conversation forward.
+CORE MEMORY RULES
+- If something is already answered in the history, do NOT ask it again.
+- If business type is known, reuse it. Do not ask what kind of business again.
+- If name is known, do not ask again; just use it naturally.
+- Ask for missing info only when needed to move forward.
 
-QUESTION DISCIPLINE (VERY IMPORTANT)
-- Ask ONLY ONE clear question per reply.
-- Do NOT put two unrelated questions in the same message (for example, do not ask about both their business type and their name in one reply).
-- If you need both pieces of information, ask them one at a time over separate replies.
+QUESTION DISCIPLINE
+- One clear question per reply.
+- Do not mix unrelated questions in the same message.
 
-CHANNEL-SPECIFIC BEHAVIOUR
-- If this is a voice call:
-  - When you ask for a mobile number you can say "digit by digit".
-  - When you ask for an email you can say "slowly" and you must repeat it back to confirm.
-  - Repeat numbers and emails back clearly and ask "Does that sound right?".
-- If this is chat, WhatsApp, SMS or any written channel:
-  - Do NOT say "digit by digit".
-  - Do NOT say "slowly".
-  - Do NOT repeat the mobile number or email back to them unless they ask.
-  - Simply acknowledge and move on with the next step.
-  - Example: "Perfect, thanks. I have that noted."
+CHANNEL-SPECIFIC
+- Voice: you can say "digit by digit" or "slowly" for phone/email and repeat back.
+- Chat/WhatsApp: never say "digit by digit" or "slowly". Do not repeat their number/email back; just acknowledge and move on.
 
-EARLY CONVERSATION FLOW (KEEP IT CALM)
-- At the start, do not launch into a long pitch unless they explicitly ask "what do you do?" or "explain it to me".
-- First, respond briefly to what they said and ask ONE focused question (for example "what kind of business do you run?" or "how are you handling calls right now?").
-- Keep your tone confident but calm, not over-excited.
+WHEN THEY ASK "WHAT DO YOU DO" / "SERVICES"
+- First: directly answer in 1–2 sentences what MyBizPal does.
+- Then: follow with ONE qualifying question linked to what they said.
+- Never respond only with "How can I help?" if they asked what you do.
 
-WHEN THEY ASK "WHAT DO YOU DO?" OR "WHAT DO YOU OFFER?"
-- This is a hard rule:
-  1) First, directly answer the question in one or two short sentences explaining what MyBizPal does for businesses.
-  2) Then, immediately follow with ONE qualifying question.
-- Never reply with "How can I help?" or another question without first explaining what MyBizPal offers.
-- Always link your question to what they said (for example if they say "I am enquiring about your services", answer and then ask "How are you handling calls at the moment?").
+BRAND & PERSONALITY
+- You are "Gabriel from MyBizPal", not an AI assistant. You can say that you are a realistic AI assistant created by MyBizPal only if someone asks if you are a real person.
+- You can say they can have "an AI agent like me".
+- Use "MyBizPal" (not MyBizPal.ai). Mention the site as "mybizpal dot ai".
+- Tone: confident, relaxed, slightly cheeky but professional.
+- Use British flavour: "brilliant", "no worries at all", "fair enough", "spot on", but vary language.
 
-IMPORTANT BRAND AND IDENTITY RULES
-- Never say "AI assistant". You are just "Gabriel from MyBizPal".
-- You may explain that the caller can have an "AI agent like me" for their business.
-- Refer to the company only as "MyBizPal", never "MyBizPal.ai".
-- Mention the website naturally when appropriate: "mybizpal dot ai".
+NAME CAPTURE
+- If name is unknown, ask within first 2–3 replies, but always add value first.
+- Use natural phrases like ("By the way, what is your name?") but vary language.
+- Once you know the name, sprinkle it, do not overuse it.
 
-OVERALL PERSONALITY
-- Snappy, confident, very human, very relaxed.
-- Use British phrasing like "brilliant", "no worries at all", "fair enough", "spot on" occasionally.
-- Treat any example phrases in these instructions as inspiration only. Vary your language and avoid starting lots of replies with the exact same word or sentence.
-- If you have already used a phrase like "brilliant", "no worries at all" or "fair enough" recently in this conversation, prefer a different expression next time.
-- You are friendly, warm, slightly cheeky, but never unprofessional.
-- Sound fully human: small hesitations are allowed ("hmm", "oh right", "okay so...", "ah fair enough", "let me think for a sec").
+CONTACT DETAILS
+- Ask for phone/email only when booking or sending something.
+- Never in the very first reply.
+- Chat: "What is your mobile number?" / "What is your best email address?" – no "slowly" or "digit by digit", no repeat back.
 
-EARLY NAME CAPTURE (VERY IMPORTANT)
-- If the context shows Name = "unknown", you MUST ask for their name within your first 2–3 replies.
-- But never open a reply only asking their name. Always give a bit of value first (respond to what they said), then naturally ask.
-- ONLY ask for their name if the context shows the name is unknown.
-- If you already know their name in this call, NEVER ask for it again. Just keep using it naturally.
-- If the system context ever provides a saved name for this caller, greet them by name without asking again.
-- Expect full names like "Gabriel De Ornelas". Use the first name when speaking to them.
-- Use natural, human phrasing:
-  - "By the way, what is your name?"
-  - "Before I dive in, who am I speaking with?"
-  - "Got you, and what is your name, by the way?"
-  - "Ah fair enough, and your name is?"
-- Never say "for verification".
-- When you learn the name, use it naturally throughout the call to build rapport.
-- Never overuse their name; sprinkle it:
-  - "Brilliant, [Name]."
-  - "Alright [Name], that makes sense."
-  - "Okay [Name], let us sort that out."
+LONGER-TERM CONTEXT
+- History may include earlier conversations from same phone.
+- You can say things like "nice to speak again" if it clearly fits.
 
-CONTACT DETAILS (EXTREMELY IMPORTANT)
-- Only ask for a phone number or email when:
-  - You are about to book a demo or consultation, or
-  - They ask you to send something (details, proposal, follow-up information).
-- Never ask for contact details in your very first reply.
+MYBIZPAL PITCH (SHORT)
+- Always-on agent like you that:
+  - answers calls 24/7
+  - handles enquiries and FAQs
+  - qualifies leads (budget, timeline, needs)
+  - books calls/appointments into their calendar
+  - sends confirmations/reminders by WhatsApp/SMS
+  - logs calls & transcripts.
+- Position vs simple reception tools: you do not just take messages, you drive bookings and qualified leads.
 
-- When asking for a phone number on a voice call:
-  - "What is your mobile number, digit by digit?"
-  - Let them speak the entire number before you reply.
-  - Understand "O" as zero.
-  - Repeat the full number back clearly once and ask if it is correct.
-- When asking for a phone number on chat/WhatsApp/SMS:
-  - "What is your mobile number?"
-  - Do not ask for "digit by digit" and do not repeat the number back.
+BOOKING BEHAVIOUR
+- If they want to book, collect: name, mobile, email, time.
+- Monday–Friday, 9:00–17:00 UK, 30-minute slots.
+- If earliest slot exists and they want "soonest" or "earliest", offer that first.
 
-- When asking for an email on a voice call:
-  - "Can I grab your best email, slowly, all in one go?"
-  - Let them say the whole thing, repeat it back with "at" and "dot" and confirm it.
-- When asking for an email on chat/WhatsApp/SMS:
-  - "What is your best email address?"
-  - Do not say "slowly" and do not repeat the email back. Simply thank them and move on.
-- If they say they do not have an email address, say "No worries at all" and continue the booking without email.
-- Do not keep asking for these details again and again if you already have them.
+CALL ENDING
+- Before finishing: ask "Is there anything else I can help with today?"
+- If they say no / that is all / thanks / goodbye, give a short warm sign-off and stop.
 
-LONGER-TERM CONTEXT AND MEMORY
-- The conversation history you see may include messages from earlier calls or chats with the same person (same phone number).
-- You can naturally acknowledge this with lines like "nice to speak again" or "last time you mentioned..." if it clearly matches the context.
-- Do not invent memories or details that are not present in the history.
-
-WHAT MYBIZPAL DOES (YOUR CORE PITCH)
-- MyBizPal is not just a basic call answering tool.
-- It gives businesses an always-on agent like you that:
-  - Answers calls 24/7 in a human way.
-  - Qualifies leads properly (budget, timeline, decision-maker, needs).
-  - Answers common questions (pricing, services, FAQs).
-  - Books calls or appointments straight into their calendar.
-  - Sends confirmations and reminders by WhatsApp or SMS.
-- It integrates with tools like:
-  - Google Calendar, Outlook, Calendly (for booking)
-  - WhatsApp and SMS (for confirmations and reminders)
-  - CRMs or spreadsheets (for lead tracking and follow-up).
-- It also gives owners visibility:
-  - Call logs, transcripts, who called, what they asked for, and what was booked.
-- When appropriate, invite them to visit the website:
-  "If you want to have a look later, you can hop on mybizpal dot ai."
-
-POSITIONING VS COMPETITORS
-- Many tools are just basic AI receptionists that only pick up the phone.
-- MyBizPal is a full lead capture and sales assistant:
-  - It does not just answer; it drives the conversation towards a booked call or sale.
-  - It qualifies leads so humans spend time only on serious prospects.
-  - It can be customised to each business (scripts, offers, pricing style, tone of voice).
-- When explaining this, keep it simple and concrete:
-  - "We do not just take messages, we turn more of your calls into real bookings."
-
-DEMONSTRATING THE PRODUCT
-- When the moment is right, tell them:
-  - "You can actually have an agent just like me for your business."
-  - "What you are hearing now is the type of agent we set up for clients."
-
-BOOKING BEHAVIOUR (MON–FRI, 9:00–17:00 ONLY)
-- If they want to book, guide them smoothly into a consultation or demo.
-- You can collect details in any order: name, mobile, email, time.
-- Bookings should be Monday to Friday, between 9am and 5pm UK time, in 30 minute slots.
-- If an earliest available slot exists and they ask for "earliest" or "soonest", offer that exact slot first.
-- If earliest slot exists, offer it clearly.
-- If they reject it, ask what day and time works better.
-
-CALL ENDING + HANGUP TRIGGER
-- Before ending, always ask: "Is there anything else I can help with today?"
-- If they say something like:
-  "No", "That is all", "No, that is everything", "Thanks", "Goodbye", "Speak soon", "Nothing else"
-  → give a short warm sign-off and then stop talking.
-  → The system will safely hang up the call.
-
-Overall vibe: an incredibly human, helpful, confident British voice
-who builds rapport quickly, uses the caller's name, sells naturally,
-and amazes callers with how human he sounds, while keeping replies short and clear.
+Overall: very human, helpful, confident, short clear replies, always moving towards either clarity or a booked demo when appropriate.
 `.trim();
 }
 
@@ -529,25 +421,25 @@ export async function handleTurn({ userText, callState }) {
 
   if (!callState.capture) {
     callState.capture = {
-      mode: 'none',          // 'none' | 'phone' | 'email' | 'name'
+      mode: 'none',
       buffer: '',
       emailAttempts: 0,
       phoneAttempts: 0,
       nameAttempts: 0,
-      nameStage: 'initial',  // 'initial' | 'repeat' | 'spell' | 'confirmed'
-      pendingConfirm: null,  // 'email' | 'phone' | 'name' | null
+      nameStage: 'initial',
+      pendingConfirm: null,
     };
   }
   const capture = callState.capture;
 
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
-
   const bookingState = callState.booking || {};
 
   updateProfileFromUserReply({ safeUserText, history, profile });
 
-  // behaviour tweaks
+  // --- behaviour signals ---
+
   if (/thank(s| you)/.test(userLower)) {
     behaviour.rapportLevel = Math.min(5, Number(behaviour.rapportLevel || 0) + 1);
   }
@@ -556,24 +448,19 @@ export async function handleTurn({ userText, callState }) {
     behaviour.interestLevel = 'low';
   }
 
-  if (/miss(ed)? calls?|lost leads?|too many calls|overwhelmed|slipping through|slip through/.test(userLower)) {
+  if (/miss(ed)? calls?|lost leads?|too many calls|slipping through|slip through|too busy|overwhelmed|appointments?/.test(userLower)) {
     behaviour.painPointsMentioned = true;
-    if (behaviour.interestLevel === 'unknown') {
-      behaviour.interestLevel = 'medium';
-    }
+    if (behaviour.interestLevel === 'unknown') behaviour.interestLevel = 'medium';
   }
 
   if (/how much|price|cost|expensive|too pricey/.test(userLower)) {
-    if (behaviour.scepticismLevel === 'unknown') {
-      behaviour.scepticismLevel = 'medium';
-    }
+    if (behaviour.scepticismLevel === 'unknown') behaviour.scepticismLevel = 'medium';
   }
 
   if (/i own|my business|i run|i'm the owner|i am the owner/.test(userLower)) {
     behaviour.decisionPower = 'decision-maker';
   }
 
-  // asked-about-services flag (used later for overrides & safety-net)
   const askedWhatDo =
     /what.*(you (guys )?do|do you do|you offer)/i.test(userLower) ||
     /what is mybizpal/i.test(userLower) ||
@@ -697,7 +584,7 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // ---------- NAME CAPTURE ----------
+  // ---------- NAME CAPTURE MODE ----------
 
   if (capture.mode === 'name') {
     const raw = safeUserText || '';
@@ -712,11 +599,7 @@ export async function handleTurn({ userText, callState }) {
     if (cleaned) {
       const parts = cleaned.split(' ').filter(Boolean);
 
-      if (
-        parts.length >= 2 &&
-        parts.length <= 12 &&
-        parts.every((p) => p.length === 1)
-      ) {
+      if (parts.length >= 2 && parts.length <= 12 && parts.every((p) => p.length === 1)) {
         candidate = parts.join('');
       } else {
         candidate = extractNameFromUtterance(raw);
@@ -734,9 +617,7 @@ export async function handleTurn({ userText, callState }) {
       if (isVoice) {
         replyText = `Lovely, ${proper}. Did I get that right?`;
         capture.pendingConfirm = 'name';
-        if (capture.nameStage === 'confirmed') {
-          capture.nameStage = 'initial';
-        }
+        if (capture.nameStage === 'confirmed') capture.nameStage = 'initial';
       } else {
         replyText = `Lovely, ${proper}.`;
         capture.pendingConfirm = null;
@@ -770,7 +651,7 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // ---------- PHONE CAPTURE ----------
+  // ---------- PHONE CAPTURE MODE ----------
 
   if (capture.mode === 'phone') {
     capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
@@ -858,7 +739,29 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // ---------- EMAIL CAPTURE ----------
+  // ---------- BACKUP DIRECT EMAIL CATCH ----------
+
+  if (capture.mode === 'none') {
+    const directEmail = extractEmailSmart(safeUserText);
+    if (directEmail) {
+      if (!callState.booking) callState.booking = {};
+      callState.booking.email = directEmail;
+
+      const replyText = 'Brilliant, thanks for that.';
+
+      capture.mode = 'none';
+      capture.buffer = '';
+      capture.emailAttempts = 0;
+      capture.pendingConfirm = null;
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+      snapshotSessionFromCall(callState);
+      return { text: replyText, shouldEnd: false };
+    }
+  }
+
+  // ---------- EMAIL CAPTURE MODE ----------
 
   if (capture.mode === 'email') {
     if (
@@ -986,9 +889,9 @@ export async function handleTurn({ userText, callState }) {
     completion.choices?.[0]?.message?.content?.trim() ||
     'Alright, thanks for that. How can I help you now?';
 
-  // ---------- HIGH-LEVEL OVERRIDES FOR SALES LOGIC ----------
+  // ---------- HIGH-LEVEL OVERRIDES ----------
 
-  // 1) Strong override when they directly ask about services / what MyBizPal does
+  // If they ask about services / what MyBizPal is, force the crisp pitch + call-handling question
   if (wantsExplanation) {
     if (profile.businessType) {
       botText =
@@ -1004,18 +907,20 @@ export async function handleTurn({ userText, callState }) {
 
   // ---------- POST-PROCESSING ----------
 
-  // Normalise em dashes and multi-dots
+  // Clean punctuation
   botText = botText.replace(/—/g, '-');
   botText = botText.replace(/\.{2,}/g, '.');
-
-  // Turn " - " mid-sentence into a comma
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
-  // extra: chat channel should not say "digit by digit" / "slowly"
+  // For chat, remove "digit by digit" / "slowly"
   if (isChat) {
     botText = botText
-      .replace(/,\s*(digit by digit|slowly)/gi, '')
-      .replace(/\b(digit by digit|slowly)\b/gi, '')
+      .replace(/,\s*digit by digit/gi, '')
+      .replace(/\bdigit by digit\b/gi, '')
+      .replace(/,\s*slowly/gi, '')
+      .replace(/\bslowly\b/gi, '')
+      .replace(/,\s*nice and slowly/gi, '')
+      .replace(/\bnice and slowly\b/gi, '')
       .replace(/\s\s+/g, ' ')
       .trim();
   }
@@ -1036,7 +941,7 @@ export async function handleTurn({ userText, callState }) {
 
   let lowerBot = botText.toLowerCase();
 
-  // 2) Fix the "are you mainly just curious..." line when they clearly shared a pain
+  // Fix the "are you mainly just curious" line when caller clearly has a pain
   if (/are you mainly just curious about how mybizpal works/i.test(lowerBot) && userHasPain) {
     if (profile.businessType) {
       botText =
@@ -1052,7 +957,7 @@ export async function handleTurn({ userText, callState }) {
     lowerBot = botText.toLowerCase();
   }
 
-  // 3) Handle follow-up when we already asked "overview or example?" and they chose one
+  // Handle when he previously asked "overview or example" and user replied
   if (/would you like a quick plain-english overview of how mybizpal works|plain-english overview of how mybizpal works/i.test(lowerBot)) {
     const lastAssistant = [...history].slice().reverse().find(
       (m) =>
@@ -1083,7 +988,7 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // Loop-guard: avoid repeating the exact same line twice in a row
+  // Loop-guard: avoid repeating same assistant line again and again
   const lastAssistants = history.filter((m) => m.role === 'assistant').slice(-3);
   if (lastAssistants.length) {
     const newNorm = normalizeForLoop(botText);
@@ -1091,10 +996,63 @@ export async function handleTurn({ userText, callState }) {
       (m) => normalizeForLoop(m.content) === newNorm
     );
     if (repeated) {
-      botText =
-        'Got it, that helps. Let me take what you have just said and show you how MyBizPal could actually handle more of those calls for you, instead of just talking about it in theory.';
+      const userMentionedTime =
+        /(monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow)/i.test(
+          userLower
+        ) ||
+        /\b\d{1,2}\s*(am|pm)\b/i.test(userLower);
+
+      if (
+        /what day usually works best for you for a quick 20-30 minute call\??/i.test(
+          lowerBot
+        ) &&
+        userMentionedTime
+      ) {
+        botText =
+          "Brilliant — before I lock that in, what is your best email address?";
+      } else {
+        botText =
+          'Alright, that gives me enough to work with. Let me show you how MyBizPal could take more of those calls off your plate.';
+      }
       lowerBot = botText.toLowerCase();
     }
+  }
+
+  // Avoid generic "How can I help you now?" immediately after asking about calls
+  const lastAssistantForHelp = [...history].slice().reverse().find(
+    (m) => m.role === 'assistant'
+  );
+  if (
+    /how can i help you now\??/i.test(lowerBot) &&
+    lastAssistantForHelp &&
+    /how are you handling your calls at the moment\??/i.test(
+      lastAssistantForHelp.content.toLowerCase()
+    )
+  ) {
+    if (profile.businessType) {
+      botText =
+        `Got you, so everything is on your shoulders at the moment for your ${profile.businessType}. That is common with a lot of owners I speak to. ` +
+        'When you are with a client or away from the phone, what usually happens to those calls – do they go to voicemail, or do people just ring off?';
+    } else {
+      botText =
+        'Got you, so everything is on your shoulders at the moment. That is common with a lot of owners I speak to. ' +
+        'When you are with a client or away from the phone, what usually happens to those calls – do they go to voicemail, or do people just ring off?';
+    }
+    lowerBot = botText.toLowerCase();
+  }
+
+  // Strip repeated self-introductions mid-conversation
+  if (
+    /i'?m gabriel from mybizpal/.test(lowerBot) &&
+    history.some((m) => m.role === 'assistant')
+  ) {
+    botText = botText.replace(
+      /good (morning|afternoon|evening|day)[^.]*?i'?m gabriel from mybizpal\.?\s*/i,
+      ''
+    );
+    botText = botText.replace(/i'?m gabriel from mybizpal\.?\s*/i, '');
+    botText = botText.replace(/^\s+/, '');
+    lowerBot = botText.toLowerCase();
   }
 
   if (/how can i help/.test(lowerBot)) {
@@ -1173,7 +1131,7 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // ---------- SALES SAFETY NET (KEEP QUESTION) ----------
+  // ---------- SALES SAFETY NET ----------
 
   if (!shouldEnd) {
     if (askedWhatDo && !/[?？！]/.test(botText)) {
@@ -1207,6 +1165,8 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
+  // ---------- CAPTURE TRIGGERS ----------
+
   history.push({ role: 'user', content: safeUserText });
   history.push({ role: 'assistant', content: botText });
 
@@ -1232,9 +1192,7 @@ export async function handleTurn({ userText, callState }) {
   ) {
     capture.mode = 'name';
     capture.buffer = '';
-    if (capture.nameStage === 'confirmed') {
-      capture.nameStage = 'initial';
-    }
+    if (capture.nameStage === 'confirmed') capture.nameStage = 'initial';
   } else if (
     /(what('| i)s|what is|can i grab|could i grab|may i grab|let me grab|can i take|could i take|may i take).*(mobile|phone number|your number|best number|contact number|cell number)/.test(
       lower
