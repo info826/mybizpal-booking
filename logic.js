@@ -22,13 +22,6 @@ const openai = new OpenAI({
 
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
-// small helper for more natural variation
-function pickRandom(arr) {
-  if (!arr || !arr.length) return '';
-  const idx = Math.floor(Math.random() * arr.length);
-  return arr[idx];
-}
-
 // ---------- BASIC STATE HELPERS ----------
 
 function ensureHistory(callState) {
@@ -407,7 +400,7 @@ WHEN THEY ASK "WHAT DO YOU DO?" OR "WHAT DO YOU OFFER?"
 
 IMPORTANT BRAND AND IDENTITY RULES
 - Never say "AI assistant". You are just "Gabriel from MyBizPal".
-- You may explain that the caller can have an "AI agent like me" for their business.
+- You may explain that the caller can have an "agent like me" for their business.
 - Refer to the company only as "MyBizPal", never "MyBizPal.ai".
 - Mention the website naturally when appropriate: "mybizpal dot ai".
 
@@ -485,7 +478,7 @@ WHAT MYBIZPAL DOES (YOUR CORE PITCH)
   "If you want to have a look later, you can hop on mybizpal dot ai."
 
 POSITIONING VS COMPETITORS
-- Many tools are just basic AI receptionists that only pick up the phone.
+- Many tools are just basic receptionists that only pick up the phone.
 - MyBizPal is a full lead capture and sales assistant:
   - It does not just answer; it drives the conversation towards a booked call or sale.
   - It qualifies leads so humans spend time only on serious prospects.
@@ -554,12 +547,6 @@ export async function handleTurn({ userText, callState }) {
   if (/thank(s| you)/.test(userLower)) {
     behaviour.rapportLevel = Number(behaviour.rapportLevel || 0) + 1;
     behaviour.rapportLevel = Math.min(5, behaviour.rapportLevel);
-  }
-
-  const userWasCurious =
-    /\bcurious\b/.test(userLower) || /just (being )?curious/.test(userLower);
-  if (userWasCurious && behaviour.interestLevel === 'unknown') {
-    behaviour.interestLevel = 'medium';
   }
 
   // expanded pain-point detection (missed / lost / wasted / "loosing" leads)
@@ -981,7 +968,7 @@ export async function handleTurn({ userText, callState }) {
 
   let botText =
     completion.choices?.[0]?.message?.content?.trim() ||
-    'Got you. In simple terms, MyBizPal gives your business an agent like me who answers calls 24/7, handles questions and books people into your calendar. Would you like a quick example of how that would work for you?';
+    'Alright, thanks for that. Let me think about the best way I can help – what is the main thing you want to improve with your calls right now?';
 
   // ---------- POST-PROCESSING ----------
 
@@ -993,23 +980,24 @@ export async function handleTurn({ userText, callState }) {
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
   // Channel-specific clean-up for chat: no "digit by digit" / "slowly"
-  const { isChat: isChatAfterModel } = getChannelInfo(callState);
-  if (isChatAfterModel) {
+  if (isChat) {
     botText = botText.replace(/digit by digit/gi, '').replace(/nice and slowly/gi, '');
     // remove stray "slowly" when near email/number phrases
     botText = botText.replace(/\bslowly\b/gi, '');
     botText = botText.replace(/\s+,/g, ',');
   }
 
-  if (botText.length > 260) {
-    const cut = botText.slice(0, 260);
-    const lastPunct = Math.max(
+  // Less aggressive truncation to avoid cutting mid-thought
+  if (botText.length > 420) {
+    const cut = botText.slice(0, 420);
+    const lastBreak = Math.max(
+      cut.lastIndexOf('\n'),
       cut.lastIndexOf('. '),
       cut.lastIndexOf('! '),
       cut.lastIndexOf('? ')
     );
-    if (lastPunct > 0) {
-      botText = cut.slice(0, lastPunct + 1);
+    if (lastBreak > 0) {
+      botText = cut.slice(0, lastBreak + 1);
     } else {
       botText = cut;
     }
@@ -1018,56 +1006,63 @@ export async function handleTurn({ userText, callState }) {
   let lowerBot = botText.toLowerCase();
   const bookingState = callState.booking || {};
 
-  // --------- SALES PITCH HELPERS ----------
-
+  // helper to pivot from probing question into a value + next-step reply
   function buildPainToPitchReply() {
-    const bt = profile.businessType;
-    const opening = pickRandom([
-      'Got it, that really helps.',
-      'Alright, that makes sense.',
-      'Okay, that gives me a good picture.',
-    ]);
-
-    const middle = bt
-      ? ` In your ${bt} it is easy for calls and leads to slip through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities.`
-      : ' It is very easy for calls and leads to slip through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities.';
-
-    const closing = pickRandom([
-      ' Would you like a quick plain-English overview of how that would work for you?',
-      ' Do you want me to walk you through how that could plug into your setup?',
-      ' Would it help if I gave you a quick example of how that works in practice?',
-    ]);
-
-    return (opening + middle + closing).trim();
+    if (profile.businessType) {
+      return `Got it, that really helps. So in your ${profile.businessType} it sounds like some calls and leads are slipping through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for you, or shall we look at times for a short consultation with one of the team?`;
+    }
+    return 'Got it, that really helps. It sounds like some calls and leads are slipping through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for your business, or shall we look at times for a short consultation with one of the team?';
   }
 
-  function buildCuriousReply() {
-    const bt = profile.businessType;
-    const opener = pickRandom([
-      'Love that, curiosity is where it starts.',
-      'Nice, I like curious.',
-      'Fair enough, a bit of curiosity is always good.',
-    ]);
+  const lastAssistantMsg = [...history].slice().reverse()
+    .find((m) => m.role === 'assistant');
 
-    const middle = bt
-      ? ` In simple terms, MyBizPal gives your ${bt} an agent like me who answers calls 24/7, handles questions and books people straight into your calendar so you can focus on the work, not the phone.`
-      : ' In simple terms, MyBizPal gives your business an agent like me who answers calls 24/7, handles questions and books people straight into your calendar so you can focus on the work, not the phone.';
+  // ---------- HANDLE "QUICK EXAMPLE / OVERVIEW" LOOPS ----------
 
-    const closing = pickRandom([
-      ' Would you like a quick example of how that would work for you, or are you just testing me out today?',
-      ' Do you want me to run through a quick example, or are you mainly just checking how I sound?',
-      ' Shall I give you a short example of how this works in real life, or are you just having a play with me today?',
-    ]);
+  const exampleInvitePattern =
+    /would you like a quick (plain-english )?(overview|example) of how that (would work|works)/i;
 
-    return (opener + middle + closing).trim();
+  const userSaidYesToExample =
+    /^(yes( please)?|yeah|yep|ok(ay)?|sure|sounds good|go ahead)\b/i.test(userLower);
+
+  if (userSaidYesToExample && lastAssistantMsg && exampleInvitePattern.test(lastAssistantMsg.content)) {
+    // Instead of asking again, give a concrete example and gently nudge towards the demo.
+    if (profile.businessType && /clinic|dental|gp|physio|aesthetic/i.test(profile.businessType)) {
+      botText =
+        'Alright, picture this: a new patient calls your clinic while your team are with patients. Instead of ringing out or going to voicemail, your own MyBizPal agent answers in a human way, takes their details, talks through what they need, and then books them straight into your diary for a suitable slot. You get the booking in your calendar without anyone on your side needing to pick up the phone. Does that sound useful enough that it is worth a quick demo so you can see it properly?';
+    } else if (profile.businessType) {
+      botText =
+        `Alright, picture this: someone calls your ${profile.businessType} with a serious enquiry while you are busy. Your MyBizPal agent answers, has a proper conversation, captures their details and either books them into your calendar or sends you a qualified lead with everything you need to follow up. Instead of missed calls, you get booked appointments and warm leads. Would it be helpful to see that in a quick demo?`;
+    } else {
+      botText =
+        'Alright, picture this: when someone calls your business and no one can grab the phone, your MyBizPal agent answers instead, has a proper human conversation, captures their details and either books them straight into your calendar or sends you a clear summary of what they need. That way, you turn a lot more calls into real bookings instead of missed opportunities. Would you like me to set up a quick demo so you can see it in action?';
+    }
+
+    lowerBot = botText.toLowerCase();
   }
 
   // If GPT outputs exactly the same thing as last time, break the loop with a pitch
-  const lastAssistantMsg = [...history].slice().reverse()
-    .find((m) => m.role === 'assistant');
   if (lastAssistantMsg && lastAssistantMsg.content.trim() === botText.trim()) {
-    botText = userWasCurious ? buildCuriousReply() : buildPainToPitchReply();
+    botText = buildPainToPitchReply();
     lowerBot = botText.toLowerCase();
+  }
+
+  // Avoid repeating the "in simple terms, MyBizPal gives your business an agent like me..." opener too often in one conversation
+  const simplePitchPattern =
+    /in simple terms, mybizpal gives your business an agent like me who answers calls 24\/7/i;
+
+  if (simplePitchPattern.test(lowerBot)) {
+    const alreadyDidSimplePitch = history.some(
+      (m) =>
+        m.role === 'assistant' &&
+        simplePitchPattern.test(m.content.toLowerCase())
+    );
+    if (alreadyDidSimplePitch) {
+      // Replace with a shorter, more direct reminder instead of repeating the full script
+      botText =
+        'Put simply, you get an agent like me answering your calls 24/7, handling questions and turning more of those calls into actual bookings. From here, the main thing is just to see it in a quick demo for your business. Would you like to look at some times for that?';
+      lowerBot = botText.toLowerCase();
+    }
   }
 
   // Kill "what would you like to chat about" into something more sales-led
@@ -1089,16 +1084,26 @@ export async function handleTurn({ userText, callState }) {
       (m) => m.role === 'assistant' && curiousPattern.test(m.content.toLowerCase())
     );
     if (alreadyAskedCurious || behaviour.painPointsMentioned || bookingState.intent === 'wants_booking') {
-      botText = userWasCurious ? buildCuriousReply() : buildPainToPitchReply();
+      botText = buildPainToPitchReply();
       lowerBot = botText.toLowerCase();
     }
   }
 
-  // HARD BAN: replace the "main thing you want to improve" line with something more natural
-  const improveQuestionText = 'what is the main thing you want to improve with your calls right now';
-  if (lowerBot.includes(improveQuestionText)) {
-    botText = userWasCurious ? buildCuriousReply() : buildPainToPitchReply();
-    lowerBot = botText.toLowerCase();
+  // Break the specific probe-loop you saw: "main thing you want to improve" / "another angle"
+  const improvePattern = /what is the main thing you want to improve with your calls right now/i;
+  const anglePattern = /let me come at this from another angle: what tends to happen with calls right now when you are busy or closed\?/i;
+
+  if (improvePattern.test(lowerBot) || anglePattern.test(lowerBot)) {
+    const alreadyAskedProbe = history.some((m) => {
+      if (m.role !== 'assistant') return false;
+      const l = m.content.toLowerCase();
+      return improvePattern.test(l) || anglePattern.test(l);
+    });
+
+    if (alreadyAskedProbe || behaviour.painPointsMentioned) {
+      botText = buildPainToPitchReply();
+      lowerBot = botText.toLowerCase();
+    }
   }
 
   // Safety: do not claim a confirmed booking unless the system has actually confirmed it
@@ -1145,7 +1150,46 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // ---------- SAVE + CAPTURE-MODE SETUP ----------
+  // ---------- SALES SAFETY NET (KEEP QUESTION + NUDGE TO NEXT STEP) ----------
+
+  if (!shouldEnd) {
+    const askedWhatDo =
+      /what.*(you (guys )?do|do you do|you offer)/i.test(userLower) ||
+      /what is mybizpal/i.test(userLower) ||
+      /what is this/i.test(userLower) ||
+      /enquir(e|ing) (about|regarding) your services/i.test(userLower) ||
+      /check(ing)? your services/i.test(userLower);
+
+    if (askedWhatDo && !/[?？！]/.test(botText)) {
+      botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
+      if (!profile.businessType) {
+        botText += ' Out of curiosity, how are you handling your calls at the moment?';
+      } else {
+        botText += ` Out of curiosity, what tends to happen with calls in your ${profile.businessType}?`;
+      }
+    }
+
+    if (!/[?？！]/.test(botText)) {
+      let extraQ;
+      if (
+        bookingState.intent === 'wants_booking' ||
+        bookingState.timeSpoken ||
+        bookingState.earliestSlotSpoken
+      ) {
+        extraQ =
+          ' What day usually works best for you for a quick 20-30 minute call?';
+      } else if (!profile.businessType) {
+        extraQ =
+          ' What kind of business are you running at the moment, or planning to run?';
+      } else {
+        extraQ =
+          ` What would you most like to improve with your ${profile.businessType} right now?`;
+      }
+
+      botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
+      botText += extraQ;
+    }
+  }
 
   history.push({ role: 'user', content: safeUserText });
   history.push({ role: 'assistant', content: botText });
