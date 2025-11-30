@@ -341,16 +341,28 @@ app.post('/whatsapp/inbound', async (req, res) => {
     return;
   }
 
-  // --- DEFAULT: FULL GABRIEL BRAIN OVER WHATSAPP ---
+  // --- DEFAULT: FULL GABRIEL BRAIN OVER WHATSAPP (with session memory) ---
   try {
+    const previous = getSessionForPhone(fromPhone) || {};
+
     const callState = {
       callerNumber: fromPhone,
       channel: 'whatsapp',
+      history: previous.history || [],
+      lastUserTranscript: previous.lastUserTranscript || '',
     };
 
     const { text: replyText } = await handleTurn({
       userText: text,
       callState,
+    });
+
+    // Save updated session for cross-channel memory
+    saveSessionForPhone(fromPhone, {
+      history: callState.history,
+      lastUserTranscript: callState.lastUserTranscript,
+      lastChannel: 'whatsapp',
+      lastUpdated: new Date().toISOString(),
     });
 
     reply.body(
@@ -385,6 +397,18 @@ const wss = new WebSocketServer({
 });
 
 console.log('🎧 Setting up WebSocket /media-stream');
+
+// Small helper: time-of-day greeting
+function buildTimeOfDayGreeting() {
+  const hour = new Date().getHours();
+  let prefix = 'Good afternoon';
+  if (hour < 12) {
+    prefix = 'Good morning';
+  } else if (hour >= 18) {
+    prefix = 'Good evening';
+  }
+  return `${prefix}, I'm Gabriel from MyBizPal. How can I help you today?`;
+}
 
 wss.on('connection', (ws, req) => {
   console.log('🔔 New Twilio media WebSocket connection from', req.socket.remoteAddress);
@@ -523,8 +547,7 @@ wss.on('connection', (ws, req) => {
 
     callState.greeted = true;
 
-    const reply =
-      "Hi, you're speaking with Gabriel from MyBizPal. How can I help you today?";
+    const reply = buildTimeOfDayGreeting();
 
     console.log('🤖 Gabriel (greeting):', `"${reply}"`);
 
