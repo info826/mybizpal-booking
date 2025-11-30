@@ -319,6 +319,32 @@ export async function updateBookingStateFromUtterance({
 }) {
   const booking = ensureBooking(callState);
   const raw = userText || '';
+  const lower = raw.toLowerCase();
+
+  // 🔧 NEW: if they clearly want to book again but we have an old confirmed booking
+  // treat this as the start of a *new* booking flow, not as "already done".
+  if (detectBookingIntent(raw) && booking.bookingConfirmed) {
+    booking.bookingConfirmed = false;
+    booking.intent = 'wants_booking';
+
+    booking.timeISO = null;
+    booking.timeSpoken = null;
+    booking.wantsEarliest = false;
+    booking.earliestSlotISO = null;
+    booking.earliestSlotSpoken = null;
+
+    booking.awaitingTimeConfirm = false;
+    booking.lastPromptWasTimeSuggestion = false;
+    booking.needEmailBeforeBooking = false;
+
+    booking.existingBookingSpoken = null;
+    booking.informedAboutExistingBooking = false;
+    booking.existingEventId = null;
+    booking.existingEventStartISO = null;
+    booking.pendingExistingAction = null;
+
+    booking.summaryNotes = null;
+  }
 
   // Detect explicit booking intent
   if (detectBookingIntent(raw)) {
