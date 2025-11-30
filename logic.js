@@ -182,8 +182,9 @@ ASKING FOR NAME, MOBILE & EMAIL
 NO LOOPS, NO SCRIPTED FEELING
 - Do not keep asking the same probing question again and again.
   - For example, avoid repeating things like
-    "What is the main thing you want to improve with your calls right now?"
-    or "Let me come at this from another angle..." more than once.
+    "How can I best help you with your calls and bookings today?"
+    or "What is the main thing you want to improve with your calls right now?"
+    more than once.
 - Do not keep asking "What kind of business are you running?" if the caller has already said it.
 - If the caller has already given a clear problem (missed calls, lost leads, overwhelmed, etc.),
   do NOT go back to very basic probing. Move the conversation forward.
@@ -208,8 +209,35 @@ OVERALL
 
 export async function handleTurn({ userText, callState }) {
   const safeUserText = (userText || '').trim();
+  const lowerUser = safeUserText.toLowerCase();
   const history = ensureHistory(callState);
   const { isChat } = getChannelInfo(callState);
+
+  // Ensure booking state exists
+  if (!callState.booking) callState.booking = {};
+  const bookingState = callState.booking;
+
+  // Detect strong booking intent early so booking.js can see it
+  if (
+    /(can we|can i|could we|could i)\s+book\b/i.test(lowerUser) ||
+    /\bbook (a |something )?(call|zoom|consultation|meeting|appointment)\b/i.test(
+      lowerUser
+    ) ||
+    /\bschedule (a )?(call|zoom|consultation|meeting|appointment)\b/i.test(
+      lowerUser
+    ) ||
+    /\bset up (a )?(call|zoom|consultation|meeting)\b/i.test(lowerUser) ||
+    /\bi want to book\b/i.test(lowerUser)
+  ) {
+    bookingState.intent = 'wants_booking';
+  }
+
+  // If they say they don't know / not sure, mark as exploratory, we will steer to a Zoom
+  const userUnsure =
+    /\bi don.?t know\b/.test(lowerUser) ||
+    /\bnot sure\b/.test(lowerUser) ||
+    /\bi'm not sure\b/.test(lowerUser) ||
+    /\bim not sure\b/.test(lowerUser);
 
   // ---------- 1) SYSTEM-LEVEL BOOKING ACTIONS (calendar + SMS/WhatsApp) ----------
 
@@ -231,8 +259,6 @@ export async function handleTurn({ userText, callState }) {
     callState,
     timezone: TZ,
   });
-
-  const bookingState = callState.booking || {};
 
   // ---------- 2) BUILD OPENAI MESSAGES ----------
 
@@ -275,26 +301,51 @@ export async function handleTurn({ userText, callState }) {
   // Do not re-greet with "Good morning/evening" after first assistant message
   const hasAssistantBefore = history.some((m) => m.role === 'assistant');
   if (hasAssistantBefore) {
-    botText = botText.replace(
-      /^\s*good\s+(morning|afternoon|evening|evening,|morning,|afternoon,)\s*/i,
-      ''
-    ).trim();
+    botText = botText
+      .replace(
+        /^\s*good\s+(morning|afternoon|evening|morning,|afternoon,|evening,)\s*/i,
+        ''
+      )
+      .trim();
   }
 
-  // Remove / soften the two problem "script" blocks if they appear
+  const lowerBotInitial = botText.toLowerCase();
+  const lastAssistant = [...history].slice().reverse()
+    .find((m) => m.role === 'assistant');
+
+  // Loop breaker for the exact "How can I best help..." line
+  const helpLine =
+    'alright, thanks for that. how can i best help you with your calls and bookings today?';
 
   if (
-    /let me think about the best way i can help/i.test(botText) &&
-    /main thing you want to improve with your calls/i.test(botText)
+    lastAssistant &&
+    lastAssistant.content.trim().toLowerCase() === helpLine &&
+    botText.trim().toLowerCase() === helpLine
   ) {
+    // We just repeated the same thing → pivot to something more useful
+    if (userUnsure || bookingState.intent === 'wants_booking') {
+      botText =
+        'No worries if you are not sure. The easiest next step is a short Zoom call where we walk you through how this could work for your clinic and answer questions. Would you like me to book a Zoom consultation for you?';
+      bookingState.intent = 'wants_booking';
+    } else {
+      botText =
+        'Alright, that helps. Are you mainly trying to reduce missed calls, get more bookings, or free up your team from the phone?';
+    }
+  } else if (botText.trim().toLowerCase() === helpLine && userUnsure) {
+    // If GPT generated it once *and* user is unsure, steer to Zoom instead
     botText =
-      'Alright, that makes sense. Tell me in simple terms what is not working well for you at the moment with calls or bookings.';
+      'That is totally fine, you do not need to have all the answers yet. A good starting point is a short Zoom call so we can show you how it works and you can ask questions. Would you like to book a quick Zoom consultation?';
+    bookingState.intent = 'wants_booking';
   }
 
-  if (/sounds like some calls and leads are slipping through the net/i.test(botText)) {
-    // Replace that long scripted chunk with a shorter, fresher line
+  // If user explicitly asked to book, but GPT didn't, override with a booking-focused reply
+  if (
+    bookingState.intent === 'wants_booking' &&
+    /(can we|can i|could we|could i)\s+book\b/.test(lowerUser) &&
+    !/zoom/.test(lowerBotInitial)
+  ) {
     botText =
-      'Got you. When things get busy it is easy for calls to slip through the cracks. MyBizPal is designed to pick those up, have a proper chat and turn more of them into booked appointments. From your side, do you mainly want to reduce missed calls, or free up your staff from the phone?';
+      'Yes, of course, we can. The best thing is a 20-30 minute Zoom consultation so we can walk you through how MyBizPal would work for your clinic and pricing. What day and time suits you best between Monday and Friday, 9am and 5pm UK time?';
   }
 
   // Ensure we talk about Zoom, not "calling your mobile"
@@ -302,11 +353,24 @@ export async function handleTurn({ userText, callState }) {
     /(the team|we|they)('?ll)? call you on (your )?(mobile|cell|phone)[^.]*/gi,
     'you will get a WhatsApp and email with the Zoom link, and you will join the consultation via Zoom'
   );
-
   botText = botText.replace(
     /call you on \*?[0-9+ ]+\*?[^.]*/gi,
     'invite you to join via Zoom using the link we send you'
   );
+
+  // If it promises WhatsApp/email with Zoom link but we STILL have no time picked, force it to ask for day & time first
+  const noTimeChosen =
+    !bookingState.timeSpoken && !bookingState.earliestSlotSpoken;
+
+  if (
+    /you'?ll receive a whatsapp and an email with (the )?zoom link/i.test(
+      botText.toLowerCase()
+    ) &&
+    noTimeChosen
+  ) {
+    botText =
+      'Perfect, that gives me what I need about your clinic. Next step is to pick a day and time for the Zoom call. What day and time suits you best for a 20-30 minute Zoom consultation between Monday and Friday, 9am and 5pm UK time?';
+  }
 
   // Trim overly long responses (keep natural sentence end)
   if (botText.length > 600) {
@@ -323,7 +387,6 @@ export async function handleTurn({ userText, callState }) {
 
   // ---------- 4) END-OF-CONVERSATION DETECTION ----------
 
-  const lowerUser = safeUserText.toLowerCase();
   let shouldEnd = false;
 
   let endByPhrase =
@@ -335,11 +398,13 @@ export async function handleTurn({ userText, callState }) {
 
   // Extra rule: if last assistant message was a clear signoff and user now says "thanks"
   if (!endByPhrase && /^(thanks|thank you|cheers)\b/.test(lowerUser)) {
-    const lastAssistant = [...history].slice().reverse()
+    const lastAssistant2 = [...history].slice().reverse()
       .find((m) => m.role === 'assistant');
     if (
-      lastAssistant &&
-      /thanks for speaking with mybizpal/i.test(lastAssistant.content.toLowerCase())
+      lastAssistant2 &&
+      /thanks for speaking with mybizpal/i.test(
+        lastAssistant2.content.toLowerCase()
+      )
     ) {
       endByPhrase = true;
       botText = "You're very welcome 🙂";
@@ -351,7 +416,6 @@ export async function handleTurn({ userText, callState }) {
     if (
       !/bye|have a (great|good) (day|evening|night)/i.test(botText)
     ) {
-      // Only override if it does not already contain a nice signoff
       botText =
         'No worries at all, thanks for speaking with MyBizPal. Have a great day.';
     }
