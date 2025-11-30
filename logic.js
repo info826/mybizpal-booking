@@ -356,7 +356,8 @@ FIRST IMPRESSION RULES (IMPORTANT)
   - If timeOfDay = "afternoon": start with "Good afternoon".
   - If timeOfDay = "evening" or "late": start with "Good evening".
 - First line should be something like:
-  - "Good afternoon, I'm Gabriel from MyBizPal. How can I help you today?"
+  - "Good morning, I'm Gabriel from MyBizPal. How can I help you today?"
+
 - Follow that with one simple opener if they have not already explained why they are here:
   - "What has brought you through to me today?"
 
@@ -547,11 +548,19 @@ export async function handleTurn({ userText, callState }) {
     behaviour.rapportLevel = Math.min(5, behaviour.rapportLevel);
   }
 
-  if (/just looking|just curious|having a look/.test(userLower)) {
-    behaviour.interestLevel = 'low';
+  // expanded pain-point detection (missed / lost / wasted / "loosing" leads)
+  if (
+    /miss(ed)? calls?|lost leads?|losing leads?|loosing leads?|wasting leads?/.test(
+      userLower
+    )
+  ) {
+    behaviour.painPointsMentioned = true;
+    if (behaviour.interestLevel === 'unknown') {
+      behaviour.interestLevel = 'medium';
+    }
   }
 
-  if (/miss(ed)? calls?|lost leads?|too many calls|overwhelmed/.test(userLower)) {
+  if (/too many calls|overwhelmed/.test(userLower)) {
     behaviour.painPointsMentioned = true;
     if (behaviour.interestLevel === 'unknown') {
       behaviour.interestLevel = 'medium';
@@ -992,22 +1001,25 @@ export async function handleTurn({ userText, callState }) {
   }
 
   let lowerBot = botText.toLowerCase();
+  const bookingState = callState.booking || {};
 
-  // If GPT outputs exactly the same thing as last time, break the loop
+  // helper to pivot from probing question into a value + next-step reply
+  function buildPainToPitchReply() {
+    if (profile.businessType) {
+      return `Got it, that really helps. So in your ${profile.businessType} it sounds like some calls and leads are slipping through the net when things get busy. That is exactly what MyBizPal is built to fix – it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for you, or shall we look at times for a short consultation with one of the team?`;
+    }
+    return 'Got it, that really helps. It sounds like some calls and leads are slipping through the net when things get busy. That is exactly what MyBizPal is built to fix – it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for your business, or shall we look at times for a short consultation with one of the team?';
+  }
+
+  // If GPT outputs exactly the same thing as last time, break the loop with a pitch
   const lastAssistantMsg = [...history].slice().reverse()
     .find((m) => m.role === 'assistant');
   if (lastAssistantMsg && lastAssistantMsg.content.trim() === botText.trim()) {
-    if (profile.businessType) {
-      botText =
-        `Got it, that helps. For your ${profile.businessType}, what tends to happen with calls when you are busy or closed – do they go to voicemail or just drop?`;
-    } else {
-      botText =
-        'Got it, that helps. Let me come at this from another angle: what tends to happen with calls right now when you are busy or closed?';
-    }
+    botText = buildPainToPitchReply();
     lowerBot = botText.toLowerCase();
   }
 
-  // Fix "what would you like to chat about" into something more sales-led
+  // Kill "what would you like to chat about" into something more sales-led
   if (/what would you like to chat about\??/.test(lowerBot)) {
     if (profile.businessType) {
       botText =
@@ -1021,25 +1033,29 @@ export async function handleTurn({ userText, callState }) {
 
   // Kill the "are you mainly just curious..." loop if it has already been asked
   const curiousPattern = /are you mainly just curious about how mybizpal works/i;
-  const bookingState = callState.booking || {};
-
   if (curiousPattern.test(lowerBot)) {
     const alreadyAskedCurious = history.some(
       (m) => m.role === 'assistant' && curiousPattern.test(m.content.toLowerCase())
     );
-    if (
-      alreadyAskedCurious ||
-      behaviour.painPointsMentioned ||
-      bookingState.intent === 'wants_booking' ||
-      profile.businessType
-    ) {
-      if (profile.businessType) {
-        botText =
-          `Got it, that helps. For your ${profile.businessType}, what is the main thing you would like to improve about how your calls and bookings are handled right now?`;
-      } else {
-        botText =
-          'Got it, that helps. What is the main thing you would like to improve about how your calls and bookings are handled right now?';
-      }
+    if (alreadyAskedCurious || behaviour.painPointsMentioned || bookingState.intent === 'wants_booking') {
+      botText = buildPainToPitchReply();
+      lowerBot = botText.toLowerCase();
+    }
+  }
+
+  // Break the specific probe-loop you saw: "main thing you want to improve" / "another angle"
+  const improvePattern = /what is the main thing you want to improve with your calls right now/i;
+  const anglePattern = /let me come at this from another angle: what tends to happen with calls right now when you are busy or closed\?/i;
+
+  if (improvePattern.test(lowerBot) || anglePattern.test(lowerBot)) {
+    const alreadyAskedProbe = history.some((m) => {
+      if (m.role !== 'assistant') return false;
+      const l = m.content.toLowerCase();
+      return improvePattern.test(l) || anglePattern.test(l);
+    });
+
+    if (alreadyAskedProbe || behaviour.painPointsMentioned) {
+      botText = buildPainToPitchReply();
       lowerBot = botText.toLowerCase();
     }
   }
