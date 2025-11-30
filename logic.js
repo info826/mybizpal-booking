@@ -391,12 +391,6 @@ EARLY CONVERSATION FLOW (KEEP IT CALM)
 - First, respond briefly to what they said and ask ONE focused question (for example "what kind of business do you run?" or "how are you handling calls right now?").
 - Keep your tone confident but calm, not over-excited.
 
-HANDLING ANY QUESTION (CRITICAL)
-- Always answer the caller's actual question or request clearly and specifically, even if it is not directly about MyBizPal.
-- If they ask for information, explain it in plain English first, then decide if it makes sense to link it back to MyBizPal and automation.
-- Do NOT ignore their question just to push a demo or booking.
-- If the question is not really about your services, simply be helpful and human; only bring MyBizPal back in if it feels natural.
-
 WHEN THEY ASK "WHAT DO YOU DO?" OR "WHAT DO YOU OFFER?"
 - This is a hard rule:
   1) First, directly answer the question in one or two short sentences explaining what MyBizPal does for businesses.
@@ -496,15 +490,6 @@ DEMONSTRATING THE PRODUCT
 - When the moment is right, tell them:
   - "You can actually have an agent just like me for your business."
   - "What you are hearing now is the type of agent we set up for clients."
-
-CLOSER MINDSET (SALES BUT NOT ROBOTIC)
-- When someone clearly fits (business owner, has call problems, asks about price or services), move naturally through:
-  - Understanding their situation and current process.
-  - Exploring the pain (missed calls, time, stress, lost revenue).
-  - Showing how MyBizPal fixes that in a simple way.
-  - Offering a short consultation or demo as the logical next step.
-- Ask ONE short, sharp question at a time to dig into the pain.
-- Never force a booking if they are just asking a quick question that is not really about your services.
 
 BOOKING BEHAVIOUR (MON–FRI, 9:00–17:00 ONLY)
 - If they want to book, guide them smoothly into a consultation or demo.
@@ -995,7 +980,8 @@ export async function handleTurn({ userText, callState }) {
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
   // Channel-specific clean-up for chat: no "digit by digit" / "slowly"
-  if (isChat) {
+  const { isChat: isChatAfterModel } = getChannelInfo(callState);
+  if (isChatAfterModel) {
     botText = botText.replace(/digit by digit/gi, '').replace(/nice and slowly/gi, '');
     // remove stray "slowly" when near email/number phrases
     botText = botText.replace(/\bslowly\b/gi, '');
@@ -1019,15 +1005,6 @@ export async function handleTurn({ userText, callState }) {
   let lowerBot = botText.toLowerCase();
   const bookingState = callState.booking || {};
 
-  // Detect if this conversation is actually about MyBizPal / services
-  const isServiceConversation =
-    bookingState.intent === 'wants_booking' ||
-    behaviour.interestLevel === 'medium' ||
-    behaviour.interestLevel === 'high' ||
-    /mybizpal|your services|automation|ai agent|ai receptionist|ai for my business|missed calls?|book(ing)? (a )?(demo|call)|pricing|price|cost/i.test(
-      userLower
-    );
-
   // helper to pivot from probing question into a value + next-step reply
   function buildPainToPitchReply() {
     if (profile.businessType) {
@@ -1036,32 +1013,22 @@ export async function handleTurn({ userText, callState }) {
     return 'Got it, that really helps. It sounds like some calls and leads are slipping through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for your business, or shall we look at times for a short consultation with one of the team?';
   }
 
-  // If GPT outputs exactly the same thing as last time, break the loop
+  // If GPT outputs exactly the same thing as last time, break the loop with a pitch
   const lastAssistantMsg = [...history].slice().reverse()
     .find((m) => m.role === 'assistant');
   if (lastAssistantMsg && lastAssistantMsg.content.trim() === botText.trim()) {
-    if (isServiceConversation) {
-      botText = buildPainToPitchReply();
-    } else {
-      // Non-service conversation: vary wording but do not force a pitch
-      botText = 'Alright, let me put that a bit differently. ' + botText;
-    }
+    botText = buildPainToPitchReply();
     lowerBot = botText.toLowerCase();
   }
 
-  // Kill "what would you like to chat about" into something more useful
+  // Kill "what would you like to chat about" into something more sales-led
   if (/what would you like to chat about\??/.test(lowerBot)) {
-    if (isServiceConversation) {
-      if (profile.businessType) {
-        botText =
-          `Alright, that helps. Would you like me to explain how MyBizPal could handle more of the calls for your ${profile.businessType}, or would you prefer to book a quick call with an advisor to map it out properly?`;
-      } else {
-        botText =
-          'Alright, that helps. Would you like me to explain how MyBizPal could handle more of those calls for you, or would you prefer to book a quick call with an advisor?';
-      }
+    if (profile.businessType) {
+      botText =
+        `Alright, that helps. Would you like me to explain how MyBizPal could handle more of the calls for your ${profile.businessType}, or would you prefer to book a quick call with an advisor to map it out properly?`;
     } else {
       botText =
-        'Alright, I am here for whatever you need. What would you like to talk about or ask me?';
+        'Alright, that helps. Would you like me to explain how MyBizPal could handle more of those calls for you, or would you prefer to book a quick call with an advisor?';
     }
     lowerBot = botText.toLowerCase();
   }
@@ -1072,30 +1039,23 @@ export async function handleTurn({ userText, callState }) {
     const alreadyAskedCurious = history.some(
       (m) => m.role === 'assistant' && curiousPattern.test(m.content.toLowerCase())
     );
-    if (
-      isServiceConversation &&
-      (alreadyAskedCurious || behaviour.painPointsMentioned || bookingState.intent === 'wants_booking')
-    ) {
+    if (alreadyAskedCurious || behaviour.painPointsMentioned || bookingState.intent === 'wants_booking') {
       botText = buildPainToPitchReply();
       lowerBot = botText.toLowerCase();
     }
   }
 
-  // Break the specific probe-loop: "main thing you want to improve" / "another angle"
-  const improvePattern = /what is the main thing you want to improve with your calls right now/i;
-  const anglePattern = /let me come at this from another angle: what tends to happen with calls right now when you are busy or closed\?/i;
+  // HARD BLOCK: do not ask the "main thing you want to improve" question more than once
+  const improveQuestionText = 'what is the main thing you want to improve with your calls right now';
+  const timesAskedImprove = history.filter(
+    (m) =>
+      m.role === 'assistant' &&
+      m.content.toLowerCase().includes(improveQuestionText)
+  ).length;
 
-  if (improvePattern.test(lowerBot) || anglePattern.test(lowerBot)) {
-    const alreadyAskedProbe = history.some((m) => {
-      if (m.role !== 'assistant') return false;
-      const l = m.content.toLowerCase();
-      return improvePattern.test(l) || anglePattern.test(l);
-    });
-
-    if (isServiceConversation && (alreadyAskedProbe || behaviour.painPointsMentioned)) {
-      botText = buildPainToPitchReply();
-      lowerBot = botText.toLowerCase();
-    }
+  if (lowerBot.includes(improveQuestionText) && timesAskedImprove >= 1) {
+    botText = buildPainToPitchReply();
+    lowerBot = botText.toLowerCase();
   }
 
   // Safety: do not claim a confirmed booking unless the system has actually confirmed it
@@ -1142,49 +1102,7 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // ---------- SALES SAFETY NET (KEEP QUESTION, ONLY WHEN RELEVANT) ----------
-
-  if (!shouldEnd) {
-    const askedWhatDo =
-      /what.*(you (guys )?do|do you do|you offer)/i.test(userLower) ||
-      /what is mybizpal/i.test(userLower) ||
-      /what is this/i.test(userLower) ||
-      /enquir(e|ing) (about|regarding) your services/i.test(userLower) ||
-      /check(ing)? your services/i.test(userLower);
-
-    // If they explicitly asked "what do you do", we treat it as service-interest
-    if (askedWhatDo && !/[?？！]/.test(botText)) {
-      botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
-      if (!profile.businessType) {
-        botText += ' Out of curiosity, how are you handling your calls at the moment?';
-      } else {
-        botText += ` Out of curiosity, what tends to happen with calls in your ${profile.businessType}?`;
-      }
-      lowerBot = botText.toLowerCase();
-    }
-
-    // Only force an extra sales or discovery question if this is really about services
-    if (isServiceConversation && !/[?？！]/.test(botText)) {
-      let extraQ;
-      if (
-        bookingState.intent === 'wants_booking' ||
-        bookingState.timeSpoken ||
-        bookingState.earliestSlotSpoken
-      ) {
-        extraQ =
-          ' What day usually works best for you for a quick 20-30 minute call?';
-      } else if (!profile.businessType) {
-        extraQ =
-          ' What kind of business are you running at the moment, or planning to run?';
-      } else {
-        extraQ =
-          ` What would you most like to improve with your ${profile.businessType} right now?`;
-      }
-
-      botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
-      botText += extraQ;
-    }
-  }
+  // ---------- SAVE + CAPTURE-MODE SETUP ----------
 
   history.push({ role: 'user', content: safeUserText });
   history.push({ role: 'assistant', content: botText });
