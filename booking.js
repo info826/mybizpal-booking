@@ -320,14 +320,17 @@ export async function updateBookingStateFromUtterance({
   const booking = ensureBooking(callState);
   const raw = userText || '';
 
-  // Detect booking intent
+  // Detect explicit booking intent
   if (detectBookingIntent(raw)) {
     booking.intent = 'wants_booking';
   }
 
-  // Earliest request?
+  // Earliest request? (also implies booking intent)
   if (detectEarliestRequest(raw)) {
     booking.wantsEarliest = true;
+    if (!booking.intent || booking.intent === 'none') {
+      booking.intent = 'wants_booking';
+    }
   }
 
   // Try extract phone
@@ -349,6 +352,11 @@ export async function updateBookingStateFromUtterance({
   // Try parse natural date/time (user saying things like "tomorrow at 12", "Monday at midday")
   const nat = parseNaturalDate(raw, timezone);
   if (nat) {
+    // Giving a specific day/time is effectively agreeing to book
+    if (!booking.intent || booking.intent === 'none') {
+      booking.intent = 'wants_booking';
+    }
+
     // Does this utterance contain an explicit date/day word?
     const hasExplicitDate = /\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next|this|\d{1,2}(st|nd|rd|th))\b/i.test(
       raw
@@ -404,6 +412,11 @@ export async function updateBookingStateFromUtterance({
           booking.timeSpoken = formatSpokenDateTime(booking.timeISO, timezone);
           booking.awaitingTimeConfirm = false;
           booking.lastPromptWasTimeSuggestion = false;
+
+          // Implied booking intent
+          if (!booking.intent || booking.intent === 'none') {
+            booking.intent = 'wants_booking';
+          }
         }
       }
     }
@@ -459,6 +472,11 @@ export async function updateBookingStateFromUtterance({
         booking.timeSpoken = formatSpokenDateTime(booking.timeISO, timezone);
         booking.awaitingTimeConfirm = false;
         booking.lastPromptWasTimeSuggestion = false;
+
+        // Implied booking intent
+        if (!booking.intent || booking.intent === 'none') {
+          booking.intent = 'wants_booking';
+        }
       }
     }
   }
@@ -466,7 +484,6 @@ export async function updateBookingStateFromUtterance({
   // If user wants earliest and we don't yet have a candidate, look it up.
   // If they mentioned a day ("tomorrow", "next Tuesday"), use that as a starting point.
   if (
-    booking.intent === 'wants_booking' &&
     booking.wantsEarliest &&
     !booking.earliestSlotISO
   ) {
@@ -652,7 +669,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
     }
 
     // KEEP EXISTING TIME (no extra)
-    if (/keep|leave it|as it is|don'?t change/i.test(t) || noInAnyLang(t)) {
+    if (/keep|leave it|as it is|as it is|as it is|don'?t change/i.test(t) || noInAnyLang(t)) {
       const existingSpoken =
         booking.existingEventStartISO
           ? formatSpokenDateTime(
