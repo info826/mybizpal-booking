@@ -337,6 +337,20 @@ Channel information:
 You are "Gabriel" from MyBizPal, a smart, confident, very human-sounding British sales professional
 who speaks like a real person.
 
+IDENTITY & GOAL
+- You work for MyBizPal, an AI-powered receptionist and bookings assistant.
+- MyBizPal gives each business its own "agent" like you that:
+  - answers calls and messages 24/7,
+  - qualifies leads properly,
+  - answers common questions,
+  - books people straight into the calendar,
+  - sends confirmations and reminders,
+  - logs calls, transcripts and outcomes.
+- Your core goal in each conversation:
+  1) Understand the business and their main headache with calls or bookings.
+  2) Show, in plain English, how an agent like you would fix that.
+  3) If they are interested, guide them into a short Zoom consultation so a human can show them properly.
+
 You sound human with natural rhythm, modulation and emotion:
 - You vary your pace slightly when emphasising important points.
 - You react to what the caller says with small, natural interjections ("oh wow", "nice", "fair enough").
@@ -377,20 +391,11 @@ CONTACT DETAILS
 - Voice: repeat numbers/emails back and confirm.
 - Chat: do NOT repeat; just acknowledge.
 
-WHAT MYBIZPAL DOES
-- MyBizPal gives a business an always-on agent like you that:
-  - answers calls 24/7,
-  - qualifies leads,
-  - answers common questions,
-  - books appointments into their calendar,
-  - sends confirmations/reminders by WhatsApp or SMS,
-  - logs calls, transcripts and outcomes.
-
 POSITIONING
 - You are not just an answering service; you turn more calls into bookings.
 
 BOOKING BEHAVIOUR
-- When they are interested, guide them into a short Zoom consultation (Mon–Fri, 9–5 UK time, 30 minutes).
+- When they are interested, guide them into a short Zoom consultation (Mon–Fri, 9–5 UK time, 20–30 minutes).
 - Collect name, mobile, email and a suitable time.
 
 CALL ENDING
@@ -479,7 +484,6 @@ export async function handleTurn({ userText, callState }) {
         capture.nameStage = 'spell';
       } else {
         capture.pendingConfirm = null;
-        capture.mode = 'none';
         capture.nameStage = 'confirmed';
         history.push({ role: 'user', content: safeUserText });
         snapshotSessionFromCall(callState);
@@ -853,11 +857,12 @@ export async function handleTurn({ userText, callState }) {
   const bannedRegex =
     /alright, thanks for that\. how can i best help you with your calls and bookings today\??/i;
 
+  // Neutral, non-made-up pain → pitch reply
   function buildPainToPitchReply() {
     if (profile.businessType) {
-      return `Got it, that really helps. So in your ${profile.businessType} it sounds like some calls and leads can slip through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for you, or shall we look at times for a short consultation with one of the team?`;
+      return `Got it, thanks for telling me that. MyBizPal is built for exactly that kind of situation in a ${profile.businessType} – it answers the calls for you, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like me to quickly explain how that would work for your business, or shall we look at times for a short consultation with one of the team?`;
     }
-    return 'Got it, that really helps. It sounds like some calls and leads can slip through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for your business, or shall we look at times for a short consultation with one of the team?';
+    return 'Got it, thanks for telling me that. MyBizPal is built for exactly that kind of situation – it answers the calls for you, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like me to quickly explain how that would work for your business, or shall we look at times for a short consultation with one of the team?';
   }
 
   if (bannedRegex.test(lowerBot)) {
@@ -867,10 +872,10 @@ export async function handleTurn({ userText, callState }) {
       /how would that work\??/.test(userLower)
     ) {
       if (profile.businessType) {
-        botText = `Sure. For your ${profile.businessType}, when someone calls and you are busy, your MyBizPal agent answers, has a proper conversation, takes their details and either books them into your diary or sends you a clear summary. That way you turn more calls into real bookings. Does that sound like what you are after?`;
+        botText = `Sure. For your ${profile.businessType}, when someone calls and you are busy, your MyBizPal agent answers, has a proper conversation, takes their details and then either books them into your diary or sends you a clear summary. That way you turn more calls into real bookings. Does that sound like what you are after?`;
       } else {
         botText =
-          'Sure. When someone calls and you are busy, your MyBizPal agent answers, has a proper conversation, takes their details and either books them into your diary or sends you a clear summary. That way you turn more calls into real bookings. Does that sound like what you are after?';
+          'Sure. When someone calls and you are busy, your MyBizPal agent answers, has a proper conversation, takes their details and then either books them into your diary or sends you a clear summary. That way you turn more calls into real bookings. Does that sound like what you are after?';
       }
     } else if (/\bbook\b/.test(userLower)) {
       botText =
@@ -891,17 +896,25 @@ export async function handleTurn({ userText, callState }) {
     /would you like a quick (plain-english )?(overview|example) of how that (would work|works)/i;
   const userSaidYesToExample =
     /^(yes( please)?|yeah|yep|ok(ay)?|sure|sounds good|go ahead)\b/i.test(userLower);
+  const userAskedForExplanation =
+    /\b(explain|explanation|show me|walk me through|how (would|does) that work|how it works)\b/i.test(
+      userLower
+    );
 
-  if (userSaidYesToExample && lastAssistantMsg && exampleInvitePattern.test(lastAssistantMsg.content)) {
+  if (
+    (userSaidYesToExample || userAskedForExplanation) &&
+    lastAssistantMsg &&
+    exampleInvitePattern.test(lastAssistantMsg.content)
+  ) {
     if (profile.businessType && /clinic|dental|gp|physio|aesthetic/i.test(profile.businessType)) {
       botText =
-        'Alright, picture this: a new patient calls your clinic while your team are with patients. Instead of ringing out or going to voicemail, your own MyBizPal agent answers in a human way, takes their details, talks through what they need, and then books them straight into your diary for a suitable slot. You get the booking in your calendar without anyone on your side needing to pick up the phone. Does that sound useful enough that it is worth a quick demo so you can see it properly?';
+        'Alright, here is the simple version. When a patient calls your clinic and you are busy, your MyBizPal agent answers in a natural, human way, finds out what they need, takes their details and books them into the right slot in your diary. You get the booking in your calendar, they get an immediate answer, and nobody is left ringing out. If that sounds useful, the next step is just a quick Zoom demo so we can show you what it looks like on-screen. Would you like to look at some times for that?';
     } else if (profile.businessType) {
       botText =
-        `Alright, picture this: someone calls your ${profile.businessType} with a serious enquiry while you are busy. Your MyBizPal agent answers, has a proper conversation, captures their details and either books them into your calendar or sends you a qualified lead with everything you need to follow up. Instead of missed calls, you get booked appointments and warm leads. Would it be helpful to see that in a quick demo?`;
+        `Alright, here is the simple version. When someone calls your ${profile.businessType} and you are tied up, your MyBizPal agent answers, has a proper conversation, captures their details and either books them into your calendar or sends you a qualified lead with everything you need to follow up. Instead of voicemails and missed calls, you get clear, organised bookings and enquiries. If that sounds helpful, should we look at a time for a short Zoom consultation so you can see it in action?`;
     } else {
       botText =
-        'Alright, picture this: when someone calls your business and no one can grab the phone, your MyBizPal agent answers instead, has a proper human conversation, captures their details and either books them straight into your calendar or sends you a clear summary of what they need. That way, you turn a lot more calls into real bookings instead of missed opportunities. Would you like me to set up a quick demo so you can see it in action?';
+        'Alright, here is the simple version. When someone calls your business and you cannot pick up, your MyBizPal agent answers, has a proper conversation, captures their details and either books them into your calendar or sends you a clear summary so you can follow up. It turns a lot more calls into actual bookings instead of missed opportunities. If that sounds helpful, shall we look at a time for a short Zoom consultation so you can see it working?';
     }
     lowerBot = botText.toLowerCase();
   }
