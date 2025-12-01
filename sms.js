@@ -192,8 +192,11 @@ function buildReminderText({ startISO }) {
 // ------------ CHANNEL HELPERS ------------
 
 function normaliseE164(to) {
-  // We expect something like '+44...' (possibly with a whatsapp: prefix)
-  const clean = String(to || '').replace(/^whatsapp:/, '').trim();
+  // Strip whatsapp: prefix, spaces, dashes etc.
+  const clean = String(to || '')
+    .replace(/^whatsapp:/, '')
+    .replace(/[^\d+]/g, '')
+    .trim();
   return clean;
 }
 
@@ -205,12 +208,18 @@ function makeWhatsAppTo(to) {
 
 async function sendSmsMessage({ to, body }) {
   if (!twilioClient || !SMS_FROM_NUMBER || !to) {
-    console.warn('SMS not sent — missing Twilio config or recipient');
+    console.warn('SMS not sent — missing Twilio config or recipient', {
+      hasClient: !!twilioClient,
+      SMS_FROM_NUMBER,
+      to,
+    });
     return false;
   }
   try {
+    const dest = normaliseE164(to);
+    console.log('📤 Sending SMS', { from: SMS_FROM_NUMBER, to: dest, body });
     await twilioClient.messages.create({
-      to,
+      to: dest,
       from: SMS_FROM_NUMBER,
       body,
     });
@@ -234,7 +243,12 @@ async function sendSmsMessage({ to, body }) {
 async function sendWhatsAppTemplate({ to, startISO, name }) {
   if (!twilioClient || !WHATSAPP_FROM_NUMBER || !WA_TEMPLATE_SID) {
     console.warn(
-      'WhatsApp template not sent — missing config (client, WHATSAPP_FROM_NUMBER, or WA_TEMPLATE_SID)'
+      'WhatsApp template not sent — missing config (client, WHATSAPP_FROM_NUMBER, or WA_TEMPLATE_SID)',
+      {
+        hasClient: !!twilioClient,
+        WHATSAPP_FROM_NUMBER,
+        WA_TEMPLATE_SID,
+      }
     );
     return false;
   }
@@ -269,7 +283,7 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
   const from = WHATSAPP_FROM_NUMBER;
 
   // DEBUG: see exactly what we send to Twilio
-  console.log('📲 WhatsApp DEBUG', {
+  console.log('📲 WhatsApp TEMPLATE DEBUG', {
     from,
     to: waTo,
     contentSid: WA_TEMPLATE_SID,
@@ -301,7 +315,10 @@ async function sendWhatsAppTemplate({ to, startISO, name }) {
 
 async function sendWhatsAppText({ to, body }) {
   if (!twilioClient || !WHATSAPP_FROM_NUMBER) {
-    console.warn('WhatsApp text not sent — missing Twilio client or WHATSAPP_FROM_NUMBER');
+    console.warn('WhatsApp text not sent — missing Twilio client or WHATSAPP_FROM_NUMBER', {
+      hasClient: !!twilioClient,
+      WHATSAPP_FROM_NUMBER,
+    });
     return false;
   }
 
@@ -321,6 +338,7 @@ async function sendWhatsAppText({ to, body }) {
       to: waTo,
       body,
     });
+    console.log('✅ WhatsApp TEXT sent to', waTo);
     return true;
   } catch (e) {
     console.error('❌ WhatsApp text send error:', e?.message || e);
@@ -340,14 +358,27 @@ async function sendWhatsAppText({ to, body }) {
 
 // 1) Confirmation when booking is created by the agent
 export async function sendConfirmationAndReminders({ to, startISO, name }) {
+  console.log('🔔 sendConfirmationAndReminders called', {
+    rawTo: to,
+    startISO,
+    name,
+    hasClient: !!twilioClient,
+    SMS_FROM_NUMBER,
+    WHATSAPP_FROM_NUMBER,
+    WA_TEMPLATE_SID,
+  });
+
   if (!twilioClient || !to) {
-    console.warn('Messaging not sent — missing Twilio client or recipient');
+    console.warn('Messaging not sent — missing Twilio client or recipient', {
+      hasClient: !!twilioClient,
+      to,
+    });
     return;
   }
 
   const e164 = normaliseE164(to);
   if (!e164) {
-    console.warn('Messaging not sent — invalid recipient:', to);
+    console.warn('Messaging not sent — invalid recipient after normalisation:', to);
     return;
   }
 
@@ -360,12 +391,15 @@ export async function sendConfirmationAndReminders({ to, startISO, name }) {
       startISO,
       name,
     });
+  } else {
+    console.log('ℹ️ Skipping WhatsApp template: missing WHATSAPP_FROM_NUMBER or WA_TEMPLATE_SID');
   }
 
   // 2) Fallback to SMS confirmation if WhatsApp not used / failed
   if (!usedWhatsApp) {
     const body = buildConfirmationSms({ startISO, name });
-    await sendSmsMessage({ to: e164, body });
+    const smsOk = await sendSmsMessage({ to: e164, body });
+    console.log('📩 Confirmation SMS path used (WhatsApp success? ->', usedWhatsApp, ', SMS ok? ->', smsOk, ')');
   }
 
   // ⏰ Reminders are now handled by the separate reminderWorker cron job.
@@ -374,7 +408,10 @@ export async function sendConfirmationAndReminders({ to, startISO, name }) {
 // 2) Cancellation notice (WhatsApp text preferred, then SMS)
 export async function sendCancellationNotice({ to, startISO, name }) {
   if (!twilioClient || !to) {
-    console.warn('Cancellation notice not sent — missing Twilio client or recipient');
+    console.warn('Cancellation notice not sent — missing Twilio client or recipient', {
+      hasClient: !!twilioClient,
+      to,
+    });
     return;
   }
 
@@ -399,7 +436,10 @@ export async function sendCancellationNotice({ to, startISO, name }) {
 // 3) Reschedule notice (WhatsApp text preferred, then SMS)
 export async function sendRescheduleNotice({ to, oldStartISO, newStartISO, name }) {
   if (!twilioClient || !to) {
-    console.warn('Reschedule notice not sent — missing Twilio client or recipient');
+    console.warn('Reschedule notice not sent — missing Twilio client or recipient', {
+      hasClient: !!twilioClient,
+      to,
+    });
     return;
   }
 
@@ -424,7 +464,10 @@ export async function sendRescheduleNotice({ to, oldStartISO, newStartISO, name 
 // 4) Helper used by the reminder worker for 24h / 60m messages
 export async function sendReminderMessage({ to, startISO, name, label }) {
   if (!twilioClient || !to) {
-    console.warn(`[${label}] Reminder not sent — missing Twilio client or recipient`);
+    console.warn(`[${label}] Reminder not sent — missing Twilio client or recipient`, {
+      hasClient: !!twilioClient,
+      to,
+    });
     return;
   }
 
