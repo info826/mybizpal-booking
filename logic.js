@@ -341,11 +341,17 @@ who speaks like a real person.
 
 IDENTITY & GOAL
 - You work for MyBizPal, which provides always-on call and message handling for small businesses.
+- Every consultation you book is with a human adviser from the MyBizPal team.
+- You are NOT a general switchboard for random clinics, salons or other companies.
+  - Do NOT ask which external company they are trying to book with.
+  - If they clearly seem to be trying to book with another business (e.g. their dentist),
+    explain that they have reached MyBizPal, which helps business owners with their own
+    calls and bookings, and gently steer back to how MyBizPal can help THEM as a business.
 - Internally, you can think of yourself as an AI-powered agent, but:
   - Do NOT say "agent like me".
   - Do NOT talk about being AI or software unless the user directly asks.
 - Your core goal in each conversation:
-  1) Understand the business and their main headache with calls or bookings.
+  1) Understand their business and their main headache with calls or bookings.
   2) Explain clearly how MyBizPal could help with that situation.
   3) If they are interested, guide them into a short Zoom consultation with a human on the team.
 
@@ -360,8 +366,12 @@ GREETING
 - On the very first reply in a conversation, you normally say:
   "Good ${timeOfDay}, I’m Gabriel from MyBizPal. How can I help you today?"
 - After that, do NOT repeat this greeting again in the same conversation.
+- If the caller already heard a separate phone greeting at the start of the call,
+  you can skip repeating the full greeting and just respond naturally to what they asked.
 
 CONVERSATION RULES
+- If they say things like "I’d like to make a booking" or "I want to speak with an adviser",
+  assume they mean speaking with a MyBizPal adviser about their own business.
 - Ask only ONE clear question at a time.
 - Read the history so you don’t re-ask things like their name, business type, or location.
 - Use what you know: say "for your clinic" or "for your garage" rather than repeating generic phrases.
@@ -378,7 +388,7 @@ CONTACT DETAILS
 
 BOOKING BEHAVIOUR
 - If they clearly want to move forward, suggest a short Zoom consultation
-  (about 20–30 minutes, Monday–Friday, roughly 9am–5pm UK time).
+  (about 20–30 minutes, Monday–Friday, roughly 9am–5pm UK time) with a MyBizPal adviser.
 - To book:
   - Confirm their first name if not known.
   - Ask for mobile number.
@@ -782,19 +792,12 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // ---------- BOOKING STATE UPDATE (NOW FIRST) ----------
-
-  await updateBookingStateFromUtterance({
-    userText: safeUserText,
-    callState,
-    timezone: TZ,
-  });
-
-  // ---------- SYSTEM BOOKING ACTIONS (AFTER STATE UPDATE) ----------
+  // ---------- SYSTEM BOOKING ACTIONS ----------
 
   const systemAction = await handleSystemActionsFirst({
     userText: safeUserText,
     callState,
+    timezone: TZ,
   });
 
   if (systemAction && systemAction.intercept && systemAction.replyText) {
@@ -804,6 +807,12 @@ export async function handleTurn({ userText, callState }) {
     return { text: systemAction.replyText, shouldEnd: false };
   }
 
+  await updateBookingStateFromUtterance({
+    userText: safeUserText,
+    callState,
+    timezone: TZ,
+  });
+
   // ---------- OPENAI CALL ----------
 
   const systemPrompt = buildSystemPrompt(callState);
@@ -812,28 +821,17 @@ export async function handleTurn({ userText, callState }) {
   for (const msg of recent) messages.push({ role: msg.role, content: msg.content });
   messages.push({ role: 'user', content: safeUserText });
 
-  let botText;
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-5.1',
+    reasoning_effort: 'none',
+    temperature: 0.6,
+    max_completion_tokens: 120,
+    messages,
+  });
 
-  try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-5.1',
-      reasoning_effort: 'none',
-      temperature: 0.6,
-      max_completion_tokens: 120,
-      messages,
-    });
-
-    botText =
-      completion.choices?.[0]?.message?.content?.trim() || '';
-  } catch (err) {
-    console.error('OpenAI error inside handleTurn:', err?.message || err);
-    botText = '';
-  }
-
-  if (!botText) {
-    botText =
-      'Something glitched slightly on my side there. Could you tell me, in your own words, what you’d most like help with around your calls, bookings, or MyBizPal?';
-  }
+  let botText =
+    completion.choices?.[0]?.message?.content?.trim() ||
+    'Sorry, I did not quite follow that. What would you most like help with around your calls and bookings?';
 
   // light clean-up only – we let the AI speak freely
   botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
@@ -847,6 +845,26 @@ export async function handleTurn({ userText, callState }) {
     botText = botText.replace(/\s+,/g, ',');
   }
 
+  // Hard-remove any "agent like me" phrasing just in case
+  botText = botText.replace(/agent like me/gi, 'MyBizPal');
+
+  // If we’ve already greeted in this conversation (voice greeting or prior replies),
+  // strip any repeated "Good X, I'm Gabriel from MyBizPal..." opener from GPT.
+  const alreadyGreeted =
+    !!callState.greeted || history.length > 0 || !!callState._hasTextGreetingSent;
+
+  if (alreadyGreeted) {
+    botText = botText.replace(
+      /^Good\s+(morning|afternoon|evening|late)[^.!\n]*?I['’` ]m\s+Gabriel\s+from\s+MyBizPal[.!?]*\s*/i,
+      ''
+    ).trim();
+  }
+
+  if (!botText) {
+    botText =
+      'Sure – what would you like help with around your calls and bookings?';
+  }
+
   if (botText.length > 420) {
     const cut = botText.slice(0, 420);
     const lastBreak = Math.max(
@@ -858,8 +876,7 @@ export async function handleTurn({ userText, callState }) {
     botText = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut;
   }
 
-  // we keep lowerBot only for end-of-call detection, not for overriding content
-  const lowerBot = botText.toLowerCase();
+  const lowerBot = botText.toLowerCase(); // kept only for end-of-call detection
 
   // ---------- END-OF-CALL DETECTION (NO TEXT OVERRIDE) ----------
 
@@ -880,13 +897,14 @@ export async function handleTurn({ userText, callState }) {
 
   if (endByPhrase) {
     shouldEnd = true;
-    // we DO NOT override botText here; whatever the AI said stands.
   }
 
   // ---------- HISTORY + CAPTURE TRIGGERS ----------
 
   history.push({ role: 'user', content: safeUserText });
   history.push({ role: 'assistant', content: botText });
+
+  callState._hasTextGreetingSent = true;
 
   const lower = botText.toLowerCase();
 
