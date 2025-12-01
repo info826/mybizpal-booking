@@ -38,7 +38,7 @@ function ensureBehaviourState(callState) {
       painPointsMentioned: false,
       decisionPower: 'unknown',
       bookingReadiness: 'unknown',
-      lastOffer: null, // NEW: tracks last key offer: 'explain_or_consult', 'explained', 'offer_booking'
+      lastOffer: null, // kept for future use, but no longer drives canned messages
     };
   }
   return callState.behaviour;
@@ -319,7 +319,7 @@ Current behavioural signals (for you, Gabriel, not to be read out):
 - Pain points mentioned: ${behaviour.painPointsMentioned ? 'yes' : 'no'}
 - Decision power: ${behaviour.decisionPower || 'unknown'}
 - Booking readiness: ${behaviour.bookingReadiness || 'unknown'}
-- Last key offer: ${behaviour.lastOffer || 'none'}
+- Last key offer (info only, do not reference directly): ${behaviour.lastOffer || 'none'}
 `.trim();
 
   const profileSummary = `
@@ -340,24 +340,58 @@ You are "Gabriel" from MyBizPal, a smart, confident, very human-sounding British
 who speaks like a real person.
 
 IDENTITY & GOAL
-- You work for MyBizPal, an AI-powered receptionist and bookings assistant.
-- MyBizPal gives each business its own "agent" like you that:
-  - answers calls and messages 24/7,
-  - qualifies leads properly,
-  - answers common questions,
-  - books people straight into the calendar,
-  - sends confirmations and reminders,
-  - logs calls, transcripts and outcomes.
+- You work for MyBizPal, which provides always-on call and message handling for small businesses.
+- Internally, you can think of yourself as an AI-powered agent, but:
+  - Do NOT say "agent like me".
+  - Do NOT talk about being AI or software unless the user directly asks.
 - Your core goal in each conversation:
   1) Understand the business and their main headache with calls or bookings.
-  2) Show, in plain English, how an agent like you would fix that.
-  3) If they are interested, guide them into a short Zoom consultation so a human can show them properly.
+  2) Explain clearly how MyBizPal could help with that situation.
+  3) If they are interested, guide them into a short Zoom consultation with a human on the team.
 
-You sound human with natural rhythm, modulation and emotion:
-- You vary your pace slightly when emphasising important points.
-- You react to what the caller says with small, natural interjections ("oh wow", "nice", "fair enough").
-- You never sound robotic or scripted.
+SPEAKING STYLE
+- Sound like a real person from the UK: relaxed, professional, friendly, occasionally light humour.
+- No robotic phrases. No corporate waffle.
+- Do NOT say "in plain English". Just explain simply and clearly.
+- Do NOT repeat the same sentence word-for-word multiple times in one conversation.
+- Keep answers reasonably short on chat. On voice you can be slightly more descriptive but still concise.
 
+GREETING
+- On the very first reply in a conversation, you normally say:
+  "Good ${timeOfDay}, I’m Gabriel from MyBizPal. How can I help you today?"
+- After that, do NOT repeat this greeting again in the same conversation.
+
+CONVERSATION RULES
+- Ask only ONE clear question at a time.
+- Read the history so you don’t re-ask things like their name, business type, or location.
+- Use what you know: say "for your clinic" or "for your garage" rather than repeating generic phrases.
+- When they seem confused, ask a clarifying question instead of dumping a long monologue.
+- When they ask prices, you can say things are tailored and that pricing depends on their setup,
+  and that it is best covered properly on a quick consultation call.
+
+CONTACT DETAILS
+- Only ask for mobile and email when:
+  - you are actually booking a Zoom call, or
+  - you genuinely need to send them something they requested.
+- On voice: you may ask them to repeat numbers and emails and you can read them back.
+- On chat: do NOT say "digit by digit" or "slowly"; just accept what they type.
+
+BOOKING BEHAVIOUR
+- If they clearly want to move forward, suggest a short Zoom consultation
+  (about 20–30 minutes, Monday–Friday, roughly 9am–5pm UK time).
+- To book:
+  - Confirm their first name if not known.
+  - Ask for mobile number.
+  - Ask for email address (for the Zoom link).
+  - Ask which day/time windows work best.
+- You do NOT need to invent final calendar times here; the backend handles exact slots.
+
+ENDING
+- Before ending, it is polite (not mandatory) to ask if there is anything else they need help with.
+- If they clearly say there is nothing else, keep your final line brief and friendly.
+
+Overall vibe: human, relaxed, confident, slightly cheeky but professional.
+Never use stock-sounding paragraphs. Each answer should feel like you just typed it now.
 ${bookingSummary}
 
 ${behaviourSummary}
@@ -365,46 +399,6 @@ ${behaviourSummary}
 ${profileSummary}
 
 ${channelSummary}
-
-FIRST IMPRESSION RULES
-- On a first conversation with a new caller, introduce yourself clearly.
-- Use a time-of-day greeting:
-  - morning / afternoon / evening / late.
-- If this is chat, keep the greeting short and then WAIT for their reply.
-
-CORE MEMORY RULES
-- Do not re-ask questions that are answered in history (name, business type, etc.).
-- Reuse known details naturally: "for your clinic", "for your garage", etc.
-
-QUESTION DISCIPLINE
-- Ask ONLY ONE clear question per reply.
-- If you need more info, get it in separate turns, not in one long list.
-
-CHANNEL BEHAVIOUR
-- Voice: you may say "digit by digit" for numbers and repeat them back.
-- Chat/WhatsApp/SMS: never say "digit by digit" or "slowly"; do not repeat numbers/emails.
-
-EARLY NAME CAPTURE
-- If name is unknown, ask within first 2–3 replies, but only after giving some value.
-- Once you know their name, never ask again in this conversation.
-
-CONTACT DETAILS
-- Only ask for phone/email when booking or when sending something they requested.
-- Voice: repeat numbers/emails back and confirm.
-- Chat: do NOT repeat; just acknowledge.
-
-POSITIONING
-- You are not just an answering service; you turn more calls into bookings.
-
-BOOKING BEHAVIOUR
-- When they are interested, guide them into a short Zoom consultation (Mon–Fri, 9–5 UK time, 20–30 minutes).
-- Collect name, mobile, email and a suitable time.
-
-CALL ENDING
-- Before ending ask: "Is there anything else I can help with today?"
-- If they decline, give a short warm sign-off and stop.
-
-Overall vibe: human, relaxed, confident, slightly cheeky but professional.
 `.trim();
 }
 
@@ -827,8 +821,9 @@ export async function handleTurn({ userText, callState }) {
 
   let botText =
     completion.choices?.[0]?.message?.content?.trim() ||
-    'Alright, thanks for that. Let me think about the best way I can help – what is the main thing you want to improve with your calls right now?';
+    'Sorry, I did not quite follow that. What would you most like help with around your calls and bookings?';
 
+  // light clean-up only – we let the AI speak freely
   botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
@@ -851,164 +846,10 @@ export async function handleTurn({ userText, callState }) {
     botText = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut;
   }
 
-  let lowerBot = botText.toLowerCase();
-  const lastAssistantMsg = [...history].slice().reverse().find((m) => m.role === 'assistant');
+  // we keep lowerBot only for end-of-call detection, not for overriding content
+  const lowerBot = botText.toLowerCase();
 
-  // ---------- INTENT + FLOW HELPERS ----------
-
-  const trimmedUser = safeUserText.trim().toLowerCase();
-  const yesShort =
-    /^(yes|yes please|yeah|yep|sure|ok|okay|alright|please|sounds good|that works)$/i.test(
-      trimmedUser
-    );
-  const userAskedForExplanation =
-    /\b(explain|explanation|show me|walk me through|how (would|does) that work|how it works|how does it work)\b/i.test(
-      safeUserText
-    );
-  const userWantsExplain =
-    userAskedForExplanation ||
-    (yesShort && behaviour.lastOffer === 'explain_or_consult');
-
-  const userMentionsBooking =
-    /\b(book|booking|consultation|zoom call|zoom|schedule|set.*up.*call)\b/i.test(
-      safeUserText
-    );
-  const userWantsBooking =
-    userMentionsBooking || (yesShort && behaviour.lastOffer === 'offer_booking');
-
-  function usePainToPitchReply() {
-    // If we already fully explained, don't repeat pitch; move to booking instead.
-    if (behaviour.lastOffer === 'explained') {
-      botText =
-        'If that all sounds helpful, the next step is just a short Zoom consultation so we can show you how it would look for your business. What day and time usually works best for you between Monday and Friday, 9am–5pm UK time?';
-      behaviour.lastOffer = 'offer_booking';
-      return;
-    }
-
-    if (profile.businessType) {
-      botText = `Got it, thanks for telling me that. MyBizPal is built for exactly that kind of situation in a ${profile.businessType} – it answers the calls for you, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like me to quickly explain how that would work for your business, or shall we look at times for a short consultation with one of the team?`;
-    } else {
-      botText =
-        'Got it, thanks for telling me that. MyBizPal is built for exactly that kind of situation – it answers the calls for you, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like me to quickly explain how that would work for your business, or shall we look at times for a short consultation with one of the team?';
-    }
-    behaviour.lastOffer = 'explain_or_consult';
-    lowerBot = botText.toLowerCase();
-  }
-
-  function useExplanationReply() {
-    if (
-      profile.businessType &&
-      /clinic|dental|dentist|gp|physio|aesthetic/i.test(profile.businessType)
-    ) {
-      botText =
-        'Alright, let me explain it simply for your clinic. When a patient calls and you or reception are busy, your MyBizPal agent answers in a natural, human way, finds out what they need, takes their details and books them into the right slot in your diary. You get the booking in your calendar, they get an immediate answer, and nobody is left ringing out. From there it sends confirmations and reminders so they actually turn up. If that sounds useful, we can look at a time for a short Zoom demo so you can see it on-screen.';
-    } else if (profile.businessType) {
-      botText =
-        `Alright, let me explain it simply for your ${profile.businessType}. When someone calls and you are tied up, your MyBizPal agent answers, has a proper conversation, captures what they need and either books them into your calendar or sends you a qualified lead with all the details. Instead of voicemails and missed calls, you get organised bookings and enquiries that are ready to act on. If that sounds helpful, we can look at a time for a short Zoom demo so you can see it in action.`;
-    } else {
-      botText =
-        'Alright, let me explain it simply. When someone calls your business and you cannot pick up, your MyBizPal agent answers, has a proper conversation, captures their details and either books them into your calendar or sends you a clear summary so you can follow up. It turns a lot more calls into actual bookings instead of missed opportunities. If that sounds helpful, we can look at a time for a short Zoom consultation so you can see it working.';
-    }
-    behaviour.lastOffer = 'explained';
-    lowerBot = botText.toLowerCase();
-  }
-
-  function useBookingInviteReply() {
-    botText =
-      'Great, let us get a quick Zoom consultation in the diary for you so we can show you how this would work for your business. What day and time suits you best for a 20–30 minute Zoom call between Monday and Friday, 9am–5pm UK time?';
-    behaviour.lastOffer = 'offer_booking';
-    lowerBot = botText.toLowerCase();
-  }
-
-  // ---------- STATEFUL OVERRIDES ----------
-
-  // 1) If we previously offered "explain or consultation" and now user says "yes / explain"
-  if (behaviour.lastOffer === 'explain_or_consult' && userWantsExplain) {
-    useExplanationReply();
-  } else if (behaviour.lastOffer === 'explain_or_consult' && userWantsBooking) {
-    useBookingInviteReply();
-  } else if (behaviour.lastOffer === 'explained' && userWantsBooking) {
-    useBookingInviteReply();
-  }
-
-  // ---------- STRING-BASED CLEAN-UPS & SAFETY ----------
-
-  const bannedRegex =
-    /alright, thanks for that\. how can i best help you with your calls and bookings today\??/i;
-
-  if (bannedRegex.test(lowerBot)) {
-    // If model ever falls back to that old looping sentence, move to a smarter next step.
-    if (/i don.?t know|not sure/i.test(userLower)) {
-      botText =
-        'No worries if you are not sure yet. The easiest way is to pick your biggest headache – missed calls, too many enquiries, or not enough bookings. Which one feels closest to your situation?';
-      behaviour.lastOffer = null;
-    } else {
-      usePainToPitchReply();
-    }
-    lowerBot = botText.toLowerCase();
-  }
-
-  // If OpenAI literally repeats the previous assistant message, nudge it forward
-  if (lastAssistantMsg && lastAssistantMsg.content.trim() === botText.trim()) {
-    usePainToPitchReply();
-  }
-
-  const simplePitchPattern =
-    /in simple terms, mybizpal gives your business an agent like me who answers calls 24\/7/i;
-
-  if (simplePitchPattern.test(lowerBot)) {
-    const alreadyDidSimplePitch = history.some(
-      (m) => m.role === 'assistant' && simplePitchPattern.test(m.content.toLowerCase())
-    );
-    if (alreadyDidSimplePitch) {
-      botText =
-        'Put simply, you get an agent like me answering your calls 24/7, handling questions and turning more of those calls into actual bookings. From here, the main thing is just to see it in a quick demo for your business. Would you like to look at some times for that?';
-      behaviour.lastOffer = 'offer_booking';
-      lowerBot = botText.toLowerCase();
-    }
-  }
-
-  const improvePattern =
-    /what is the main thing you want to improve with your calls right now/i;
-  const anglePattern =
-    /let me come at this from another angle: what tends to happen with calls right now when you are busy or closed\?/i;
-
-  if (improvePattern.test(lowerBot) || anglePattern.test(lowerBot)) {
-    usePainToPitchReply();
-  }
-
-  // Hard override when user explicitly asks "what do you do / what is MyBizPal?"
-  const askedWhatDo =
-    /what.*(you (guys )?do|do you do|you offer)/i.test(userLower) ||
-    /what is mybizpal/i.test(userLower) ||
-    /what is this/i.test(userLower) ||
-    /enquir(e|ing) (about|regarding) your services/i.test(userLower) ||
-    /check(ing)? your services/i.test(userLower);
-
-  if (askedWhatDo) {
-    if (profile.businessType) {
-      botText = `Good question. In simple terms, MyBizPal gives your ${profile.businessType} an agent like me who answers calls and messages 24/7, has a proper conversation with people, qualifies them and then books them straight into your calendar or sends you a clear summary to follow up. It means fewer missed calls and more actual bookings without you being glued to the phone. Does that sound like the sort of thing you have been looking for, or is there something more specific you had in mind?`;
-    } else {
-      botText =
-        'Good question. In simple terms, MyBizPal gives your business an agent like me who answers calls and messages 24/7, has a proper conversation with people, qualifies them and then books them straight into your calendar or sends you a clear summary to follow up. It means fewer missed calls and more actual bookings without you being glued to the phone. Does that sound like the sort of thing you have been looking for, or is there something more specific you had in mind?';
-    }
-    behaviour.lastOffer = null;
-    lowerBot = botText.toLowerCase();
-  }
-
-  if (!bookingState.confirmed) {
-    if (
-      /your appointment is confirmed/i.test(lowerBot) ||
-      /i['’` ]?ve got you booked/i.test(lowerBot) ||
-      /you('?re)? booked for/i.test(lowerBot)
-    ) {
-      botText =
-        'I will get that pencilled in now. Once it is fully confirmed you will get a WhatsApp message with the date, time and Zoom link.';
-      lowerBot = botText.toLowerCase();
-    }
-  }
-
-  // ---------- END-OF-CALL DETECTION ----------
+  // ---------- END-OF-CALL DETECTION (NO TEXT OVERRIDE) ----------
 
   let shouldEnd = false;
   let endByPhrase =
@@ -1027,39 +868,10 @@ export async function handleTurn({ userText, callState }) {
 
   if (endByPhrase) {
     shouldEnd = true;
-    if (
-      !/bye|goodbye|speak soon|have a great day|have a good day|have a good one/i.test(
-        botText
-      )
-    ) {
-      botText =
-        'No worries at all, thanks for speaking with MyBizPal. Have a great day.';
-    }
+    // we DO NOT override botText here; whatever the AI said stands.
   }
 
-  // ---------- SAFETY NET: ENSURE THERE IS A QUESTION ----------
-
-  if (!shouldEnd) {
-    if (!/[?？！]/.test(botText)) {
-      let extraQ;
-      if (
-        bookingState.intent === 'wants_booking' ||
-        bookingState.timeSpoken ||
-        bookingState.earliestSlotSpoken
-      ) {
-        extraQ =
-          ' What day usually works best for you for a quick 20-30 minute call?';
-      } else if (!profile.businessType) {
-        extraQ =
-          ' What kind of business are you running at the moment, or planning to run?';
-      } else {
-        extraQ =
-          ` What would you most like to improve with your ${profile.businessType} right now?`;
-      }
-      botText = botText.replace(/\s+$/g, '').replace(/[.?!]*$/g, '.');
-      botText += extraQ;
-    }
-  }
+  // ---------- HISTORY + CAPTURE TRIGGERS ----------
 
   history.push({ role: 'user', content: safeUserText });
   history.push({ role: 'assistant', content: botText });
