@@ -50,7 +50,9 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 
 function getGoogleJwtClient() {
   if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY) {
-    console.warn('⚠️ GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY missing – WhatsApp cancel will be disabled.');
+    console.warn(
+      '⚠️ GOOGLE_CLIENT_EMAIL or GOOGLE_PRIVATE_KEY missing – WhatsApp cancel will be disabled.'
+    );
     return null;
   }
 
@@ -71,7 +73,9 @@ function normalisePhoneDigits(p) {
 
 async function findLatestUpcomingEventByPhone(phoneE164) {
   if (!GOOGLE_CALENDAR_ID) {
-    console.warn('⚠️ GOOGLE_CALENDAR_ID missing – cannot search calendar for WhatsApp cancel.');
+    console.warn(
+      '⚠️ GOOGLE_CALENDAR_ID missing – cannot search calendar for WhatsApp cancel.'
+    );
     return null;
   }
 
@@ -110,7 +114,10 @@ async function findLatestUpcomingEventByPhone(phoneE164) {
     );
 
     // Try exact / suffix match on phone (last digits usually enough).
-    if (storedPhone && (storedPhone === targetPhone || storedPhone.endsWith(targetPhone))) {
+    if (
+      storedPhone &&
+      (storedPhone === targetPhone || storedPhone.endsWith(targetPhone))
+    ) {
       best = ev;
       console.log('✅ Matched event by extendedProperties phone', {
         eventId: ev.id,
@@ -193,9 +200,7 @@ app.post('/twilio/voice', (req, res) => {
   // Pass caller number into the stream as a custom parameter
   connect.stream({
     url: wsUrl,
-    parameter: [
-      { name: 'caller', value: from },
-    ],
+    parameter: [{ name: 'caller', value: from }],
   });
 
   res.type('text/xml');
@@ -264,8 +269,7 @@ app.post('/whatsapp/inbound', async (req, res) => {
       const existing = await cancelLatestUpcomingEventForPhone(fromPhone);
 
       if (existing) {
-        const startRaw =
-          existing.start?.dateTime || existing.start?.date || '';
+        const startRaw = existing.start?.dateTime || existing.start?.date || '';
         let niceTime = startRaw;
         if (startRaw) {
           const d = new Date(startRaw);
@@ -351,20 +355,20 @@ app.post('/whatsapp/inbound', async (req, res) => {
         });
 
         reply.body(
-          "Got it — I’ll give you a quick call on this number now. If it doesn’t ring in the next minute, just send me another message."
+          'Got it — I’ll give you a quick call on this number now. If it doesn’t ring in the next minute, just send me another message.'
         );
       } else {
         console.warn(
           '⚠️ Cannot place outbound call from WhatsApp: missing TWILIO_NUMBER or Twilio client'
         );
         reply.body(
-          "I’d love to ring you, but I don’t have my outbound number set up properly yet. For now, you can call the MyBizPal line directly and I’ll pick up there."
+          'I’d love to ring you, but I don’t have my outbound number set up properly yet. For now, you can call the MyBizPal line directly and I’ll pick up there.'
         );
       }
     } catch (err) {
       console.error('❌ Error starting outbound call from WhatsApp:', err);
       reply.body(
-        "I tried to ring you but something went wrong on my side. Could you try calling the MyBizPal number directly instead?"
+        'I tried to ring you but something went wrong on my side. Could you try calling the MyBizPal number directly instead?'
       );
     }
 
@@ -397,13 +401,12 @@ app.post('/whatsapp/inbound', async (req, res) => {
     });
 
     reply.body(
-      replyText ||
-        "Got you — could you tell me a bit more about what you’re looking for?"
+      replyText || 'Got you — could you tell me a bit more about what you’re looking for?'
     );
   } catch (err) {
     console.error('❌ Error in WhatsApp -> handleTurn:', err);
     reply.body(
-      "Sorry, something went a bit funny on my side there. Could you try that again in a slightly different way?"
+      'Sorry, something went a bit funny on my side there. Could you try that again in a slightly different way?'
     );
   }
 
@@ -466,6 +469,9 @@ wss.on('connection', (ws, req) => {
     },
     silenceStage: 0,   // 0 = none, 1 = first "are you still there?", 2 = second prompt sent
     silenceTimer: null,
+    // NEW: tell logic.js we've already greeted on this channel
+    _hasTextGreetingSent: false,
+    channel: 'voice',
   };
 
   // ---- Deepgram connection (STT) ----
@@ -577,6 +583,8 @@ wss.on('connection', (ws, req) => {
     if (!streamSid) return;
 
     callState.greeted = true;
+    // Tell logic.js we've already greeted on this call
+    callState._hasTextGreetingSent = true;
 
     const reply = buildTimeOfDayGreeting();
 
@@ -610,6 +618,9 @@ wss.on('connection', (ws, req) => {
     callState.lastUserTranscript = transcript;
 
     try {
+      // Make sure logic.js knows this is a voice call
+      callState.channel = 'voice';
+
       const { text: reply, shouldEnd } = await handleTurn({
         userText: transcript,
         callState,
@@ -656,6 +667,8 @@ wss.on('connection', (ws, req) => {
         const now = Date.now();
         callState.lastReplyAt = now;
         callState.timing.lastBotReplyAt = now;
+        // Mark that we've spoken on this call, so logic.js should not re-greet
+        callState._hasTextGreetingSent = true;
       }
 
       if (shouldEnd && !callState.hangupRequested) {
@@ -663,7 +676,9 @@ wss.on('connection', (ws, req) => {
 
         if (twilioClient && callState.callSid) {
           try {
-            await twilioClient.calls(callState.callSid).update({ status: 'completed' });
+            await twilioClient
+              .calls(callState.callSid)
+              .update({ status: 'completed' });
             console.log('📞 Call ended by Gabriel (hangupRequested=true)');
           } catch (e) {
             console.error('Error ending call via Twilio API:', e?.message || e);
@@ -702,7 +717,11 @@ wss.on('connection', (ws, req) => {
       //  - 6 seconds  → "Are you still there?"
       //  - 14 seconds → "This is Gabriel at MyBizPal, are you still there?"
       //  - 22 seconds → polite goodbye + hang up
-      if (callState.silenceStage === 0 && idleSinceUser >= 6000 && idleSinceUser < 14000) {
+      if (
+        callState.silenceStage === 0 &&
+        idleSinceUser >= 6000 &&
+        idleSinceUser < 14000
+      ) {
         callState.silenceStage = 1;
 
         const reply = 'Are you still there?';
@@ -723,7 +742,11 @@ wss.on('connection', (ws, req) => {
           callState.lastReplyAt = t;
           callState.timing.lastBotReplyAt = t;
         }
-      } else if (callState.silenceStage === 1 && idleSinceUser >= 14000 && idleSinceUser < 22000) {
+      } else if (
+        callState.silenceStage === 1 &&
+        idleSinceUser >= 14000 &&
+        idleSinceUser < 22000
+      ) {
         callState.silenceStage = 2;
 
         const reply = 'This is Gabriel at MyBizPal, are you still there?';
@@ -772,10 +795,15 @@ wss.on('connection', (ws, req) => {
         // End call via Twilio API or close WS
         if (twilioClient && callState.callSid) {
           try {
-            await twilioClient.calls(callState.callSid).update({ status: 'completed' });
+            await twilioClient
+              .calls(callState.callSid)
+              .update({ status: 'completed' });
             console.log('📞 Call ended by Gabriel after prolonged silence');
           } catch (e) {
-            console.error('Error ending call via Twilio API (silence):', e?.message || e);
+            console.error(
+              'Error ending call via Twilio API (silence):',
+              e?.message || e
+            );
             ws.close();
           }
         } else {
@@ -806,17 +834,12 @@ wss.on('connection', (ws, req) => {
       const transcript = (alt.transcript || '').trim();
       if (!transcript) return;
 
-      // Update timing for user speech
       const now = Date.now();
+
+      // Update timing for user speech
       callState.timing.lastUserSpeechAt = now;
       // Reset silence stage once user speaks
       callState.silenceStage = 0;
-
-      // If Gabriel is talking and caller interrupts → cancel TTS (barge-in)
-      if (callState.isSpeaking) {
-        console.log('🚫 Barge-in detected – cancelling current TTS');
-        callState.cancelSpeaking = true;
-      }
 
       // If this is a "check-in hello" after a pause, answer gently and skip full logic
       if (isCheckInHello(transcript)) {
@@ -839,6 +862,7 @@ wss.on('connection', (ws, req) => {
           const t = Date.now();
           callState.lastReplyAt = t;
           callState.timing.lastBotReplyAt = t;
+          callState._hasTextGreetingSent = true;
         }
         return;
       }
@@ -846,6 +870,12 @@ wss.on('connection', (ws, req) => {
       // Ignore tiny noise / reflex utterances straight after Gabriel spoke
       if (shouldIgnoreUtterance(transcript)) {
         return;
+      }
+
+      // If Gabriel is talking and caller interrupts → cancel TTS (barge-in)
+      if (callState.isSpeaking) {
+        console.log('🚫 Barge-in detected – cancelling current TTS');
+        callState.cancelSpeaking = true;
       }
 
       // Debounce + cooldown:
@@ -892,7 +922,8 @@ wss.on('connection', (ws, req) => {
       callState.callSid = msg.start.callSid || null;
       // NEW: get caller phone from customParameters
       callState.callerNumber =
-        (msg.start.customParameters && msg.start.customParameters.caller) || null;
+        (msg.start.customParameters && msg.start.customParameters.caller) ||
+        null;
 
       console.log('▶️  Twilio stream started', {
         streamSid,
@@ -1033,8 +1064,7 @@ function sendAudioToTwilio(ws, streamSid, audioBuffer, callState) {
     }
 
     const chunkSize = 160;
-    const usableLength =
-      audioBuffer.length - (audioBuffer.length % chunkSize);
+    const usableLength = audioBuffer.length - (audioBuffer.length % chunkSize);
     let offset = 0;
 
     try {
