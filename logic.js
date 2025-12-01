@@ -782,12 +782,19 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // ---------- SYSTEM BOOKING ACTIONS ----------
+  // ---------- BOOKING STATE UPDATE (NOW FIRST) ----------
+
+  await updateBookingStateFromUtterance({
+    userText: safeUserText,
+    callState,
+    timezone: TZ,
+  });
+
+  // ---------- SYSTEM BOOKING ACTIONS (AFTER STATE UPDATE) ----------
 
   const systemAction = await handleSystemActionsFirst({
     userText: safeUserText,
     callState,
-    timezone: TZ,
   });
 
   if (systemAction && systemAction.intercept && systemAction.replyText) {
@@ -797,12 +804,6 @@ export async function handleTurn({ userText, callState }) {
     return { text: systemAction.replyText, shouldEnd: false };
   }
 
-  await updateBookingStateFromUtterance({
-    userText: safeUserText,
-    callState,
-    timezone: TZ,
-  });
-
   // ---------- OPENAI CALL ----------
 
   const systemPrompt = buildSystemPrompt(callState);
@@ -811,17 +812,28 @@ export async function handleTurn({ userText, callState }) {
   for (const msg of recent) messages.push({ role: msg.role, content: msg.content });
   messages.push({ role: 'user', content: safeUserText });
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-5.1',
-    reasoning_effort: 'none',
-    temperature: 0.6,
-    max_completion_tokens: 120,
-    messages,
-  });
+  let botText;
 
-  let botText =
-    completion.choices?.[0]?.message?.content?.trim() ||
-    'Sorry, I did not quite follow that. What would you most like help with around your calls and bookings?';
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-5.1',
+      reasoning_effort: 'none',
+      temperature: 0.6,
+      max_completion_tokens: 120,
+      messages,
+    });
+
+    botText =
+      completion.choices?.[0]?.message?.content?.trim() || '';
+  } catch (err) {
+    console.error('OpenAI error inside handleTurn:', err?.message || err);
+    botText = '';
+  }
+
+  if (!botText) {
+    botText =
+      'Something glitched slightly on my side there. Could you tell me, in your own words, what you’d most like help with around your calls, bookings, or MyBizPal?';
+  }
 
   // light clean-up only – we let the AI speak freely
   botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
