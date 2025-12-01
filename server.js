@@ -83,6 +83,12 @@ async function findLatestUpcomingEventByPhone(phoneE164) {
 
   const nowISO = new Date().toISOString();
 
+  console.log('🔎 Searching calendar for upcoming events by phone', {
+    phoneE164,
+    calendarId: GOOGLE_CALENDAR_ID,
+    timeMin: nowISO,
+  });
+
   const res = await calendar.events.list({
     calendarId: GOOGLE_CALENDAR_ID,
     timeMin: nowISO,
@@ -98,11 +104,18 @@ async function findLatestUpcomingEventByPhone(phoneE164) {
 
   for (const ev of events) {
     const priv = ev.extendedProperties?.private || {};
-    const storedPhone = normalisePhoneDigits(priv.phone || '');
+    // Prefer new mybizpal_phone, fall back to legacy "phone"
+    const storedPhone = normalisePhoneDigits(
+      priv.mybizpal_phone || priv.phone || ''
+    );
 
     // Try exact / suffix match on phone (last digits usually enough).
     if (storedPhone && (storedPhone === targetPhone || storedPhone.endsWith(targetPhone))) {
       best = ev;
+      console.log('✅ Matched event by extendedProperties phone', {
+        eventId: ev.id,
+        storedPhone,
+      });
       break;
     }
 
@@ -111,16 +124,29 @@ async function findLatestUpcomingEventByPhone(phoneE164) {
       const descDigits = normalisePhoneDigits(ev.description);
       if (descDigits && descDigits.includes(targetPhone.replace('+', ''))) {
         best = ev;
+        console.log('✅ Matched event by description phone', {
+          eventId: ev.id,
+        });
+        break;
       }
     }
+  }
+
+  if (!best) {
+    console.log('ℹ️ No upcoming event found matching phone', { phoneE164 });
   }
 
   return best;
 }
 
 async function cancelLatestUpcomingEventForPhone(phoneE164) {
+  console.log('🗑️ cancelLatestUpcomingEventForPhone called', { phoneE164 });
+
   const event = await findLatestUpcomingEventByPhone(phoneE164);
-  if (!event) return null;
+  if (!event) {
+    console.log('ℹ️ No event to cancel for phone', { phoneE164 });
+    return null;
+  }
 
   const auth = getGoogleJwtClient();
   if (!auth) return null;
@@ -130,6 +156,11 @@ async function cancelLatestUpcomingEventForPhone(phoneE164) {
 
   await calendar.events.delete({
     calendarId: GOOGLE_CALENDAR_ID,
+    eventId: event.id,
+  });
+
+  console.log('✅ Deleted calendar event for phone', {
+    phoneE164,
     eventId: event.id,
   });
 
