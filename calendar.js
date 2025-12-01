@@ -391,6 +391,16 @@ export async function createBookingEvent({
     start: { dateTime: correctedStartISO, timeZone: TZ },
     end: { dateTime: endISO, timeZone: TZ },
     description: descriptionLines.join('\n'),
+    // ⬇️ NEW: internal tracking fields for reminderWorker + reschedules
+    extendedProperties: {
+      private: {
+        mybizpal_phone: phone || '',
+        mybizpal_name: safeName || '',
+        mybizpal_email: email || '',
+        mybizpal_lastNotifiedStartISO: correctedStartISO,
+        mybizpal_cancel_notified: '0',
+      },
+    },
   };
 
   const created = await calendar.events.insert({
@@ -399,7 +409,15 @@ export async function createBookingEvent({
     sendUpdates: 'none',
   });
 
-  return created.data;
+  const createdData = created.data || {};
+  console.log('📅 Created calendar event', {
+    id: createdData.id,
+    start: createdData.start?.dateTime || correctedStartISO,
+    phone,
+    name: safeName,
+  });
+
+  return createdData;
 }
 
 /**
