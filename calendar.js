@@ -391,12 +391,16 @@ export async function createBookingEvent({
     start: { dateTime: correctedStartISO, timeZone: TZ },
     end: { dateTime: endISO, timeZone: TZ },
     description: descriptionLines.join('\n'),
-    // ⬇️ NEW: internal tracking fields for reminderWorker + reschedules
+    // 🔴 IMPORTANT FOR REMINDERS + WHATSAPP CANCEL/RESCHEDULE
     extendedProperties: {
       private: {
+        // New canonical fields used by reminderWorker + server.js
         mybizpal_phone: phone || '',
-        mybizpal_name: safeName || '',
-        mybizpal_email: email || '',
+        mybizpal_name: safeName,
+        // Legacy mirrors (backwards compatible with any old code)
+        phone: phone || '',
+        name: safeName,
+        // Seed last-notified time so reschedule/cancel logic has a baseline
         mybizpal_lastNotifiedStartISO: correctedStartISO,
         mybizpal_cancel_notified: '0',
       },
@@ -409,15 +413,14 @@ export async function createBookingEvent({
     sendUpdates: 'none',
   });
 
-  const createdData = created.data || {};
   console.log('📅 Created calendar event', {
-    id: createdData.id,
-    start: createdData.start?.dateTime || correctedStartISO,
+    id: created.data.id,
+    start: correctedStartISO,
     phone,
     name: safeName,
   });
 
-  return createdData;
+  return created.data;
 }
 
 /**
