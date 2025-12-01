@@ -13,7 +13,7 @@ import {
   findEarliestAvailableSlot,
   createBookingEvent,
   findExistingBooking,
-  cancelEventById, // kept imported in case you want auto-reschedule later
+  cancelEventById, // kept imported for move/cancel logic
   formatSpokenDateTime,
   hasConflict,
 } from './calendar.js';
@@ -321,8 +321,8 @@ export async function updateBookingStateFromUtterance({
   const raw = userText || '';
   const lower = raw.toLowerCase();
 
-  // 🔧 NEW: if they clearly want to book again but we have an old confirmed booking
-  // treat this as the start of a *new* booking flow, not as "already done".
+  // 🔧 If they clearly want to book again but we have an old confirmed booking,
+  // treat this as the start of a *new* booking flow.
   if (detectBookingIntent(raw) && booking.bookingConfirmed) {
     booking.bookingConfirmed = false;
     booking.intent = 'wants_booking';
@@ -741,7 +741,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       if (!booking.needEmailBeforeBooking) {
         booking.needEmailBeforeBooking = true;
         const replyText =
-          'Brilliant — before I lock that in, what’s your best email address, nice and slowly?';
+          'Brilliant — before I lock that in, what’s your best email address?';
         return {
           intercept: true,
           replyText,
