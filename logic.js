@@ -1014,47 +1014,37 @@ export async function handleTurn({ userText, callState }) {
     return 'Got it, that really helps. It sounds like some calls and leads are slipping through the net when things get busy. That is exactly what MyBizPal is built to fix - it answers every call, captures the details and books people straight into your calendar so you are not wasting opportunities. Would you like a quick plain-English overview of how that would work for your business, or shall we look at times for a short consultation with one of the team?';
   }
 
-  // HARD BAN: kill the generic "How can I best help you..." line completely
-  const bannedHelpRegex =
-    /how can i best help you with your calls and bookings today\??/i;
+  // ---- HARD BAN: LOOPING SENTENCE ----
+  const bannedRegex =
+    /alright, thanks for that\. how can i best help you with your calls and bookings today\??/i;
 
-  if (bannedHelpRegex.test(lowerBot)) {
-    // Case A: user just asked "Yeah how?" / "How?"
+  if (bannedRegex.test(lowerBot)) {
     if (
       /\bhow\??$/.test(userLower) ||
       /yeah how\??/.test(userLower) ||
-      /how would that work\??/.test(userLower) ||
-      /how does that work\??/.test(userLower)
+      /how would that work\??/.test(userLower)
     ) {
       if (profile.businessType) {
-        botText =
-          `Sure, let me paint the picture for your ${profile.businessType}. When a customer calls and you are busy, your MyBizPal agent answers in a human way, finds out what they need, takes their details, and either books them into your diary or sends you a clear summary so you can follow up. That way missed calls turn into actual bookings instead of money left on the table. Does that sound like the kind of help you are after?`;
+        botText = `Sure. For your ${profile.businessType}, when someone calls and you are busy, your MyBizPal agent answers, has a proper conversation, takes their details and either books them into your diary or sends you a clear summary. That way you turn more calls into real bookings. Does that sound like what you are after?`;
       } else {
         botText =
-          'Sure, let me paint the picture. When someone calls your business and you are busy, your MyBizPal agent answers in a human way, finds out what they need, takes their details, and either books them into your diary or sends you a clear summary so you can follow up. That way, instead of missed calls, you get more bookings without being chained to the phone. Does that sound like the kind of help you are after?';
+          'Sure. When someone calls and you are busy, your MyBizPal agent answers, has a proper conversation, takes their details and either books them into your diary or sends you a clear summary. That way you turn more calls into real bookings. Does that sound like what you are after?';
       }
-    }
-    // Case B: user clearly wants to book something
-    else if (bookingState.intent === 'wants_booking' || /\bbook\b/i.test(userLower)) {
+    } else if (/\bbook\b/.test(userLower)) {
       botText =
-        'Got you. The best next step is a short Zoom consultation so we can show you how this would work for your business and talk through pricing. What day and time suits you best for a 20–30 minute Zoom call between Monday and Friday, 9am and 5pm UK time?';
-    }
-    // Case C: user is unsure what they need
-    else if (
+        'Got you. The best next step is a short Zoom consultation so we can show you how this would work for your business. What day and time suits you best for a 20–30 minute Zoom call between Monday and Friday, 9am–5pm UK time?';
+    } else if (
       /\bi don.?t know\b/i.test(userLower) ||
-      /\bnot sure\b/i.test(userLower) ||
-      /\bi'?m not sure\b/i.test(userLower)
+      /\bnot sure\b/i.test(userLower)
     ) {
       botText =
-        'No worries at all if you are not completely sure yet. A good place to start is just picking the biggest headache – missed calls, not enough bookings, or being glued to the phone all day. Which of those feels closest to where you are right now?';
-    }
-    // Case D: generic fallback – use value-based pitch instead
-    else {
+        'No worries at all if you are not sure yet. The easiest way is to pick your biggest headache – missed calls, too many enquiries, or not enough bookings. Which one feels closest to your situation?';
+    } else {
       botText = buildPainToPitchReply();
     }
-
     lowerBot = botText.toLowerCase();
   }
+  // ---- END BAN ----
 
   const lastAssistantMsg = [...history].slice().reverse()
     .find((m) => m.role === 'assistant');
@@ -1292,4 +1282,3 @@ export async function handleTurn({ userText, callState }) {
 
   return { text: botText, shouldEnd };
 }
-```0
