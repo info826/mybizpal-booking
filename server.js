@@ -332,7 +332,7 @@ app.post('/whatsapp/inbound', async (req, res) => {
     } catch (err) {
       console.error('❌ Error cancelling via WhatsApp:', err);
       reply.body(
-        "Something went a bit wrong while I was trying to cancel that. A human will double-check and confirm it for you shortly."
+        'Something went a bit wrong while I was trying to cancel that. A human will double-check and confirm it for you shortly.'
       );
     }
 
@@ -472,6 +472,8 @@ wss.on('connection', (ws, req) => {
     // NEW: tell logic.js we've already greeted on this channel
     _hasTextGreetingSent: false,
     channel: 'voice',
+    // NEW: dedupe last bot text
+    lastBotText: '',
   };
 
   // ---- Deepgram connection (STT) ----
@@ -581,6 +583,7 @@ wss.on('connection', (ws, req) => {
   async function sendInitialGreeting() {
     if (callState.greeted) return;
     if (!streamSid) return;
+    if (callState.hangupRequested) return;
 
     callState.greeted = true;
     // Tell logic.js we've already greeted on this call
@@ -604,12 +607,14 @@ wss.on('connection', (ws, req) => {
       const now = Date.now();
       callState.lastReplyAt = now;
       callState.timing.lastBotReplyAt = now;
+      callState.lastBotText = reply;
     }
   }
 
   // ---- HELPER: normal replies after user speaks ----
   async function respondToUser(transcript) {
     if (!transcript) return;
+    if (callState.hangupRequested) return;
 
     console.log(`👤 Caller said: "${transcript}"`);
 
@@ -627,6 +632,7 @@ wss.on('connection', (ws, req) => {
       });
 
       const trimmedReply = (reply || '').trim();
+      const nowTs = Date.now();
 
       // If logic says "say nothing" (e.g. still capturing phone/email),
       // then do not send any TTS at all — just stay quiet.
@@ -640,6 +646,31 @@ wss.on('connection', (ws, req) => {
                 .calls(callState.callSid)
                 .update({ status: 'completed' });
               console.log('📞 Call ended by Gabriel (hangupRequested=true)');
+            } catch (e) {
+              console.error('Error ending call via Twilio API:', e?.message || e);
+              ws.close();
+            }
+          } else {
+            ws.close();
+          }
+        }
+        return;
+      }
+
+      // NEW: guard against accidental duplicate replies (same text within 2 seconds)
+      if (
+        trimmedReply === callState.lastBotText &&
+        nowTs - (callState.timing.lastBotReplyAt || 0) < 2000
+      ) {
+        console.log('🔁 Skipping duplicate reply:', `"${trimmedReply}"`);
+        if (shouldEnd && !callState.hangupRequested) {
+          callState.hangupRequested = true;
+          if (twilioClient && callState.callSid) {
+            try {
+              await twilioClient
+                .calls(callState.callSid)
+                .update({ status: 'completed' });
+              console.log('📞 Call ended by Gabriel (after duplicate skip)');
             } catch (e) {
               console.error('Error ending call via Twilio API:', e?.message || e);
               ws.close();
@@ -669,6 +700,7 @@ wss.on('connection', (ws, req) => {
         callState.timing.lastBotReplyAt = now;
         // Mark that we've spoken on this call, so logic.js should not re-greet
         callState._hasTextGreetingSent = true;
+        callState.lastBotText = trimmedReply;
       }
 
       if (shouldEnd && !callState.hangupRequested) {
@@ -741,6 +773,7 @@ wss.on('connection', (ws, req) => {
           const t = Date.now();
           callState.lastReplyAt = t;
           callState.timing.lastBotReplyAt = t;
+          callState.lastBotText = reply;
         }
       } else if (
         callState.silenceStage === 1 &&
@@ -766,11 +799,19 @@ wss.on('connection', (ws, req) => {
           const t = Date.now();
           callState.lastReplyAt = t;
           callState.timing.lastBotReplyAt = t;
+          callState.lastBotText = reply;
         }
       } else if (callState.silenceStage === 2 && idleSinceUser >= 22000) {
         // Final goodbye and hang up
         callState.silenceStage = 3; // prevent repeating
         callState.hangupRequested = true;
+
+        // Clear any queued reply
+        if (callState.pendingTimer) {
+          clearTimeout(callState.pendingTimer);
+          callState.pendingTimer = null;
+          callState.pendingTranscript = null;
+        }
 
         const reply =
           'I’ll let you go for now, but if you ever need to set up an agent like me, just reach out to MyBizPal again. Have a great day.';
@@ -790,6 +831,7 @@ wss.on('connection', (ws, req) => {
           const t = Date.now();
           callState.lastReplyAt = t;
           callState.timing.lastBotReplyAt = t;
+          callState.lastBotText = reply;
         }
 
         // End call via Twilio API or close WS
@@ -824,6 +866,8 @@ wss.on('connection', (ws, req) => {
   // Deepgram → transcript handler with cooldown & debouncing
   dgSocket.on('message', async (data) => {
     try {
+      if (callState.hangupRequested) return;
+
       const msg = JSON.parse(data.toString());
       if (!msg.channel || !msg.channel.alternatives) return;
 
@@ -843,6 +887,8 @@ wss.on('connection', (ws, req) => {
 
       // If this is a "check-in hello" after a pause, answer gently and skip full logic
       if (isCheckInHello(transcript)) {
+        if (callState.hangupRequested) return;
+
         const reply =
           'I’m still here, don’t worry — I was just thinking for a second. Where were we?';
 
@@ -863,6 +909,7 @@ wss.on('connection', (ws, req) => {
           callState.lastReplyAt = t;
           callState.timing.lastBotReplyAt = t;
           callState._hasTextGreetingSent = true;
+          callState.lastBotText = reply;
         }
         return;
       }
@@ -894,6 +941,7 @@ wss.on('connection', (ws, req) => {
         const delay = callState.lastReplyAt + minGap - now;
         callState.pendingTranscript = transcript;
         callState.pendingTimer = setTimeout(async () => {
+          if (callState.hangupRequested) return;
           const tText = callState.pendingTranscript;
           callState.pendingTranscript = null;
           callState.pendingTimer = null;
