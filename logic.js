@@ -419,11 +419,17 @@ export async function handleTurn({ userText, callState }) {
   ensureBehaviourState(callState);
   ensureProfile(callState);
 
+  // Ensure booking object exists early
+  if (!callState.booking) {
+    callState.booking = {};
+  }
+
   loadSessionForCallIfNeeded(callState);
 
   const history = ensureHistory(callState);
   const behaviour = ensureBehaviourState(callState);
   const profile = ensureProfile(callState);
+  const booking = callState.booking;
   const { isChat, isVoice } = getChannelInfo(callState);
 
   if (!callState.capture) {
@@ -468,6 +474,19 @@ export async function handleTurn({ userText, callState }) {
 
   if (/i own|my business|i run|i'm the owner|i am the owner/.test(userLower)) {
     behaviour.decisionPower = 'decision-maker';
+  }
+
+  // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
+
+  const bookingIntentRegex =
+    /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult)\b/;
+
+  if (bookingIntentRegex.test(userLower)) {
+    // Mark them as ready / interested in a consultation with MyBizPal specifically
+    booking.intent = booking.intent || 'mybizpal_consultation';
+    if (behaviour.bookingReadiness === 'unknown') {
+      behaviour.bookingReadiness = 'high';
+    }
   }
 
   // ---------- PENDING CONFIRMATIONS ----------
@@ -558,6 +577,64 @@ export async function handleTurn({ userText, callState }) {
     if (!strongNo && yesInAnyLang(safeUserText)) {
       capture.pendingConfirm = null;
     }
+  }
+
+  // ---------- QUICK INTENT: REPEAT PHONE / EMAIL / DETAILS ----------
+
+  const wantsPhoneRepeat =
+    /\b(repeat|read back|confirm|check|what)\b.*\b(my )?(number|phone|mobile)\b/.test(
+      userLower
+    ) ||
+    /\bwhat\b.*\bnumber do you have\b/.test(userLower);
+
+  const wantsEmailRepeat =
+    /\b(repeat|read back|confirm|check|what)\b.*\b(my )?(email|e-mail|e mail)\b/.test(
+      userLower
+    ) ||
+    /\bwhat\b.*\bemail (do you|have you) have\b/.test(userLower);
+
+  const wantsDetailsRepeat =
+    /\bwhat details (do you|have you) have (for|on) me\b/.test(userLower) ||
+    /\bwhat (info|information) do you have on me\b/.test(userLower);
+
+  if (wantsPhoneRepeat && booking.phone) {
+    const spoken = isVoice ? verbalisePhone(booking.phone) : booking.phone;
+    const replyText = isVoice
+      ? `Sure, I’ve got ${spoken} as your mobile. If that’s wrong, just say it again from the start.`
+      : `Sure, I’ve got **${booking.phone}** as your mobile number. If that’s wrong, just send me the correct one.`;
+
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
+
+  if (wantsEmailRepeat && booking.email) {
+    const spoken = isVoice ? verbaliseEmail(booking.email) : booking.email;
+    const replyText = isVoice
+      ? `Of course – I’ve got ${spoken} as your email. If that’s not right, just say it again from the beginning.`
+      : `Of course – I’ve got **${booking.email}** as your email. If that’s not right, just send me the correct one.`;
+
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
+
+  if (wantsDetailsRepeat && (booking.phone || booking.email)) {
+    const lines = [];
+    if (booking.phone) lines.push(`- Mobile: ${booking.phone}`);
+    if (booking.email) lines.push(`- Email: ${booking.email}`);
+    const summary = lines.join(isChat ? '\n' : ', ');
+
+    const replyText = isChat
+      ? `Here’s what I have for you right now:\n${summary}\n\nIf anything looks wrong, just send me the updated details.`
+      : `Right now I’ve got: ${summary}. If anything sounds wrong, just correct me and I’ll update it.`;
+
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
   }
 
   // ---------- NAME CAPTURE MODE ----------
@@ -854,15 +931,34 @@ export async function handleTurn({ userText, callState }) {
     !!callState.greeted || history.length > 0 || !!callState._hasTextGreetingSent;
 
   if (alreadyGreeted) {
-    botText = botText.replace(
-      /^Good\s+(morning|afternoon|evening|late)[^.!\n]*?I['’` ]m\s+Gabriel\s+from\s+MyBizPal[.!?]*\s*/i,
-      ''
-    ).trim();
+    botText = botText
+      .replace(
+        /^Good\s+(morning|afternoon|evening|late)[^.!\n]*?I['’` ]m\s+Gabriel\s+from\s+MyBizPal[.!?]*\s*/i,
+        ''
+      )
+      .trim();
   }
 
   if (!botText) {
     botText =
       'Sure – what would you like help with around your calls and bookings?';
+  }
+
+  // ---------- OVERRIDE USELESS FALLBACK FOR CLEAR BOOKING INTENT ----------
+
+  const genericFallbackRegex =
+    /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that\./i;
+
+  if (genericFallbackRegex.test(botText) && bookingIntentRegex.test(userLower)) {
+    // User clearly wants to book – don't give them a "didn't follow" reply
+    botText =
+      'No problem at all — you’re through to MyBizPal. I can help you book a short Zoom consultation with one of the team to talk about your calls and bookings. What should I call you, just your first name?';
+
+    // Make sure we know this is a consultation booking
+    booking.intent = booking.intent || 'mybizpal_consultation';
+    if (behaviour.bookingReadiness === 'unknown') {
+      behaviour.bookingReadiness = 'high';
+    }
   }
 
   if (botText.length > 420) {
@@ -915,6 +1011,7 @@ export async function handleTurn({ userText, callState }) {
       /spell your first name/.test(lower) ||
       (/letter by letter/.test(lower) && /name/.test(lower)) ||
       /(what('| i)s your name\??)/.test(lower) ||
+      /(what('| i)s your first name\??)/.test(lower) ||
       /who am i speaking with/.test(lower) ||
       /who am i talking to/.test(lower) ||
       /your name, by the way/.test(lower) ||
