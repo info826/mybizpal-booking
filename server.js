@@ -814,7 +814,7 @@ wss.on('connection', (ws, req) => {
         }
 
         const reply =
-          'I’ll let you go for now, but if you ever need to set up an agent like me, just reach out to MyBizPal again. Have a great day.';
+          'I’ll let you go for now, but if you ever want to talk to the MyBizPal team about automating your calls and bookings, just reach out again. Have a great day.';
         console.log('🤖 Gabriel (silence goodbye):', `"${reply}"`);
 
         callState.isSpeaking = true;
