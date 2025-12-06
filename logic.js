@@ -408,25 +408,11 @@ SALES MINDSET (VERY IMPORTANT)
 - Always ask specific, human questions, not generic ones.
 - If what they ask is outside MyBizPal, answer briefly, then steer back to how MyBizPal could help their business.
 
-GREETING
-- On the very first reply in a conversation, you normally say:
-  "Good ${timeOfDay}, I’m Gabriel from MyBizPal. How can I help you today?"
-- After that, do NOT repeat this greeting again in the same conversation.
-- If the caller already heard a separate phone greeting at the start of the call,
-  you can skip repeating the full greeting and just respond naturally to what they asked.
-
-CONVERSATION RULES
-- If they say things like "I’d like to make a booking" or "I want to speak with an adviser",
-  assume they mean speaking with a MyBizPal adviser about their own business.
-- Ask only ONE clear question at a time.
-- Read the history so you don’t re-ask things like their name, business type, or location.
-- Use what you know: say "for your clinic" or "for your garage" rather than repeating generic phrases.
-- When they seem confused, ask a specific clarifying question instead of saying "I didn’t understand".
-- When they ask prices, you can say things are tailored and that pricing depends on their setup,
-  and that it is best covered properly on a quick consultation call.
-
 CONTACT DETAILS
-- Only ask for mobile and email when:
+- Internally you already know the phone/WhatsApp number they are contacting you from, so in most cases you do NOT need to ask for their mobile number again.
+  - In chat you can say things like: "I’ll use the number you’re messaging me from for confirmations – if you’d rather use another one, just tell me."
+  - Only ask for a different number if they say they prefer another one, or if they obviously give you a new number.
+- Only ask for email when:
   - you are actually booking a Zoom call, or
   - you genuinely need to send them something they requested.
 - On voice: you may ask them to repeat numbers and emails and you can read them back.
@@ -437,10 +423,11 @@ BOOKING BEHAVIOUR
   (about 20–30 minutes, Monday–Friday, roughly 9am–5pm UK time) with a MyBizPal adviser.
 - To book:
   - Confirm their first name if not known.
-  - Ask for mobile number.
+  - Use the phone number they are calling/messaging from for confirmations (unless they specify another).
   - Ask for email address (for the Zoom link).
-  - Ask which day/time windows work best.
-- You do NOT need to invent final calendar times here; the backend handles exact slots.
+  - Ask which day/time windows work best (for example: morning 9–11, lunch-ish 11–2, afternoon 2–5).
+  - Then suggest concrete times based on availability, such as "9am" or "11am", and confirm.
+- You do NOT need to invent final calendar times yourself beyond offering realistic slots; the backend handles exact calendar availability.
 
 ENDING
 - Before ending, it is polite (not mandatory) to ask if there is anything else they need help with.
@@ -976,7 +963,41 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // ---------- SYSTEM BOOKING ACTIONS ----------
+  // ---------- UPDATE BOOKING STATE FIRST (IMPORTANT) ----------
+
+  await updateBookingStateFromUtterance({
+    userText: safeUserText,
+    callState,
+    timezone: TZ,
+  });
+
+  // ---------- PHONE SANITY CHECK AFTER UPDATE ----------
+
+  const currentPhone = callState.booking?.phone || '';
+  const phoneDigits = String(currentPhone).replace(/[^\d]/g, '');
+  const userTypedDigits = /\d{3,}/.test(safeUserText);
+
+  const looksShortUk =
+    TZ.startsWith('Europe/London') &&
+    userTypedDigits &&
+    phoneDigits &&
+    phoneDigits.length > 0 &&
+    phoneDigits.length < 11;
+
+  if (looksShortUk) {
+    // Clear the possibly bad phone and ask for a full one
+    callState.booking.phone = null;
+
+    const replyText =
+      'That number looks a bit short for a full mobile. Could you give me the full mobile number including area or country code, from the very start?';
+
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
+
+  // ---------- SYSTEM BOOKING ACTIONS (NOW SEES UPDATED STATE) ----------
 
   const systemAction = await handleSystemActionsFirst({
     userText: safeUserText,
@@ -990,12 +1011,6 @@ export async function handleTurn({ userText, callState }) {
     snapshotSessionFromCall(callState);
     return { text: systemAction.replyText, shouldEnd: false };
   }
-
-  await updateBookingStateFromUtterance({
-    userText: safeUserText,
-    callState,
-    timezone: TZ,
-  });
 
   // ---------- OPENAI CALL ----------
 
