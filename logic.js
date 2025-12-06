@@ -22,6 +22,13 @@ const openai = new OpenAI({
 
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
+// small helper for more natural variation
+function pickRandom(arr) {
+  if (!arr || !arr.length) return '';
+  const idx = Math.floor(Math.random() * arr.length);
+  return arr[idx];
+}
+
 // ---------- BASIC STATE HELPERS ----------
 
 function ensureHistory(callState) {
@@ -347,6 +354,10 @@ IDENTITY & GOAL
   - If they clearly seem to be trying to book with another business (e.g. their dentist),
     explain that they have reached MyBizPal, which helps business owners with their own
     calls and bookings, and gently steer back to how MyBizPal can help THEM as a business.
+- If they ask whether you remember them or past chats, do NOT talk about "memory limits"
+  or say you can only see this conversation. Instead, answer naturally: say you speak to
+  lots of business owners and focus on what they need right now, then ask who they are
+  and what their business does.
 - Internally, you can think of yourself as an AI-powered agent, but:
   - Do NOT say "agent like me".
   - Do NOT talk about being AI or software unless the user directly asks.
@@ -637,6 +648,58 @@ export async function handleTurn({ userText, callState }) {
     return { text: replyText, shouldEnd: false };
   }
 
+  // ---------- LIGHTWEIGHT SMALL-TALK / INTENT HANDLERS ----------
+
+  // "Do you remember me?"
+  if (/\bremember me\b|\bdo you remember\b/.test(userLower)) {
+    const knownName = booking.name;
+    let replyText;
+
+    if (knownName) {
+      replyText = pickRandom([
+        `Hi again, ${knownName} — I chat to a lot of business owners like you, but I mostly focus on what you need right now. Remind me what your business does and what you’re trying to fix around calls and bookings.`,
+        `${knownName}, good to see you back. I speak to plenty of business owners, so I focus on the current conversation. Tell me what your business does and what’s going on with your calls or enquiries at the moment.`,
+      ]);
+    } else {
+      replyText = pickRandom([
+        'I chat to a lot of business owners, so I mostly focus on what you need right now. Tell me your name and what your business does, and we’ll pick things up from there.',
+        'Kind of — I remember the type of people I help: busy business owners with too many calls. Remind me who you are and what your business does, and we’ll get straight into it.',
+      ]);
+    }
+
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
+
+  // "I wanted to see what you do / what does MyBizPal do?"
+  if (
+    /\bwhat do you do\b/.test(userLower) ||
+    /see what you do/.test(userLower) ||
+    /what (is|does) mybizpal\b/.test(userLower) ||
+    /what you do\??$/.test(userLower)
+  ) {
+    behaviour.interestLevel =
+      behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
+
+    const coreExplanation =
+      'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. We’re built for busy clinics, salons, dentists, trades and other local service businesses.';
+
+    const followUps = [
+      '\n\nWhat type of business are you running at the moment?',
+      '\n\nTell me a bit about your business — what do you offer and who do you normally work with?',
+      '\n\nTo make it real, what kind of business are you thinking about using this for?',
+    ];
+
+    const replyText = coreExplanation + pickRandom(followUps);
+
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
+
   // ---------- NAME CAPTURE MODE ----------
 
   if (capture.mode === 'name') {
@@ -906,13 +969,31 @@ export async function handleTurn({ userText, callState }) {
     messages,
   });
 
-  let botText =
-    completion.choices?.[0]?.message?.content?.trim() ||
-    'Sorry, I did not quite follow that. What would you most like help with around your calls and bookings?';
+  let botText = completion.choices?.[0]?.message?.content?.trim() || '';
+
+  if (!botText) {
+    const fallbackOptions = [
+      'Sorry, I did not quite follow that. What would you most like help with around your calls and bookings?',
+      'I might have missed a bit of that. What’s the main thing you’d like to fix – missed calls, online bookings, or something else?',
+      'Got you. Tell me a bit more about what’s going on with your calls or enquiries so I know where to start.',
+    ];
+    botText = pickRandom(fallbackOptions);
+  }
 
   // light clean-up only – we let the AI speak freely
   botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
+
+  // Strip any "I can't remember past chats" style disclaimers
+  botText = botText.replace(
+    /I (do not|don't) have (a )?way to (reliably )?remember past (chats|conversations) with you[^.]*\./gi,
+    ''
+  );
+  botText = botText.replace(
+    /I (only|can only) see (what('?s| is) )?in this conversation( right now)?\.?/gi,
+    ''
+  );
+  botText = botText.trim();
 
   const { booking: bookingState = {} } = callState;
 
@@ -972,7 +1053,7 @@ export async function handleTurn({ userText, callState }) {
     botText = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut;
   }
 
-  const lowerBot = botText.toLowerCase(); // kept only for end-of-call detection
+  const lowerBot = botText.toLowerCase(); // kept only for end-of-call detection (if you expand later)
 
   // ---------- END-OF-CALL DETECTION (NO TEXT OVERRIDE) ----------
 
