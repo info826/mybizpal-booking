@@ -273,6 +273,33 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
   }
 }
 
+// ---------- CONTEXTUAL FALLBACK BUILDER ----------
+
+function buildContextualFallback({ safeUserText, history }) {
+  const trimmedUser = (safeUserText || '').trim();
+  const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
+
+  let leadIn;
+  if (lastAssistant && trimmedUser) {
+    leadIn = `Got it – ${trimmedUser}.`;
+  } else if (trimmedUser) {
+    leadIn = `Got it – "${trimmedUser}".`;
+  } else {
+    leadIn = 'Got it.';
+  }
+
+  const salesLine =
+    ' In simple terms, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
+
+  const ctaOptions = [
+    ' Would you like me to talk you through how that could work for your situation?',
+    ' The next step is usually a short Zoom where we walk through how it would plug into your business – would you like to look at times for that?',
+    ' If you like, we can jump on a quick Zoom so you can see how this would look day to day – shall we line that up?',
+  ];
+
+  return leadIn + salesLine + pickRandom(ctaOptions);
+}
+
 // ---------- SYSTEM PROMPT ----------
 
 function buildSystemPrompt(callState) {
@@ -961,23 +988,66 @@ export async function handleTurn({ userText, callState }) {
   for (const msg of recent) messages.push({ role: msg.role, content: msg.content });
   messages.push({ role: 'user', content: safeUserText });
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-5.1',
-    reasoning_effort: 'none',
-    temperature: 0.6,
-    max_completion_tokens: 120,
-    messages,
-  });
+  let botText = '';
 
-  let botText = completion.choices?.[0]?.message?.content?.trim() || '';
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-5.1',
+      reasoning_effort: 'none',
+      temperature: 0.6,
+      max_completion_tokens: 120,
+      messages,
+    });
 
+    botText = completion.choices?.[0]?.message?.content || '';
+    botText = botText.trim();
+  } catch (err) {
+    console.error('Primary OpenAI call failed:', err);
+  }
+
+  // Second-chance minimalist call if first came back empty/whitespace
   if (!botText) {
-    const fallbackOptions = [
-      'Sorry, I did not quite follow that. What would you most like help with around your calls and bookings?',
-      'I might have missed a bit of that. What’s the main thing you’d like to fix – missed calls, online bookings, or something else?',
-      'Got you. Tell me a bit more about what’s going on with your calls or enquiries so I know where to start.',
-    ];
-    botText = pickRandom(fallbackOptions);
+    try {
+      const lastAssistant = [...history]
+        .slice()
+        .reverse()
+        .find((m) => m.role === 'assistant');
+
+      const slimMessages = [
+        {
+          role: 'system',
+          content:
+            'You are Gabriel from MyBizPal. Continue the conversation naturally based on the last assistant message and the user reply. Do not say you cannot remember past chats. Keep it short and conversational.',
+        },
+      ];
+
+      if (lastAssistant) {
+        slimMessages.push({
+          role: 'assistant',
+          content: lastAssistant.content,
+        });
+      }
+
+      slimMessages.push({ role: 'user', content: safeUserText });
+
+      const completion2 = await openai.chat.completions.create({
+        model: 'gpt-5.1',
+        reasoning_effort: 'none',
+        temperature: 0.6,
+        max_completion_tokens: 120,
+        messages: slimMessages,
+      });
+
+      botText = completion2.choices?.[0]?.message?.content || '';
+      botText = botText.trim();
+    } catch (err2) {
+      console.error('Second OpenAI call failed:', err2);
+    }
+  }
+
+  // If it's STILL empty, fall back to a contextual, sales-driven reply
+  if (!botText) {
+    botText = buildContextualFallback({ safeUserText, history });
   }
 
   // light clean-up only – we let the AI speak freely
@@ -1021,8 +1091,8 @@ export async function handleTurn({ userText, callState }) {
   }
 
   if (!botText) {
-    botText =
-      'Sure – what would you like help with around your calls and bookings?';
+    // Very last resort, but still sales-focused
+    botText = buildContextualFallback({ safeUserText, history });
   }
 
   // ---------- OVERRIDE USELESS FALLBACK FOR CLEAR BOOKING INTENT ----------
@@ -1053,7 +1123,7 @@ export async function handleTurn({ userText, callState }) {
     botText = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut;
   }
 
-  const lowerBot = botText.toLowerCase(); // kept only for end-of-call detection (if you expand later)
+  const lowerBot = botText.toLowerCase(); // kept for future end-of-call expansions
 
   // ---------- END-OF-CALL DETECTION (NO TEXT OVERRIDE) ----------
 
