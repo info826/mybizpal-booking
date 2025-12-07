@@ -117,6 +117,7 @@ function loadSessionForCallIfNeeded(callState) {
       callState.capture = { ...(saved.capture || {}), ...(callState.capture || {}) };
     }
     if (saved.profile) {
+      // IMPORTANT: saved profile first, then current, so we don't overwrite with nulls
       callState.profile = { ...(saved.profile || {}), ...(callState.profile || {}) };
     }
     if (saved.history && Array.isArray(saved.history) && saved.history.length) {
@@ -491,15 +492,20 @@ ${channelSummary}
 // ---------- MAIN TURN HANDLER ----------
 
 export async function handleTurn({ userText, callState }) {
+  // Make sure history exists first
   ensureHistory(callState);
-  ensureBehaviourState(callState);
-  ensureProfile(callState);
 
   if (!callState.booking) {
     callState.booking = {};
   }
 
+  // Load any saved session BEFORE we create defaults,
+  // so we don't overwrite businessType/email with nulls.
   loadSessionForCallIfNeeded(callState);
+
+  // Now ensure the other states exist
+  ensureBehaviourState(callState);
+  ensureProfile(callState);
 
   const history = ensureHistory(callState);
   const behaviour = ensureBehaviourState(callState);
@@ -1167,6 +1173,28 @@ export async function handleTurn({ userText, callState }) {
   }
 
   botText = botText.trim();
+
+  // --------- ANTI-REPEAT GUARDS (EMAIL & BUSINESS TYPE) ----------
+
+  const knownBusinessType =
+    (callState.profile && callState.profile.businessType) ||
+    (callState.booking && callState.booking.businessType);
+  if (knownBusinessType) {
+    const askingBusinessAgainRegex =
+      /(what (kind|type|sort) of business[^?]*\?|what business (do you run|are you running)[^?]*\?)/i;
+    if (askingBusinessAgainRegex.test(botText)) {
+      botText = `So for your ${knownBusinessType}, what’s the main thing you’d most like to fix around calls or bookings right now?`;
+    }
+  }
+
+  const knownEmail = callState.booking && callState.booking.email;
+  if (knownEmail) {
+    const emailQuestionRegex =
+      /(what('| i)s your (best )?email[^?]*\?|can i grab your email[^?]*\?|email address to send[^?]*\?|what('| i)s the best email address[^?]*\?)/i;
+    if (emailQuestionRegex.test(botText)) {
+      botText = `Brilliant – I’ve already got your email as ${knownEmail}, so we’re all set on that side. Next bit is just making sure we pick a time that works for you.`;
+    }
+  }
 
   const { booking: bookingState = {} } = callState;
 
