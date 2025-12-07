@@ -56,6 +56,7 @@ function ensureProfile(callState) {
     callState.profile = {
       businessType: null,
       location: null,
+      mainHeadache: null,
       notes: [],
     };
   }
@@ -261,21 +262,28 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
   if (!lastAssistant) return;
   const la = lastAssistant.content.toLowerCase();
 
-  if (!profile.businessType && /what (kind|type|sort) of business/.test(la)) {
+  if (/what (kind|type|sort) of business/.test(la)) {
     profile.businessType = trimmed;
   }
 
   if (
-    !profile.location &&
     /(where are you (calling from|based)|where.*located)/.test(la)
   ) {
     profile.location = trimmed;
+  }
+
+  if (
+    /main headache.*calls and bookings|main headache for you at the moment|main thing you.?d love to fix/.test(
+      la
+    )
+  ) {
+    profile.mainHeadache = trimmed;
   }
 }
 
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
 
-function buildContextualFallback({ safeUserText }) {
+function buildContextualFallback({ safeUserText, callState }) {
   const trimmed = (safeUserText || '').trim();
   const snippet =
     trimmed.length > 0 ? trimmed.slice(0, 120).replace(/\s+/g, ' ') : '';
@@ -283,22 +291,45 @@ function buildContextualFallback({ safeUserText }) {
     ? ` Got you – you’ve just said: "${snippet}".`
     : '';
 
-  const openers = [
+  const profile = ensureProfile(callState);
+  const behaviour = ensureBehaviourState(callState);
+  const booking = callState.booking || {};
+
+  const hasBusiness = !!profile.businessType;
+  const hasHeadache = !!profile.mainHeadache;
+  const isBookingIntent =
+    booking.intent === 'mybizpal_consultation' ||
+    behaviour.bookingReadiness === 'high';
+
+  let opener = pickRandom([
     'Hmm, I think I might have missed a bit there.',
     'Okay, I got the gist, but let me just make sure I’m on the right track.',
     'Alright, I may not have caught every detail there.',
-  ];
+  ]);
 
-  const core =
-    `${userRef} In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.`;
+  let body;
+  let followUp;
 
-  const followUps = [
-    ' To connect that properly, what kind of business do you run and what’s frustrating you most about calls or enquiries at the moment?',
-    ' What sort of business are you running, and where do things feel the most manual or messy right now?',
-    ' To point you in the right direction, what type of business is this for, and what’s the main thing you’d love to fix around calls or bookings?',
-  ];
+  const businessLabel = hasBusiness
+    ? `for your ${profile.businessType}`
+    : 'for your business';
 
-  return pickRandom(openers) + core + pickRandom(followUps);
+  if (isBookingIntent && hasBusiness && hasHeadache) {
+    body = `${userRef} In short, MyBizPal makes sure your calls and WhatsApp enquiries for your ${profile.businessType} are answered, booked in and followed up without you having to chase them.`;
+    followUp =
+      ' Given everything you’ve said, the next sensible step is a quick Zoom consultation so we can map this properly onto your setup. Would you prefer a morning or afternoon slot, and on which day works best?';
+  } else if (hasBusiness) {
+    body = `${userRef} In short, MyBizPal makes sure your calls and WhatsApp enquiries ${businessLabel} are answered, booked in and followed up without you having to chase them.`;
+    followUp =
+      ' To connect that properly, what usually happens right now when someone calls or messages and you cannot get to it in time – do they reach voicemail, ring out, or tend to disappear?';
+  } else {
+    body =
+      `${userRef} In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.`;
+    followUp =
+      ' To point you in the right direction, what type of business is this for, and what’s the main thing you’d love to fix around calls or bookings?';
+  }
+
+  return opener + body + followUp;
 }
 
 // ---------- SYSTEM PROMPT ----------
@@ -362,6 +393,7 @@ Known caller profile (from this and previous conversations — do NOT read this 
 - First name: ${name || 'unknown'}
 - Business type: ${profile.businessType || 'unknown'}
 - Location: ${profile.location || 'unknown'}
+- Main headache: ${profile.mainHeadache || 'unknown'}
 `.trim();
 
   const channelSummary = `
@@ -426,8 +458,10 @@ GREETING
   you can skip repeating the full greeting and just respond naturally to what they asked.
 
 CONVERSATION RULES
-- Treat short answers like "missed calls" or "the lead gets lost" as proper answers to your last question.
+- Treat short answers like "missed calls", "the lead gets lost" or "get voicemail" as proper answers to your last question.
   Use them, paraphrase them back, and move the conversation forward. Do NOT act as if you did not understand.
+- If you already know their business type and main headache, do NOT ask again "what sort of business are you running"
+  or "what's the main headache". Refer to what you know ("for your dental clinic...") and either deepen slightly or move to booking.
 - If they clearly say they want to book a consultation from the start (for example "I want to book a consultation"),
   then after 1–2 quick clarifying questions (such as business type and main headache),
   move straight into choosing a day/time and confirming contact details. Do NOT run a long survey.
@@ -462,6 +496,8 @@ BOOKING BEHAVIOUR
   - Ask for email address (for the Zoom link).
   - Ask which day/time windows work best (for example: morning 9–11, lunch-ish 11–2, afternoon 2–5),
     then offer one or two concrete times like "9am" or "11am" that fit those windows.
+- Once you know their business type and main headache, err on the side of moving to booking sooner rather than later.
+  It is better to book and refine on the call than to ask endless questions in chat.
 - You do NOT need to invent final calendar times beyond suggesting realistic slots; the backend handles exact availability.
 
 ENDING
@@ -514,6 +550,14 @@ export async function handleTurn({ userText, callState }) {
 
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
+
+  // opportunistic name capture from any message (e.g. "I'm Gabriel and I run...")
+  if (!booking.name) {
+    const maybeName = extractNameFromUtterance(safeUserText);
+    if (maybeName) {
+      booking.name = maybeName;
+    }
+  }
 
   updateProfileFromUserReply({ safeUserText, history, profile });
 
@@ -739,13 +783,19 @@ export async function handleTurn({ userText, callState }) {
     const coreExplanation =
       'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It’s built for busy clinics, salons, dentists, trades and other local service businesses.';
 
-    const followUps = [
-      '\n\nWhat type of business are you running at the moment?',
-      '\n\nTell me a bit about your business — what do you offer and who do you normally work with?',
-      '\n\nTo make it real, what kind of business are you thinking about using this for?',
-    ];
+    const followUps = profile.businessType
+      ? [
+          `\n\nFor your ${profile.businessType}, where does it feel the most painful at the moment – missed calls, WhatsApps piling up, or something else?`,
+        ]
+      : [
+          '\n\nWhat type of business are you running at the moment?',
+          '\n\nTell me a bit about your business — what do you offer and who do you normally work with?',
+          '\n\nTo make it real, what kind of business are you thinking about using this for?',
+        ];
 
-    const replyText = coreExplanation + pickRandom(followUps);
+    const replyText =
+      coreExplanation +
+      (Array.isArray(followUps) ? pickRandom(followUps) : followUps[0]);
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -757,8 +807,12 @@ export async function handleTurn({ userText, callState }) {
     behaviour.interestLevel =
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
+    const businessLabel = profile.businessType
+      ? `for your ${profile.businessType}`
+      : 'for your business';
+
     const replyText =
-      'Yes – that’s exactly the world we live in. MyBizPal takes a big chunk of the day-to-day off your plate by handling calls, WhatsApps and bookings automatically, so you’re not forever chasing missed enquiries.\n\nTo point you in the right direction, what kind of business are you running, and where do things feel the most manual or messy at the moment?';
+      `Yes – that’s exactly the world we live in. MyBizPal takes a big chunk of the day-to-day off your plate by handling calls, WhatsApps and bookings automatically ${businessLabel}, so you’re not forever chasing missed enquiries.\n\nTo point you in the right direction, where does it feel the most manual or messy at the moment — missed calls, WhatsApps piling up, or something else?`;
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -1061,7 +1115,7 @@ export async function handleTurn({ userText, callState }) {
       model: 'gpt-5.1',
       reasoning_effort: 'none',
       temperature: 0.65,
-      max_completion_tokens: 140,
+      max_completion_tokens: 220,
       messages,
     });
 
@@ -1100,7 +1154,7 @@ export async function handleTurn({ userText, callState }) {
         model: 'gpt-5.1',
         reasoning_effort: 'none',
         temperature: 0.7,
-        max_completion_tokens: 120,
+        max_completion_tokens: 160,
         messages: slimMessages,
       });
 
@@ -1113,7 +1167,7 @@ export async function handleTurn({ userText, callState }) {
 
   // If it's STILL empty, fall back to a contextual, sales-driven reply
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText });
+    botText = buildContextualFallback({ safeUserText, callState });
   }
 
   // light clean-up only – we let the AI speak freely
@@ -1175,7 +1229,7 @@ export async function handleTurn({ userText, callState }) {
   }
 
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText });
+    botText = buildContextualFallback({ safeUserText, callState });
   }
 
   // ---------- OVERRIDE USELESS FALLBACK FOR CLEAR BOOKING INTENT ----------
@@ -1191,17 +1245,6 @@ export async function handleTurn({ userText, callState }) {
     if (behaviour.bookingReadiness === 'unknown') {
       behaviour.bookingReadiness = 'high';
     }
-  }
-
-  if (botText.length > 420) {
-    const cut = botText.slice(0, 420);
-    const lastBreak = Math.max(
-      cut.lastIndexOf('\n'),
-      cut.lastIndexOf('. '),
-      cut.lastIndexOf('! '),
-      cut.lastIndexOf('? ')
-    );
-    botText = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut;
   }
 
   // ---------- END-OF-CALL DETECTION ----------
