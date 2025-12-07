@@ -56,7 +56,6 @@ function ensureProfile(callState) {
     callState.profile = {
       businessType: null,
       location: null,
-      mainPain: null,
       notes: [],
     };
   }
@@ -254,85 +253,45 @@ function hasStrongNoCorrection(text) {
 
 // ---------- PROFILE UPDATER ----------
 
-function updateProfileFromUserReply({ safeUserText, history, profile, booking }) {
+function updateProfileFromUserReply({ safeUserText, history, profile }) {
   const trimmed = (safeUserText || '').trim();
   if (!trimmed) return;
 
-  const lower = trimmed.toLowerCase();
-
   const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
+  if (!lastAssistant) return;
+  const la = lastAssistant.content.toLowerCase();
 
-  // 1) Business type from explicit questions ("what kind of business...")
-  if (!profile.businessType && lastAssistant) {
-    const la = lastAssistant.content.toLowerCase();
-    if (/what (kind|type|sort) of business/.test(la)) {
-      profile.businessType = trimmed;
-    }
+  if (!profile.businessType && /what (kind|type|sort) of business/.test(la)) {
+    profile.businessType = trimmed;
   }
 
-  // 2) Business type from natural phrases ("I run X", "I own X", etc.)
-  if (!profile.businessType) {
-    const m =
-      lower.match(/\b(i\s+(run|own|have)\s+(a|an|the)?\s*([^.,;]+))/) ||
-      lower.match(/\b(it'?s|its)\s+(a|an)?\s*([^.,;]+(clinic|salon|garage|spa|practice|studio|shop|restaurant|cafe|barber|dentist|dental|plumbing|roofing|electrical|cleaning|agency|coaching|consult(ing)?))/);
-
-    if (m) {
-      const raw = m[4] || m[3] || trimmed;
-      profile.businessType = raw.trim();
-    } else if (
-      /(clinic|salon|garage|spa|practice|studio|shop|restaurant|cafe|barber|dentist|dental|plumbing|roofing|electrical|cleaning|agency|coaching|consult)/.test(
-        lower
-      )
-    ) {
-      profile.businessType = trimmed;
-    }
-  }
-
-  // 3) Location from explicit question in last assistant message
-  if (lastAssistant && !profile.location) {
-    const la = lastAssistant.content.toLowerCase();
-    if (/(where are you (calling from|based)|where.*located)/.test(la)) {
-      profile.location = trimmed;
-    }
-  }
-
-  // 4) Main pain from simple answers to pain questions
-  if (!profile.mainPain && lastAssistant) {
-    const la = lastAssistant.content.toLowerCase();
-    if (
-      /(main headache|biggest headache|main thing you'?d love to fix|biggest pain)/.test(
-        la
-      )
-    ) {
-      profile.mainPain = trimmed;
-    }
-  }
-
-  // 5) Store short useful replies as notes
-  if (trimmed.length <= 160) {
-    profile.notes.push(trimmed);
-    if (profile.notes.length > 20) profile.notes.shift();
-  }
-
-  // 6) Mirror booking.name into profile (first name)
-  if (booking && booking.name && !profile.firstName) {
-    profile.firstName = booking.name;
+  if (
+    !profile.location &&
+    /(where are you (calling from|based)|where.*located)/.test(la)
+  ) {
+    profile.location = trimmed;
   }
 }
 
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
 
 function buildContextualFallback({ safeUserText }) {
-  const core =
-    'Got you. MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up so new enquiries do not slip away.';
-
-  const followUps = [
-    ' To make this useful, what type of business is this for, and what is the main thing you would love to fix around calls or bookings?',
-    ' Tell me what kind of business you run and what frustrates you most about calls or enquiries at the moment.',
-    ' What sort of business are you running, and where do things feel the most manual or messy right now?',
+  const openers = [
+    'Hmm, I think I might have missed a bit there.',
+    'Okay, I got the gist, but let me just make sure I’m on the right track.',
+    'Alright, I may not have caught every detail there.',
   ];
 
-  return core + pickRandom(followUps);
+  const core =
+    ' In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
+
+  const followUps = [
+    ' Tell me what kind of business you run and what’s frustrating you most about calls or enquiries at the moment.',
+    ' What sort of business are you running, and where do things feel the most manual or messy right now?',
+    ' To point you in the right direction, what type of business is this for, and what’s the main thing you’d love to fix around calls or bookings?',
+  ];
+
+  return pickRandom(openers) + core + pickRandom(followUps);
 }
 
 // ---------- SYSTEM PROMPT ----------
@@ -364,15 +323,8 @@ function buildSystemPrompt(callState) {
   else if (hourLocal >= 17 && hourLocal < 22) timeOfDay = 'evening';
   else timeOfDay = 'late';
 
-  const {
-    intent,
-    name,
-    phone,
-    email,
-    timeSpoken,
-    awaitingTimeConfirm,
-    earliestSlotSpoken,
-  } = booking;
+  const { intent, name, phone, email, timeSpoken, awaitingTimeConfirm, earliestSlotSpoken } =
+    booking;
 
   const bookingSummary = `
 Current booking context:
@@ -400,10 +352,9 @@ Current behavioural signals (for you, Gabriel, not to be read out):
 
   const profileSummary = `
 Known caller profile (from this and previous conversations — do NOT read this out):
-- First name: ${name || profile.firstName || 'unknown'}
+- First name: ${name || 'unknown'}
 - Business type: ${profile.businessType || 'unknown'}
 - Location: ${profile.location || 'unknown'}
-- Main pain: ${profile.mainPain || 'unknown'}
 `.trim();
 
   const channelSummary = `
@@ -424,44 +375,38 @@ IDENTITY & GOAL
   - If they clearly seem to be trying to book with another business (e.g. their dentist),
     explain that they have reached MyBizPal, which helps business owners with their own
     calls and bookings, and gently steer back to how MyBizPal can help THEM as a business.
-- Never offer to "call them right now". You only:
-  - explain how MyBizPal works, and
-  - book scheduled Zoom/phone consultations with the team.
-
-MEMORY & DETAILS
-- Internally you already know the phone/WhatsApp number they are contacting you from.
-  - In most cases, you can say you will use the number they are calling or messaging from
-    for confirmations, unless they ask you to use a different one.
-  - Only ask for a different number if they say this one is not ideal.
-- Use any known details:
-  - If you know their first name, use it naturally.
-  - If you know their business type (e.g. "dental clinic", "luxury car garage"), refer to it
-    instead of asking again.
-  - If you know their main pain (e.g. missed calls), do not re-ask; build on it.
+- If they ask whether you remember them or past chats, do NOT talk about "memory limits"
+  or say you can only see this conversation. Instead, answer naturally: say you speak to
+  lots of business owners and focus on what they need right now, then ask who they are
+  and what their business does.
+- Internally, you can think of yourself as an AI-powered agent, but:
+  - Do NOT say "agent like me".
+  - Do NOT talk about being AI or software unless the user directly asks.
+- Your core goal in each conversation:
+  1) Understand their business and their main headache with calls, WhatsApps or bookings.
+  2) Make the pain clear and relatable in normal language.
+  3) Explain simply how MyBizPal could help with that situation.
+  4) If they are interested, guide them into a short Zoom consultation with a human on the team.
 
 SPEAKING STYLE
 - Sound like a real person from the UK: relaxed, professional, friendly, occasionally light humour.
 - You may occasionally use short interjections like "Hmm", "Okay, got you", "Ah, that makes sense", "Haha, fair enough".
   - At most ONE such expression per reply.
   - Use them only when they fit the tone naturally; never force them.
-- Do NOT:
-  - apologise for "not understanding" unless the message is genuinely unintelligible.
-  - say "I might have missed a bit there" or "I may not have caught every detail".
-  - write things like "Got you – you've just said: '...'" followed by the user's message.
-  - quote the user's full message back to them verbatim.
-- Instead, briefly summarise their point in NEW words if you need to show understanding.
+- No robotic phrases. No corporate waffle.
+- Do NOT say "in plain English". Just explain simply and clearly.
+- Do NOT repeat the same sentence word-for-word multiple times in one conversation.
+- Keep answers reasonably short on chat. On voice you can be slightly more descriptive but still concise.
 
 SALES MINDSET (VERY IMPORTANT)
 - You are a calm, confident closer, not a pushy telemarketer.
-- Each reply should quietly work through:
+- Each reply should quietly work through these steps:
   1) CLARIFY: Make sure you understand their situation ("So just to make sure I’ve got you...").
-  2) PAIN: Gently surface the pain or missed opportunity in normal language.
-  3) VISION: Paint a simple before/after picture (from missed calls to handled calls & booked slots).
-  4) NEXT STEP: If they are interested, guide them into a short Zoom consultation with a human on the team.
-- If they explicitly say they want to book, have a demo, or speak to an adviser:
-  - Ask at most 2–3 short qualifying questions (e.g. business type + main headache).
-  - Then move towards booking the consultation (time/day, contact details).
-- Avoid long interrogation sequences; respect their time.
+  2) PAIN: Gently surface the pain or missed opportunity ("Otherwise you end up juggling calls or missing new enquiries.").
+  3) VISION: Paint a simple before/after picture ("Instead, the calls are answered, people are booked in, and you just see the appointments in your calendar.").
+  4) NEXT STEP: If they show interest, suggest a short Zoom consultation to see how it would plug into their business.
+- Always ask specific, human questions, not generic ones.
+- If what they ask is outside MyBizPal, answer briefly, then steer back to how MyBizPal could help their business.
 
 GREETING
 - On the very first reply in a conversation, you normally say:
@@ -471,32 +416,35 @@ GREETING
   you can skip repeating the full greeting and just respond naturally to what they asked.
 
 CONVERSATION RULES
-- If they say things like "I’d like to make a booking", "I want a consultation", or "Can I talk to someone?":
-  - Assume they mean speaking with a MyBizPal adviser about their own business.
+- If they say things like "I’d like to make a booking" or "I want to speak with an adviser",
+  assume they mean speaking with a MyBizPal adviser about their own business.
 - Ask only ONE clear question at a time.
-- Read the history so you do not re-ask things like their name, business type, or location.
+- Read the history so you don’t re-ask things like their name, business type, or location.
 - Use what you know: say "for your clinic" or "for your garage" rather than repeating generic phrases.
+- When they seem confused, ask a specific clarifying question instead of saying "I didn’t understand".
 - When they ask prices, you can say things are tailored and that pricing depends on their setup,
   and that it is best covered properly on a quick consultation call.
-- Never write "quick question:" without actually asking a question in the same message.
 
 CONTACT DETAILS
+- Internally you already know the phone number they are calling or messaging from.
+  - By default, use that number for confirmations and reminders.
+  - Say something like: "I’ll use the number you’re calling/messaging from for confirmations – if you’d rather use a different one, just tell me."
 - Only ask for mobile and email when:
   - you are actually booking a Zoom call, or
   - you genuinely need to send them something they requested.
-- On chat: do NOT say "digit by digit" or "nice and slowly"; just accept what they type.
-- Prefer using the number they are contacting you from for confirmations, unless they tell you otherwise.
+- Do NOT repeatedly ask for their number if you already have one, unless they specifically ask you to use another.
+- On voice: you may ask them to repeat numbers and emails and you can read them back.
+- On chat: do NOT say "digit by digit" or "slowly"; just accept what they type.
 
 BOOKING BEHAVIOUR
-- If they are clearly keen or explicitly request a consultation:
-  - Clarify their business type and main pain.
-  - Then suggest a short Zoom consultation (around 20–30 minutes) in UK business hours.
+- If they clearly want to move forward, suggest a short Zoom consultation
+  (about 20–30 minutes, Monday–Friday, roughly 9am–5pm UK time) with a MyBizPal adviser.
 - To book:
   - Confirm their first name if not known.
-  - Confirm or collect mobile number (usually the one they are using).
+  - Use the number they are calling/messaging from for confirmations, unless they ask for another.
   - Ask for email address (for the Zoom link).
-  - Ask which day/time windows work best and keep it simple (e.g. "tomorrow morning" or "early next week").
-- You do NOT need to invent exact calendar IDs; the backend handles final slot selection.
+  - Ask which day/time windows work best and, when you can, suggest one or two specific times (e.g. "tomorrow at 10am or 11:30am?").
+- You do NOT need to invent final calendar times yourself; the backend handles exact slots.
 
 ENDING
 - Before ending, it is polite (not mandatory) to ask if there is anything else they need help with.
@@ -525,11 +473,6 @@ export async function handleTurn({ userText, callState }) {
     callState.booking = {};
   }
 
-  // Seed booking.phone from callerNumber if missing
-  if (!callState.booking.phone && callState.callerNumber) {
-    callState.booking.phone = String(callState.callerNumber).trim();
-  }
-
   loadSessionForCallIfNeeded(callState);
 
   const history = ensureHistory(callState);
@@ -554,7 +497,7 @@ export async function handleTurn({ userText, callState }) {
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
 
-  updateProfileFromUserReply({ safeUserText, history, profile, booking });
+  updateProfileFromUserReply({ safeUserText, history, profile });
 
   if (/thank(s| you)/.test(userLower)) {
     behaviour.rapportLevel = Math.min(5, Number(behaviour.rapportLevel || 0) + 1);
@@ -585,7 +528,7 @@ export async function handleTurn({ userText, callState }) {
   // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
 
   const bookingIntentRegex =
-    /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult|demo)\b/;
+    /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult)\b/;
 
   if (bookingIntentRegex.test(userLower)) {
     booking.intent = booking.intent || 'mybizpal_consultation';
@@ -605,7 +548,8 @@ export async function handleTurn({ userText, callState }) {
 
       let replyText;
       if (capture.nameStage === 'initial') {
-        replyText = 'No worries, what should I call you instead? Just your first name.';
+        replyText =
+          'No worries, what should I call you instead? Just your first name.';
         capture.nameStage = 'repeat';
       } else if (capture.nameStage === 'repeat') {
         replyText =
@@ -704,8 +648,8 @@ export async function handleTurn({ userText, callState }) {
   if (wantsPhoneRepeat && booking.phone) {
     const spoken = isVoice ? verbalisePhone(booking.phone) : booking.phone;
     const replyText = isVoice
-      ? `Sure, I have ${spoken} as your mobile. If that is wrong, just say it again from the start.`
-      : `Sure, I have **${booking.phone}** as your mobile number. If that is wrong, just send me the correct one.`;
+      ? `Sure, I’ve got ${spoken} as your mobile. If that’s wrong, just say it again from the start.`
+      : `Sure, I’ve got **${booking.phone}** as your mobile number. If that’s wrong, just send me the correct one.`;
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -716,8 +660,8 @@ export async function handleTurn({ userText, callState }) {
   if (wantsEmailRepeat && booking.email) {
     const spoken = isVoice ? verbaliseEmail(booking.email) : booking.email;
     const replyText = isVoice
-      ? `Of course – I have ${spoken} as your email. If that is not right, just say it again from the beginning.`
-      : `Of course – I have **${booking.email}** as your email. If that is not right, just send me the correct one.`;
+      ? `Of course – I’ve got ${spoken} as your email. If that’s not right, just say it again from the beginning.`
+      : `Of course – I’ve got **${booking.email}** as your email. If that’s not right, just send me the correct one.`;
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -732,8 +676,8 @@ export async function handleTurn({ userText, callState }) {
     const summary = lines.join(isChat ? '\n' : ', ');
 
     const replyText = isChat
-      ? `Here is what I have for you right now:\n${summary}\n\nIf anything looks wrong, just send me the updated details.`
-      : `Right now I have: ${summary}. If anything sounds wrong, just correct me and I will update it.`;
+      ? `Here’s what I have for you right now:\n${summary}\n\nIf anything looks wrong, just send me the updated details.`
+      : `Right now I’ve got: ${summary}. If anything sounds wrong, just correct me and I’ll update it.`;
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -744,18 +688,18 @@ export async function handleTurn({ userText, callState }) {
   // ---------- LIGHTWEIGHT SMALL-TALK / INTENT HANDLERS ----------
 
   if (/\bremember me\b|\bdo you remember\b/.test(userLower)) {
-    const knownName = booking.name || profile.firstName;
+    const knownName = booking.name;
     let replyText;
 
     if (knownName) {
       replyText = pickRandom([
-        `Hey ${knownName}, good to see you back. I chat to a lot of business owners like you, so I mostly focus on what you need right now. Remind me what your business does and what you are trying to fix around calls and bookings at the moment.`,
-        `${knownName}, nice to see your name pop up again. I speak to plenty of business owners, so I focus on the current conversation. Tell me what your business does and what is going on with your calls or enquiries right now.`,
+        `Hey ${knownName}, good to see you back. I chat to a lot of business owners like you, so I mostly focus on what you need right now. Remind me what your business does and what you’re trying to fix around calls and bookings at the moment.`,
+        `${knownName}, nice to see your name pop up again. I speak to plenty of business owners, so I focus on the current conversation. Tell me what your business does and what’s going on with your calls or enquiries right now.`,
       ]);
     } else {
       replyText = pickRandom([
-        'I speak to quite a few business owners every day, so I mostly focus on what you need right now. Tell me your name and what your business does, and we will pick things up from there.',
-        'Haha, I remember the type – busy people trying to sort their calls out. Tell me who you are and what your business does, and we will get straight into it.',
+        'I speak to quite a few business owners every day, so I mostly focus on what you need right now. Tell me your name and what your business does, and we’ll pick things up from there.',
+        'Haha, I remember the type – busy people trying to sort their calls out. Tell me who you are and what your business does, and we’ll get straight into it.',
       ]);
     }
 
@@ -775,7 +719,7 @@ export async function handleTurn({ userText, callState }) {
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
     const coreExplanation =
-      'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It is built for busy clinics, salons, dentists, garages, trades and other local service businesses.';
+      'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It’s built for busy clinics, salons, dentists, trades and other local service businesses.';
 
     const followUps = [
       '\n\nWhat type of business are you running at the moment?',
@@ -796,7 +740,7 @@ export async function handleTurn({ userText, callState }) {
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
     const replyText =
-      'Yes – that is exactly the world we live in. MyBizPal takes a big chunk of the day-to-day off your plate by handling calls, WhatsApps and bookings automatically, so you are not forever chasing missed enquiries.\n\nTo point you in the right direction, what kind of business are you running, and where do things feel the most manual or messy at the moment?';
+      'Yes – that’s exactly the world we live in. MyBizPal takes a big chunk of the day-to-day off your plate by handling calls, WhatsApps and bookings automatically, so you’re not forever chasing missed enquiries.\n\nTo point you in the right direction, what kind of business are you running, and where do things feel the most manual or messy at the moment?';
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -830,7 +774,6 @@ export async function handleTurn({ userText, callState }) {
 
       if (!callState.booking) callState.booking = {};
       callState.booking.name = proper;
-      profile.firstName = profile.firstName || proper;
 
       let replyText;
       if (isVoice) {
@@ -1037,9 +980,7 @@ export async function handleTurn({ userText, callState }) {
     return { text: '', shouldEnd: false };
   }
 
-  // ---------- UPDATE BOOKING STATE FIRST ----------
-
-  const previousPhone = booking.phone ? String(booking.phone) : null;
+  // ---------- BOOKING STATE UPDATE (NOW FIRST) ----------
 
   await updateBookingStateFromUtterance({
     userText: safeUserText,
@@ -1047,34 +988,40 @@ export async function handleTurn({ userText, callState }) {
     timezone: TZ,
   });
 
-  // After update, validate phone if it just changed and looks short (especially for UK)
-  if (callState.booking && callState.booking.phone) {
-    const newPhone = String(callState.booking.phone);
-    if (newPhone !== previousPhone) {
-      const digits = newPhone.replace(/[^\d]/g, '');
-      const userDigits = safeUserText.replace(/[^\d]/g, '');
-      const isUkTz = TZ.toLowerCase().includes('london');
+  // ---------- INCOMPLETE / SUSPICIOUS PHONE SANITY CHECK ----------
 
-      const looksShortUk =
-        isUkTz && userDigits && userDigits === digits && digits.length > 0 && digits.length < 11;
+  try {
+    const phoneDigits = (callState.booking?.phone || '').replace(/[^\d]/g, '');
+    const userDigits = safeUserText.replace(/[^\d]/g, '');
+    const isUkTz = TZ === 'Europe/London';
 
-      if (looksShortUk && capture.mode !== 'phone') {
-        // Clear questionable phone and ask again
-        callState.booking.phone = null;
+    const looksSuspiciousShortUk =
+      isUkTz &&
+      userDigits.length > 0 &&
+      userDigits.length <= 10 &&
+      phoneDigits &&
+      phoneDigits.length > 0 &&
+      phoneDigits.length <= 10;
 
-        const replyText =
-          'That number looks a bit short for a full UK mobile. Could you send your full mobile number including the leading 0 or country code, all in one message?';
+    if (looksSuspiciousShortUk) {
+      // Clear the phone and re-ask cleanly
+      if (!callState.booking) callState.booking = {};
+      callState.booking.phone = null;
 
-        capture.mode = 'phone';
-        capture.buffer = '';
-        capture.phoneAttempts += 1;
+      const replyText =
+        'That number looks a bit short for a full mobile. Could you give me the full mobile number, including any area or country code, from the very start?';
 
-        history.push({ role: 'user', content: safeUserText });
-        history.push({ role: 'assistant', content: replyText });
-        snapshotSessionFromCall(callState);
-        return { text: replyText, shouldEnd: false };
-      }
+      capture.mode = 'phone';
+      capture.buffer = '';
+      capture.phoneAttempts = (capture.phoneAttempts || 0) + 1;
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+      snapshotSessionFromCall(callState);
+      return { text: replyText, shouldEnd: false };
     }
+  } catch (e) {
+    console.error('Phone sanity check error:', e);
   }
 
   // ---------- SYSTEM BOOKING ACTIONS (AFTER STATE UPDATE) ----------
@@ -1096,8 +1043,7 @@ export async function handleTurn({ userText, callState }) {
 
   const systemPrompt = buildSystemPrompt(callState);
   const messages = [{ role: 'system', content: systemPrompt }];
-
-  const recent = history.slice(-20); // keep more context
+  const recent = history.slice(-12);
   for (const msg of recent) messages.push({ role: msg.role, content: msg.content });
   messages.push({ role: 'user', content: safeUserText });
 
@@ -1107,8 +1053,8 @@ export async function handleTurn({ userText, callState }) {
     const completion = await openai.chat.completions.create({
       model: 'gpt-5.1',
       reasoning_effort: 'none',
-      temperature: 0.7,
-      max_completion_tokens: 220,
+      temperature: 0.65,
+      max_completion_tokens: 140,
       messages,
     });
 
@@ -1130,7 +1076,7 @@ export async function handleTurn({ userText, callState }) {
         {
           role: 'system',
           content:
-            'You are Gabriel from MyBizPal. Continue the conversation naturally based on the last assistant message and the user reply. Keep it short, human and slightly sales-focused. Do not apologise for not understanding; ask a specific clarifying question instead. Do not quote the full user message back.',
+            'You are Gabriel from MyBizPal. Continue the conversation naturally based on the last assistant message and the user reply. Keep it short, human and slightly sales-focused. Do not apologise for not understanding; ask a specific clarifying question instead.',
         },
       ];
 
@@ -1146,8 +1092,8 @@ export async function handleTurn({ userText, callState }) {
       const completion2 = await openai.chat.completions.create({
         model: 'gpt-5.1',
         reasoning_effort: 'none',
-        temperature: 0.75,
-        max_completion_tokens: 160,
+        temperature: 0.7,
+        max_completion_tokens: 120,
         messages: slimMessages,
       });
 
@@ -1167,7 +1113,7 @@ export async function handleTurn({ userText, callState }) {
   botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
-  // Strip "memory" disclaimers
+  // Strip any "I can't remember past chats" style disclaimers
   botText = botText.replace(
     /I (do not|don't) have (a )?way to (reliably )?remember past (chats|conversations) with you[^.]*\./gi,
     ''
@@ -1177,30 +1123,17 @@ export async function handleTurn({ userText, callState }) {
     ''
   );
 
-  // Remove explicit "I did not understand" style apologies but keep rest if any
+  // Strip or rewrite generic "I didn't understand / follow" apologies
   const confusionRegex =
     /sorry[, ]+i (do not|don't|did not|didn't) (quite )?(understand|follow) that[^.]*\.?/gi;
   if (confusionRegex.test(botText)) {
-    botText = botText.replace(confusionRegex, '').trim();
-    if (!botText) {
-      botText = buildContextualFallback({ safeUserText });
-    }
+    botText =
+      'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you’re trying to sort out around calls or bookings?';
   }
 
-  // Remove "I might have missed a bit there" / "may not have caught every detail"
-  botText = botText.replace(
-    /\b(i\s+(might have missed a bit there|may not have caught every detail there))[^.]*\.\s*/gi,
-    ''
-  );
+  botText = botText.trim();
 
-  // Remove "Got you – you've just said: '...'"
-  botText = botText.replace(
-    /got you\s*[-–]\s*you['’]?ve just said:\s*["“][^"”]+["”]\.?\s*/gi,
-    ''
-  );
-
-  // Hard-remove any "agent like me" phrasing just in case
-  botText = botText.replace(/agent like me/gi, 'MyBizPal');
+  const { booking: bookingState = {} } = callState;
 
   if (isChat) {
     botText = botText.replace(/digit by digit/gi, '').replace(/nice and slowly/gi, '');
@@ -1208,15 +1141,44 @@ export async function handleTurn({ userText, callState }) {
     botText = botText.replace(/\s+,/g, ',');
   }
 
-  botText = botText.trim();
+  // Hard-remove any "agent like me" phrasing just in case
+  botText = botText.replace(/agent like me/gi, 'MyBizPal');
+
+  // If we’ve already greeted in this conversation (voice greeting or prior replies),
+  // strip any repeated "Good X, I'm Gabriel from MyBizPal..." opener from GPT.
+  const alreadyGreeted =
+    !!callState.greeted || history.length > 0 || !!callState._hasTextGreetingSent;
+
+  if (alreadyGreeted) {
+    botText = botText
+      .replace(
+        /^Good\s+(morning|afternoon|evening|late)[^.!\n]*?I['’` ]m\s+Gabriel\s+from\s+MyBizPal[.!?]*\s*/i,
+        ''
+      )
+      .trim();
+  }
 
   if (!botText) {
     botText = buildContextualFallback({ safeUserText });
   }
 
-  // Length guard, but less aggressive to avoid cutting off questions
-  if (botText.length > 650) {
-    const cut = botText.slice(0, 650);
+  // ---------- OVERRIDE USELESS FALLBACK FOR CLEAR BOOKING INTENT ----------
+
+  const genericFallbackRegex =
+    /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that\./i;
+
+  if (genericFallbackRegex.test(botText) && bookingIntentRegex.test(userLower)) {
+    botText =
+      'No problem at all — you’re through to MyBizPal. I can help you book a short Zoom consultation with one of the team to talk about your calls and bookings. What should I call you, just your first name?';
+
+    booking.intent = booking.intent || 'mybizpal_consultation';
+    if (behaviour.bookingReadiness === 'unknown') {
+      behaviour.bookingReadiness = 'high';
+    }
+  }
+
+  if (botText.length > 420) {
+    const cut = botText.slice(0, 420);
     const lastBreak = Math.max(
       cut.lastIndexOf('\n'),
       cut.lastIndexOf('. '),
@@ -1270,7 +1232,7 @@ export async function handleTurn({ userText, callState }) {
       /and your name is\??/.test(lower) ||
       /what should i call you/.test(lower)
     ) &&
-    (!booking.name || capture.pendingConfirm === 'name')
+    (!bookingState.name || capture.pendingConfirm === 'name')
   ) {
     capture.mode = 'name';
     capture.buffer = '';
