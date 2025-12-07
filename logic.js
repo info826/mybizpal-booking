@@ -56,6 +56,8 @@ function ensureProfile(callState) {
     callState.profile = {
       businessType: null,
       location: null,
+      mainPain: null, // biggest headache with calls/enquiries
+      mainGoal: null, // main business goal
       notes: [],
     };
   }
@@ -117,7 +119,6 @@ function loadSessionForCallIfNeeded(callState) {
       callState.capture = { ...(saved.capture || {}), ...(callState.capture || {}) };
     }
     if (saved.profile) {
-      // IMPORTANT: saved profile first, then current, so we don't overwrite with nulls
       callState.profile = { ...(saved.profile || {}), ...(callState.profile || {}) };
     }
     if (saved.history && Array.isArray(saved.history) && saved.history.length) {
@@ -260,58 +261,87 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 
   const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
   if (!lastAssistant) return;
+
   const la = lastAssistant.content.toLowerCase();
 
+  // Business type
   if (!profile.businessType && /what (kind|type|sort) of business/.test(la)) {
     profile.businessType = trimmed;
   }
 
+  // Location
   if (
     !profile.location &&
     /(where are you (calling from|based)|where.*located)/.test(la)
   ) {
     profile.location = trimmed;
   }
+
+  // Main goal (e.g. “what’s your main goal over the next 3–6 months?”)
+  if (
+    !profile.mainGoal &&
+    /(main goal.*3-6 months|main goal over the next|what's your main goal\b)/.test(la)
+  ) {
+    profile.mainGoal = trimmed;
+  }
+
+  // Main pain / headache with calls & enquiries
+  if (
+    !profile.mainPain &&
+    /(biggest headache|main headache|most frustrating.*calls|most manual or messy right now)/.test(
+      la
+    )
+  ) {
+    profile.mainPain = trimmed;
+  }
 }
 
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
 
-function buildContextualFallback({ safeUserText, callState }) {
-  const cs = callState || {};
-  const profile = cs.profile || {};
-  const booking = cs.booking || {};
-  const businessType = profile.businessType || booking.businessType || null;
-  const name = booking.name || null;
+function buildContextualFallback({ safeUserText, profile = {}, booking = {}, lastAssistant }) {
+  const openers = [
+    'Okay, I got the gist there.',
+    'Alright, that makes sense.',
+    'Got you - I think I follow.',
+  ];
 
-  // If we already know their business type, DO NOT re-ask it.
-  if (businessType) {
-    const opener = `Got you${name ? `, ${name}` : ''}.`;
-    const line1 = ` For your ${businessType}, it sounds like keeping on top of calls and bookings while you’re busy is the real headache.`;
-    const line2 =
-      ' MyBizPal can answer calls and WhatsApps in your business name, give the basic info you approve, and actually book people straight into your diary so you are not losing work while you are with customers.';
-    const line3 =
-      ' If you like, I can get you booked in for a short Zoom consultation so we can show you exactly how that would look for your setup. Would that be useful?';
+  const businessType = profile.businessType;
+  const mainPain = profile.mainPain;
+  const mainGoal = profile.mainGoal;
+  const name = booking.name;
 
-    return opener + line1 + line2 + line3;
+  let intro = pickRandom(openers);
+
+  if (name) {
+    intro = `${intro} ${name},`;
   }
 
-  // If we DON'T know the business type yet, gently ask for it (once).
-  const openers = [
-    'Okay, I got the gist, but let me just make sure I’m on the right track.',
-    'Alright, that makes sense – let me line this up properly for you.',
-    'Got you – let me just anchor this to your world.',
-  ];
-
   const core =
-    ' In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
+    ' MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
 
-  const followUps = [
-    ' What kind of business are you running, and what’s the main thing that’s frustrating you about calls or enquiries at the moment?',
-    ' Tell me what type of business you run (clinic, salon, trades, garage, etc.) and what you’d most like to fix around calls or bookings.',
-    ' To make this real for you, what business is this for, and where do calls or WhatsApps feel most messy right now?',
-  ];
+  let followUp;
 
-  return pickRandom(openers) + core + pickRandom(followUps);
+  if (!businessType) {
+    // We still don't know what they actually run
+    followUp =
+      ' To steer you properly, what kind of business are you running at the moment? For example, clinic, salon, trades, garage, online shop, something else?';
+  } else if (!mainPain) {
+    // We know the business, but not the main headache
+    followUp = ` For your ${businessType} right now, what’s the main headache with calls or enquiries - missed calls, WhatsApps piling up, people not booking in properly, or something else?`;
+  } else if (!mainGoal) {
+    // We know pain, but not their goal
+    followUp = ` Given that, what would you most like to improve over the next few months - more new customers, better organisation and reminders, or just getting your time back so you’re not glued to the phone?`;
+  } else if (!booking.intent || booking.intent === 'none') {
+    // We know a lot - gently push towards a call
+    followUp =
+      ' If you like, I can get you booked in for a short Zoom consultation so we can show you exactly how this would plug into your setup. Would that be useful?';
+  } else {
+    // Already clearly in booking flow - ask a light next-step question
+    followUp =
+      ' Next step would just be picking a day and rough time for a 20-30 minute Zoom chat with one of the team. When are you generally free - tomorrow, later this week, mornings or afternoons?';
+  }
+
+  return `${intro}${core}${followUp}`;
 }
 
 // ---------- SYSTEM PROMPT ----------
@@ -343,15 +373,8 @@ function buildSystemPrompt(callState) {
   else if (hourLocal >= 17 && hourLocal < 22) timeOfDay = 'evening';
   else timeOfDay = 'late';
 
-  const {
-    intent,
-    name,
-    phone,
-    email,
-    timeSpoken,
-    awaitingTimeConfirm,
-    earliestSlotSpoken,
-  } = booking;
+  const { intent, name, phone, email, timeSpoken, awaitingTimeConfirm, earliestSlotSpoken } =
+    booking;
 
   const bookingSummary = `
 Current booking context:
@@ -382,6 +405,8 @@ Known caller profile (from this and previous conversations — do NOT read this 
 - First name: ${name || 'unknown'}
 - Business type: ${profile.businessType || 'unknown'}
 - Location: ${profile.location || 'unknown'}
+- Main pain with calls/enquiries: ${profile.mainPain || 'unknown'}
+- Main goal (next 3–6 months): ${profile.mainGoal || 'unknown'}
 `.trim();
 
   const channelSummary = `
@@ -489,23 +514,105 @@ ${channelSummary}
 `.trim();
 }
 
+// ---------- REPEATED QUESTION CLEANER ----------
+
+function cleanRepeatedQuestions(botText, callState) {
+  if (!botText) return botText;
+
+  const lower = botText.toLowerCase();
+  const profile = ensureProfile(callState);
+  const booking = callState.booking || {};
+
+  let text = botText;
+
+  // 1) Business type
+  if (
+    profile.businessType &&
+    /what (kind|type|sort) of business/.test(lower)
+  ) {
+    text = text.replace(
+      /(?:^|\n).*what (kind|type|sort) of business[^?\n]*\?\s*/i,
+      ''
+    );
+    if (!/you (run|have) a/.test(text.toLowerCase())) {
+      text = `So just to confirm, you run a ${profile.businessType}. ` + text;
+    }
+  }
+
+  // 2) Main pain
+  if (
+    profile.mainPain &&
+    /(biggest|main) headache[^?\n]*\?/.test(lower)
+  ) {
+    text = text.replace(
+      /(?:^|\n).*?(biggest|main) headache[^?\n]*\?\s*/i,
+      ''
+    );
+    if (!/main headache/.test(text.toLowerCase())) {
+      text = `And your main headache right now is: ${profile.mainPain}. ` + text;
+    }
+  }
+
+  // 3) Main goal
+  if (
+    profile.mainGoal &&
+    /main goal[^?\n]*\?/.test(lower)
+  ) {
+    text = text.replace(
+      /(?:^|\n).*main goal[^?\n]*\?\s*/i,
+      ''
+    );
+    if (!/main goal/.test(text.toLowerCase())) {
+      text = `You mentioned your main goal is: ${profile.mainGoal}. ` + text;
+    }
+  }
+
+  // 4) Name
+  if (
+    booking.name &&
+    /(what('| i)s your (first )?name|who am i (speaking|talking) to)/.test(lower)
+  ) {
+    text = text.replace(
+      /(?:^|\n).*(what('| i)s your (first )?name|who am i (speaking|talking) to)[^?\n]*\?\s*/i,
+      ''
+    );
+    if (!/nice to meet/.test(text.toLowerCase())) {
+      text = `Nice to speak with you, ${booking.name}. ` + text;
+    }
+  }
+
+  // 5) Email
+  if (
+    booking.email &&
+    /(what('| i)s|what is|can i grab|could i grab|may i grab|let me grab|can i take|could i take|may i take).*(email|e-mail|e mail)/.test(
+      lower
+    )
+  ) {
+    text = text.replace(
+      /(?:^|\n).*(what('| i)s|what is|can i grab|could i grab|may i grab|let me grab|can i take|could i take|may i take).*(email|e-mail|e mail)[^?\n]*\?\s*/i,
+      ''
+    );
+    if (!/email/.test(text.toLowerCase())) {
+      text = `I’ve already got your email as ${booking.email}. ` + text;
+    }
+  }
+
+  text = text.trim();
+  return text || botText;
+}
+
 // ---------- MAIN TURN HANDLER ----------
 
 export async function handleTurn({ userText, callState }) {
-  // Make sure history exists first
   ensureHistory(callState);
+  ensureBehaviourState(callState);
+  ensureProfile(callState);
 
   if (!callState.booking) {
     callState.booking = {};
   }
 
-  // Load any saved session BEFORE we create defaults,
-  // so we don't overwrite businessType/email with nulls.
   loadSessionForCallIfNeeded(callState);
-
-  // Now ensure the other states exist
-  ensureBehaviourState(callState);
-  ensureProfile(callState);
 
   const history = ensureHistory(callState);
   const behaviour = ensureBehaviourState(callState);
@@ -1138,7 +1245,17 @@ export async function handleTurn({ userText, callState }) {
 
   // If it's STILL empty, fall back to a contextual, sales-driven reply
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText, callState });
+    const lastAssistant = [...history]
+      .slice()
+      .reverse()
+      .find((m) => m.role === 'assistant');
+
+    botText = buildContextualFallback({
+      safeUserText,
+      profile,
+      booking,
+      lastAssistant,
+    });
   }
 
   // light clean-up only – we let the AI speak freely
@@ -1159,42 +1276,20 @@ export async function handleTurn({ userText, callState }) {
   const confusionRegex =
     /sorry[, ]+i (do not|don't|did not|didn't) (quite )?(understand|follow) that[^.]*\.?/gi;
   if (confusionRegex.test(botText)) {
-    const prof = callState.profile || {};
-    const bkCtx = callState.booking || {};
-    const businessType = prof.businessType || bkCtx.businessType || null;
+    const lastAssistant = [...history]
+      .slice()
+      .reverse()
+      .find((m) => m.role === 'assistant');
 
-    if (businessType) {
-      botText =
-        `I think I might have missed a bit of that. For your ${businessType}, could you put it another way for me – maybe tell me in one sentence what you’re trying to sort out around calls or bookings right now?`;
-    } else {
-      botText =
-        'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you’re trying to sort out around calls or bookings?';
-    }
+    botText = buildContextualFallback({
+      safeUserText,
+      profile,
+      booking,
+      lastAssistant,
+    });
   }
 
   botText = botText.trim();
-
-  // --------- ANTI-REPEAT GUARDS (EMAIL & BUSINESS TYPE) ----------
-
-  const knownBusinessType =
-    (callState.profile && callState.profile.businessType) ||
-    (callState.booking && callState.booking.businessType);
-  if (knownBusinessType) {
-    const askingBusinessAgainRegex =
-      /(what (kind|type|sort) of business[^?]*\?|what business (do you run|are you running)[^?]*\?)/i;
-    if (askingBusinessAgainRegex.test(botText)) {
-      botText = `So for your ${knownBusinessType}, what’s the main thing you’d most like to fix around calls or bookings right now?`;
-    }
-  }
-
-  const knownEmail = callState.booking && callState.booking.email;
-  if (knownEmail) {
-    const emailQuestionRegex =
-      /(what('| i)s your (best )?email[^?]*\?|can i grab your email[^?]*\?|email address to send[^?]*\?|what('| i)s the best email address[^?]*\?)/i;
-    if (emailQuestionRegex.test(botText)) {
-      botText = `Brilliant – I’ve already got your email as ${knownEmail}, so we’re all set on that side. Next bit is just making sure we pick a time that works for you.`;
-    }
-  }
 
   const { booking: bookingState = {} } = callState;
 
@@ -1222,24 +1317,23 @@ export async function handleTurn({ userText, callState }) {
   }
 
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText, callState });
+    const lastAssistant = [...history]
+      .slice()
+      .reverse()
+      .find((m) => m.role === 'assistant');
+
+    botText = buildContextualFallback({
+      safeUserText,
+      profile,
+      booking,
+      lastAssistant,
+    });
   }
 
-  // ---------- OVERRIDE USELESS FALLBACK FOR CLEAR BOOKING INTENT ----------
+  // Remove repeated questions if we already have the answer
+  botText = cleanRepeatedQuestions(botText, callState);
 
-  const genericFallbackRegex =
-    /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that\./i;
-
-  if (genericFallbackRegex.test(botText) && bookingIntentRegex.test(userLower)) {
-    botText =
-      'No problem at all — you’re through to MyBizPal. I can help you book a short Zoom consultation with one of the team to talk about your calls and bookings. What should I call you, just your first name?';
-
-    booking.intent = booking.intent || 'mybizpal_consultation';
-    if (behaviour.bookingReadiness === 'unknown') {
-      behaviour.bookingReadiness = 'high';
-    }
-  }
-
+  // Trim long responses
   if (botText.length > 420) {
     const cut = botText.slice(0, 420);
     const lastBreak = Math.max(
