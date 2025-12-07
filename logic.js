@@ -276,6 +276,13 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
 
 function buildContextualFallback({ safeUserText }) {
+  const trimmed = (safeUserText || '').trim();
+  const snippet =
+    trimmed.length > 0 ? trimmed.slice(0, 120).replace(/\s+/g, ' ') : '';
+  const userRef = snippet
+    ? ` Got you – you’ve just said: "${snippet}".`
+    : '';
+
   const openers = [
     'Hmm, I think I might have missed a bit there.',
     'Okay, I got the gist, but let me just make sure I’m on the right track.',
@@ -283,10 +290,10 @@ function buildContextualFallback({ safeUserText }) {
   ];
 
   const core =
-    ' In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
+    `${userRef} In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.`;
 
   const followUps = [
-    ' Tell me what kind of business you run and what’s frustrating you most about calls or enquiries at the moment.',
+    ' To connect that properly, what kind of business do you run and what’s frustrating you most about calls or enquiries at the moment?',
     ' What sort of business are you running, and where do things feel the most manual or messy right now?',
     ' To point you in the right direction, what type of business is this for, and what’s the main thing you’d love to fix around calls or bookings?',
   ];
@@ -419,6 +426,11 @@ GREETING
   you can skip repeating the full greeting and just respond naturally to what they asked.
 
 CONVERSATION RULES
+- Treat short answers like "missed calls" or "the lead gets lost" as proper answers to your last question.
+  Use them, paraphrase them back, and move the conversation forward. Do NOT act as if you did not understand.
+- If they clearly say they want to book a consultation from the start (for example "I want to book a consultation"),
+  then after 1–2 quick clarifying questions (such as business type and main headache),
+  move straight into choosing a day/time and confirming contact details. Do NOT run a long survey.
 - If they say things like "I’d like to make a booking" or "I want to speak with an adviser",
   assume they mean speaking with a MyBizPal adviser about their own business.
 - Ask only ONE clear question at a time.
@@ -1071,7 +1083,7 @@ export async function handleTurn({ userText, callState }) {
         {
           role: 'system',
           content:
-            'You are Gabriel from MyBizPal. Continue the conversation naturally based on the last assistant message and the user reply. Keep it short, human and slightly sales-focused. Do not apologise for not understanding; ask a specific clarifying question instead.',
+            'You are Gabriel from MyBizPal. Continue the conversation naturally based on the last assistant message and the user reply. Keep it short, human and slightly sales-focused. Do not apologise for not understanding; ask a specific clarifying question instead, and use their last answer as context.',
         },
       ];
 
@@ -1127,6 +1139,15 @@ export async function handleTurn({ userText, callState }) {
   }
 
   botText = botText.trim();
+
+  // Fix dangling "quick question" with no actual question
+  const dqRegex =
+    /(before I book it in[, ]+quick question[:?]?\s*)$/i;
+  if (dqRegex.test(botText)) {
+    botText = botText.replace(dqRegex, '');
+    botText +=
+      ' Before I lock it in, quick one: what’s the main thing you’d love us to fix first – missed calls, WhatsApp replies, or something else?';
+  }
 
   const { booking: bookingState = {} } = callState;
 
