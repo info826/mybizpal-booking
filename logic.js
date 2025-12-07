@@ -279,20 +279,17 @@ function buildContextualFallback({ safeUserText, callState }) {
   const cs = callState || {};
   const profile = cs.profile || {};
   const booking = cs.booking || {};
-  const businessType =
-    profile.businessType ||
-    booking.businessType ||
-    null;
+  const businessType = profile.businessType || booking.businessType || null;
   const name = booking.name || null;
 
   // If we already know their business type, DO NOT re-ask it.
   if (businessType) {
-    let opener = `Got you${name ? `, ${name}` : ''}.`;
+    const opener = `Got you${name ? `, ${name}` : ''}.`;
     const line1 = ` For your ${businessType}, it sounds like keeping on top of calls and bookings while you’re busy is the real headache.`;
     const line2 =
       ' MyBizPal can answer calls and WhatsApps in your business name, give the basic info you approve, and actually book people straight into your diary so you are not losing work while you are with customers.';
     const line3 =
-      ' If you like, I can get you booked in for a short Zoom consultation so we can show you exactly how that would look for your setup. Would that be useful?`;
+      ' If you like, I can get you booked in for a short Zoom consultation so we can show you exactly how that would look for your setup. Would that be useful?';
 
     return opener + line1 + line2 + line3;
   }
@@ -345,8 +342,15 @@ function buildSystemPrompt(callState) {
   else if (hourLocal >= 17 && hourLocal < 22) timeOfDay = 'evening';
   else timeOfDay = 'late';
 
-  const { intent, name, phone, email, timeSpoken, awaitingTimeConfirm, earliestSlotSpoken } =
-    booking;
+  const {
+    intent,
+    name,
+    phone,
+    email,
+    timeSpoken,
+    awaitingTimeConfirm,
+    earliestSlotSpoken,
+  } = booking;
 
   const bookingSummary = `
 Current booking context:
@@ -1151,10 +1155,7 @@ export async function handleTurn({ userText, callState }) {
   if (confusionRegex.test(botText)) {
     const prof = callState.profile || {};
     const bkCtx = callState.booking || {};
-    const businessType =
-      prof.businessType ||
-      bkCtx.businessType ||
-      null;
+    const businessType = prof.businessType || bkCtx.businessType || null;
 
     if (businessType) {
       botText =
