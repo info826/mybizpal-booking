@@ -275,20 +275,42 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
 
-function buildContextualFallback({ safeUserText }) {
+function buildContextualFallback({ safeUserText, callState }) {
+  const cs = callState || {};
+  const profile = cs.profile || {};
+  const booking = cs.booking || {};
+  const businessType =
+    profile.businessType ||
+    booking.businessType ||
+    null;
+  const name = booking.name || null;
+
+  // If we already know their business type, DO NOT re-ask it.
+  if (businessType) {
+    let opener = `Got you${name ? `, ${name}` : ''}.`;
+    const line1 = ` For your ${businessType}, it sounds like keeping on top of calls and bookings while you’re busy is the real headache.`;
+    const line2 =
+      ' MyBizPal can answer calls and WhatsApps in your business name, give the basic info you approve, and actually book people straight into your diary so you are not losing work while you are with customers.';
+    const line3 =
+      ' If you like, I can get you booked in for a short Zoom consultation so we can show you exactly how that would look for your setup. Would that be useful?`;
+
+    return opener + line1 + line2 + line3;
+  }
+
+  // If we DON'T know the business type yet, gently ask for it (once).
   const openers = [
-    'Hmm, I think I might have missed a bit there.',
     'Okay, I got the gist, but let me just make sure I’m on the right track.',
-    'Alright, I may not have caught every detail there.',
+    'Alright, that makes sense – let me line this up properly for you.',
+    'Got you – let me just anchor this to your world.',
   ];
 
   const core =
     ' In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
 
   const followUps = [
-    ' Tell me what kind of business you run and what’s frustrating you most about calls or enquiries at the moment.',
-    ' What sort of business are you running, and where do things feel the most manual or messy right now?',
-    ' To point you in the right direction, what type of business is this for, and what’s the main thing you’d love to fix around calls or bookings?',
+    ' What kind of business are you running, and what’s the main thing that’s frustrating you about calls or enquiries at the moment?',
+    ' Tell me what type of business you run (clinic, salon, trades, garage, etc.) and what you’d most like to fix around calls or bookings.',
+    ' To make this real for you, what business is this for, and where do calls or WhatsApps feel most messy right now?',
   ];
 
   return pickRandom(openers) + core + pickRandom(followUps);
@@ -1106,7 +1128,7 @@ export async function handleTurn({ userText, callState }) {
 
   // If it's STILL empty, fall back to a contextual, sales-driven reply
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText });
+    botText = buildContextualFallback({ safeUserText, callState });
   }
 
   // light clean-up only – we let the AI speak freely
@@ -1127,8 +1149,20 @@ export async function handleTurn({ userText, callState }) {
   const confusionRegex =
     /sorry[, ]+i (do not|don't|did not|didn't) (quite )?(understand|follow) that[^.]*\.?/gi;
   if (confusionRegex.test(botText)) {
-    botText =
-      'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you’re trying to sort out around calls or bookings?';
+    const prof = callState.profile || {};
+    const bkCtx = callState.booking || {};
+    const businessType =
+      prof.businessType ||
+      bkCtx.businessType ||
+      null;
+
+    if (businessType) {
+      botText =
+        `I think I might have missed a bit of that. For your ${businessType}, could you put it another way for me – maybe tell me in one sentence what you’re trying to sort out around calls or bookings right now?`;
+    } else {
+      botText =
+        'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you’re trying to sort out around calls or bookings?';
+    }
   }
 
   botText = botText.trim();
@@ -1159,7 +1193,7 @@ export async function handleTurn({ userText, callState }) {
   }
 
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText });
+    botText = buildContextualFallback({ safeUserText, callState });
   }
 
   // ---------- OVERRIDE USELESS FALLBACK FOR CLEAR BOOKING INTENT ----------
