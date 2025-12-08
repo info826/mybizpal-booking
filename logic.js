@@ -30,7 +30,6 @@ function pickRandom(arr) {
 }
 
 // ---------- BASIC STATE HELPERS ----------
-
 function ensureHistory(callState) {
   if (!callState.history) callState.history = [];
   return callState.history;
@@ -63,7 +62,6 @@ function ensureProfile(callState) {
 }
 
 // ---------- CHANNEL HELPER: VOICE vs CHAT ----------
-
 function getChannelInfo(callState) {
   const channel =
     callState.channel ||
@@ -87,7 +85,6 @@ function getChannelInfo(callState) {
 }
 
 // ---------- SIMPLE LONG-TERM MEMORY ----------
-
 function getPhoneKeyFromState(callState) {
   const bookingPhone = callState.booking?.phone;
   const rawCaller = callState.callerNumber;
@@ -150,7 +147,6 @@ function snapshotSessionFromCall(callState) {
 }
 
 // ---------- VERBALISERS ----------
-
 function verbalisePhone(number) {
   if (!number) return '';
   const digits = String(number).replace(/[^\d]/g, '');
@@ -179,39 +175,10 @@ function extractNameFromUtterance(text) {
 
   const lower = rawText.toLowerCase();
   const badNameWords = new Set([
-    'hi',
-    'hello',
-    'hey',
-    'yes',
-    'yeah',
-    'yep',
-    'no',
-    'nope',
-    'ok',
-    'okay',
-    'fine',
-    'good',
-    'perfect',
-    'thanks',
-    'thank',
-    'thank you',
-    'please',
-    'booking',
-    'book',
-    'email',
-    'mail',
-    'business',
-    'curious',
-    'testing',
-    'test',
-    'just',
-    'only',
-    'nothing',
-    'something',
-    'anything',
-    'in',
-    'out',
-    'there',
+    'hi', 'hello', 'hey', 'yes', 'yeah', 'yep', 'no', 'nope', 'ok', 'okay',
+    'fine', 'good', 'perfect', 'thanks', 'thank', 'thank you', 'please',
+    'booking', 'book', 'email', 'mail', 'business', 'curious', 'testing',
+    'test', 'just', 'only', 'nothing', 'something', 'anything', 'in', 'out', 'there',
   ]);
 
   const explicitMatch = lower.match(
@@ -241,18 +208,59 @@ function extractNameFromUtterance(text) {
 }
 
 // ---------- STRONG "THIS IS WRONG" DETECTOR ----------
-
 function hasStrongNoCorrection(text) {
   if (!text) return false;
   const t = String(text).toLowerCase();
 
-  return /\b(not\s+(correct|right)|isn'?t\s+(correct|right)|wrong|incorrect|doesn'?t\s+look\s+right|not\s+quite\s+right)\b/.test(
-    t
-  );
+  return /\b(not\s+(correct|right)|isn'?t\s+(correct|right)|wrong|incorrect|doesn'?t\s+look\s+right|not\s+quite\s+right)\b/.test(t);
 }
 
-// ---------- PROFILE UPDATER ----------
+// ---------- PROACTIVE NAME CAPTURE (NEW) ----------
+function tryCaptureNameIfMissing(callState, safeUserText) {
+  if (callState.booking?.name) return;
 
+  const candidate = extractNameFromUtterance(safeUserText);
+  if (candidate) {
+    if (!callState.booking) callState.booking = {};
+    callState.booking.name = candidate;
+  }
+}
+
+// ---------- SMART BUSINESS TYPE CAPTURE FROM ANY MESSAGE (NEW) ----------
+function updateBusinessTypeFromAnyMessage({ safeUserText, profile }) {
+  if (profile.businessType) return;
+
+  const lower = safeUserText.toLowerCase();
+
+  const patterns = [
+    'car repair', 'garage', 'mechanic', 'auto repair',
+    'clinic', 'dental', 'dentist', 'salon', 'hair', 'beauty',
+    'plumber', 'electrician', 'trades', 'trade',
+    'coaching', 'coach', 'tutor', 'online shop', 'e-?commerce',
+    'restaurant', 'cafe', 'takeaway', 'vet', 'veterinary',
+    'physio', 'chiro', 'therapist', 'gym', 'fitness'
+  ];
+
+  for (const pattern of patterns) {
+    if (lower.includes(pattern.replace(/-/, ' '))) {
+      profile.businessType = pattern
+        .split(' ')
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+      return;
+    }
+  }
+
+  // fallback for very short messages
+  if (safeUserText.length < 60) {
+    const match = safeUserText.match(/\b(garage|salon|clinic|shop|studio|gym|dentist|plumber|electrician|mechanic|coach|restaurant|vet|physio)\b/i);
+    if (match) {
+      profile.businessType = match[0].charAt(0).toUpperCase() + match[0].slice(1).toLowerCase();
+    }
+  }
+}
+
+// ---------- ORIGINAL PROFILE UPDATER (kept as backup) ----------
 function updateProfileFromUserReply({ safeUserText, history, profile }) {
   const trimmed = (safeUserText || '').trim();
   if (!trimmed) return;
@@ -274,7 +282,6 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 }
 
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
-
 function buildContextualFallback({ safeUserText }) {
   const openers = [
     'Hmm, I think I might have missed a bit there.',
@@ -295,7 +302,6 @@ function buildContextualFallback({ safeUserText }) {
 }
 
 // ---------- SYSTEM PROMPT ----------
-
 function buildSystemPrompt(callState) {
   const booking = callState.booking || {};
   const behaviour = ensureBehaviourState(callState);
@@ -353,7 +359,7 @@ Current behavioural signals (for you, Gabriel, not to be read out):
   const profileSummary = `
 Known caller profile (from this and previous conversations — do NOT read this out):
 - First name: ${name || 'unknown'}
-- Business type: ${profile.businessType || 'unknown'}
+- Business type: ${profile.businessType || 'not mentioned yet'}
 - Location: ${profile.location || 'unknown'}
 `.trim();
 
@@ -364,8 +370,7 @@ Channel information:
 `.trim();
 
   return `
-You are "Gabriel" from MyBizPal, a smart, confident, very human-sounding British sales professional
-who speaks like a real person.
+You are "Gabriel" from MyBizPal, a smart, confident, very human-sounding British sales professional who speaks like a real person.
 
 IDENTITY & GOAL
 - You work for MyBizPal, which provides always-on call and message handling for small businesses.
@@ -467,7 +472,6 @@ ${channelSummary}
 }
 
 // ---------- MAIN TURN HANDLER ----------
-
 export async function handleTurn({ userText, callState }) {
   ensureHistory(callState);
   ensureBehaviourState(callState);
@@ -501,6 +505,9 @@ export async function handleTurn({ userText, callState }) {
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
 
+  // CRITICAL FIXES: Proactive name & business capture on every message
+  tryCaptureNameIfMissing(callState, safeUserText);
+  updateBusinessTypeFromAnyMessage({ safeUserText, profile });
   updateProfileFromUserReply({ safeUserText, history, profile });
 
   if (/thank(s| you)/.test(userLower)) {
@@ -530,7 +537,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
-
   const bookingIntentRegex =
     /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult)\b/;
 
@@ -542,7 +548,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- PENDING CONFIRMATIONS ----------
-
   if (capture.pendingConfirm === 'name') {
     const strongNo = hasStrongNoCorrection(safeUserText);
 
@@ -632,7 +637,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- QUICK INTENT: REPEAT PHONE / EMAIL / DETAILS ----------
-
   const wantsPhoneRepeat =
     /\b(repeat|read back|confirm|check|what)\b.*\b(my )?(number|phone|mobile)\b/.test(
       userLower
@@ -690,7 +694,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- LIGHTWEIGHT SMALL-TALK / INTENT HANDLERS ----------
-
   if (/\bremember me\b|\bdo you remember\b/.test(userLower)) {
     const knownName = booking.name;
     let replyText;
@@ -717,7 +720,7 @@ export async function handleTurn({ userText, callState }) {
     /\bwhat do you do\b/.test(userLower) ||
     /see what you do/.test(userLower) ||
     /what (is|does) mybizpal\b/.test(userLower) ||
-    /what you do\??$/.test(userLower)
+    /what you do??$/.test(userLower)
   ) {
     behaviour.interestLevel =
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
@@ -753,7 +756,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- NAME CAPTURE MODE ----------
-
   if (capture.mode === 'name') {
     const raw = safeUserText || '';
     let cleaned = raw
@@ -814,7 +816,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- PHONE CAPTURE MODE ----------
-
   if (capture.mode === 'phone') {
     capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
     const ukPair = parseUkPhone(capture.buffer);
@@ -901,7 +902,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- EMAIL CAPTURE MODE ----------
-
   if (capture.mode === 'email') {
     if (
       /no email|don.?t have an email|do not have an email|i don.?t use email/.test(
@@ -1000,7 +1000,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- BOOKING STATE UPDATE (NOW FIRST) ----------
-
   await updateBookingStateFromUtterance({
     userText: safeUserText,
     callState,
@@ -1008,7 +1007,6 @@ export async function handleTurn({ userText, callState }) {
   });
 
   // ---------- INCOMPLETE / SUSPICIOUS PHONE SANITY CHECK ----------
-
   try {
     const phoneDigits = (callState.booking?.phone || '').replace(/[^\d]/g, '');
     const userDigits = safeUserText.replace(/[^\d]/g, '');
@@ -1043,7 +1041,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- SYSTEM BOOKING ACTIONS (AFTER STATE UPDATE) ----------
-
   const systemAction = await handleSystemActionsFirst({
     userText: safeUserText,
     callState,
@@ -1058,7 +1055,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- SPECIAL CASE: USER SAYS "BOTH" / "ALL OF THEM" TO AN OPTIONS QUESTION ----------
-
   const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
   const userSaysBothOrAll =
     /\b(both|both really|all of (them|those|the above)|all really)\b/.test(userLower);
@@ -1086,7 +1082,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- OPENAI CALL ----------
-
   const systemPrompt = buildSystemPrompt(callState);
   const messages = [{ role: 'system', content: systemPrompt }];
   const recent = history.slice(-12);
@@ -1202,7 +1197,7 @@ export async function handleTurn({ userText, callState }) {
   }
 
   const genericFallbackRegex =
-    /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that\./i;
+    /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that./i;
 
   if (genericFallbackRegex.test(botText) && bookingIntentRegex.test(userLower)) {
     botText =
