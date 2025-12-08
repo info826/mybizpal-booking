@@ -175,10 +175,39 @@ function extractNameFromUtterance(text) {
 
   const lower = rawText.toLowerCase();
   const badNameWords = new Set([
-    'hi', 'hello', 'hey', 'yes', 'yeah', 'yep', 'no', 'nope', 'ok', 'okay',
-    'fine', 'good', 'perfect', 'thanks', 'thank', 'thank you', 'please',
-    'booking', 'book', 'email', 'mail', 'business', 'curious', 'testing',
-    'test', 'just', 'only', 'nothing', 'something', 'anything', 'in', 'out', 'there',
+    'hi',
+    'hello',
+    'hey',
+    'yes',
+    'yeah',
+    'yep',
+    'no',
+    'nope',
+    'ok',
+    'okay',
+    'fine',
+    'good',
+    'perfect',
+    'thanks',
+    'thank',
+    'thank you',
+    'please',
+    'booking',
+    'book',
+    'email',
+    'mail',
+    'business',
+    'curious',
+    'testing',
+    'test',
+    'just',
+    'only',
+    'nothing',
+    'something',
+    'anything',
+    'in',
+    'out',
+    'there',
   ]);
 
   const explicitMatch = lower.match(
@@ -212,7 +241,9 @@ function hasStrongNoCorrection(text) {
   if (!text) return false;
   const t = String(text).toLowerCase();
 
-  return /\b(not\s+(correct|right)|isn'?t\s+(correct|right)|wrong|incorrect|doesn'?t\s+look\s+right|not\s+quite\s+right)\b/.test(t);
+  return /\b(not\s+(correct|right)|isn'?t\s+(correct|right)|wrong|incorrect|doesn'?t\s+look\s+right|not\s+quite\s+right)\b/.test(
+    t
+  );
 }
 
 // ---------- PROACTIVE NAME CAPTURE (NEW) ----------
@@ -233,19 +264,42 @@ function updateBusinessTypeFromAnyMessage({ safeUserText, profile }) {
   const lower = safeUserText.toLowerCase();
 
   const patterns = [
-    'car repair', 'garage', 'mechanic', 'auto repair',
-    'clinic', 'dental', 'dentist', 'salon', 'hair', 'beauty',
-    'plumber', 'electrician', 'trades', 'trade',
-    'coaching', 'coach', 'tutor', 'online shop', 'e-?commerce',
-    'restaurant', 'cafe', 'takeaway', 'vet', 'veterinary',
-    'physio', 'chiro', 'therapist', 'gym', 'fitness'
+    'car repair',
+    'garage',
+    'mechanic',
+    'auto repair',
+    'clinic',
+    'dental',
+    'dentist',
+    'salon',
+    'hair',
+    'beauty',
+    'plumber',
+    'electrician',
+    'trades',
+    'trade',
+    'coaching',
+    'coach',
+    'tutor',
+    'online shop',
+    'ecommerce',
+    'restaurant',
+    'cafe',
+    'takeaway',
+    'vet',
+    'veterinary',
+    'physio',
+    'chiro',
+    'therapist',
+    'gym',
+    'fitness',
   ];
 
   for (const pattern of patterns) {
-    if (lower.includes(pattern.replace(/-/, ' '))) {
+    if (lower.includes(pattern)) {
       profile.businessType = pattern
         .split(' ')
-        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
         .join(' ');
       return;
     }
@@ -253,9 +307,12 @@ function updateBusinessTypeFromAnyMessage({ safeUserText, profile }) {
 
   // fallback for very short messages
   if (safeUserText.length < 60) {
-    const match = safeUserText.match(/\b(garage|salon|clinic|shop|studio|gym|dentist|plumber|electrician|mechanic|coach|restaurant|vet|physio)\b/i);
+    const match = safeUserText.match(
+      /\b(garage|salon|clinic|shop|studio|gym|dentist|plumber|electrician|mechanic|coach|restaurant|vet|physio)\b/i
+    );
     if (match) {
-      profile.businessType = match[0].charAt(0).toUpperCase() + match[0].slice(1).toLowerCase();
+      profile.businessType =
+        match[0].charAt(0).toUpperCase() + match[0].slice(1).toLowerCase();
     }
   }
 }
@@ -329,8 +386,15 @@ function buildSystemPrompt(callState) {
   else if (hourLocal >= 17 && hourLocal < 22) timeOfDay = 'evening';
   else timeOfDay = 'late';
 
-  const { intent, name, phone, email, timeSpoken, awaitingTimeConfirm, earliestSlotSpoken } =
-    booking;
+  const {
+    intent,
+    name,
+    phone,
+    email,
+    timeSpoken,
+    awaitingTimeConfirm,
+    earliestSlotSpoken,
+  } = booking;
 
   const bookingSummary = `
 Current booking context:
@@ -504,6 +568,9 @@ export async function handleTurn({ userText, callState }) {
 
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
+
+  // last assistant message (for several heuristics later)
+  const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
 
   // CRITICAL FIXES: Proactive name & business capture on every message
   tryCaptureNameIfMissing(callState, safeUserText);
@@ -693,6 +760,38 @@ export async function handleTurn({ userText, callState }) {
     return { text: replyText, shouldEnd: false };
   }
 
+  // ---------- USER SAYS THEY ALREADY ANSWERED ----------
+  if (/\bi already (told you|answered that|said that)\b/.test(userLower)) {
+    const lastAssistantText = lastAssistant
+      ? lastAssistant.content.toLowerCase()
+      : '';
+    let replyText;
+
+    if (profile.businessType && /what (kind|type|sort) of business/.test(lastAssistantText)) {
+      const name = booking.name || 'you';
+      replyText = `You’re right, you did — my mistake there. I’ve got you down as ${name}, running a ${profile.businessType}. Let’s pick up from there and focus on how we can stop those missed calls and lost enquiries for you.`;
+    } else if (booking.email && /(email|e-mail|e mail)/.test(lastAssistantText)) {
+      replyText = `You’re absolutely right, you already gave me your email. I’ve got **${booking.email}** noted, so we’re all set on that front — let’s carry on.`;
+    } else if (booking.phone && /(number|mobile|phone)/.test(lastAssistantText)) {
+      replyText = `You’re right, you already shared your number. I’ve got **${booking.phone}** saved, so we can move on.`;
+    } else {
+      const bits = [];
+      if (booking.name) bits.push(`name: ${booking.name}`);
+      if (profile.businessType) bits.push(`business: ${profile.businessType}`);
+      if (booking.email) bits.push(`email: ${booking.email}`);
+      if (booking.phone) bits.push(`mobile: ${booking.phone}`);
+      const summary = bits.length
+        ? `Here’s what I’ve got so far: ${bits.join(', ')}.`
+        : `I know I asked you a couple of things there.`;
+      replyText = `You’re right, that’s on me — no need to repeat yourself. ${summary} Let’s just carry on from there.`;
+    }
+
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
+
   // ---------- LIGHTWEIGHT SMALL-TALK / INTENT HANDLERS ----------
   if (/\bremember me\b|\bdo you remember\b/.test(userLower)) {
     const knownName = booking.name;
@@ -720,7 +819,7 @@ export async function handleTurn({ userText, callState }) {
     /\bwhat do you do\b/.test(userLower) ||
     /see what you do/.test(userLower) ||
     /what (is|does) mybizpal\b/.test(userLower) ||
-    /what you do??$/.test(userLower)
+    /what you do\??$/.test(userLower)
   ) {
     behaviour.interestLevel =
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
@@ -927,17 +1026,26 @@ export async function handleTurn({ userText, callState }) {
 
     capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
 
-    // Robust email extraction
+    // Robust email extraction with "my email is" heuristic
     let email = null;
     const rawBuffer = capture.buffer;
+    let bufferForEmail = rawBuffer;
+    const lowerBuffer = rawBuffer.toLowerCase();
 
-    const directMatch = rawBuffer.match(
+    const markerMatch = lowerBuffer.match(
+      /(my\s+email\s+is|email\s+is|email\s*[:=])/i
+    );
+    if (markerMatch) {
+      bufferForEmail = rawBuffer.slice(markerMatch.index + markerMatch[0].length);
+    }
+
+    const directMatch = bufferForEmail.match(
       /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/
     );
     if (directMatch) {
       email = directMatch[0].toLowerCase();
     } else {
-      const extracted = extractEmailSmart(rawBuffer);
+      const extracted = extractEmailSmart(bufferForEmail);
       if (extracted) {
         email = String(extracted).toLowerCase();
       }
@@ -1055,7 +1163,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- SPECIAL CASE: USER SAYS "BOTH" / "ALL OF THEM" TO AN OPTIONS QUESTION ----------
-  const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
   const userSaysBothOrAll =
     /\b(both|both really|all of (them|those|the above)|all really)\b/.test(userLower);
 
@@ -1196,8 +1303,7 @@ export async function handleTurn({ userText, callState }) {
     botText = buildContextualFallback({ safeUserText });
   }
 
-  const genericFallbackRegex =
-    /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that./i;
+  const genericFallbackRegex = /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that./i;
 
   if (genericFallbackRegex.test(botText) && bookingIntentRegex.test(userLower)) {
     botText =
