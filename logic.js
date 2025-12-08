@@ -56,8 +56,6 @@ function ensureProfile(callState) {
     callState.profile = {
       businessType: null,
       location: null,
-      mainPain: null, // biggest headache with calls/enquiries
-      mainGoal: null, // main business goal
       notes: [],
     };
   }
@@ -261,87 +259,39 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 
   const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
   if (!lastAssistant) return;
-
   const la = lastAssistant.content.toLowerCase();
 
-  // Business type
   if (!profile.businessType && /what (kind|type|sort) of business/.test(la)) {
     profile.businessType = trimmed;
   }
 
-  // Location
   if (
     !profile.location &&
     /(where are you (calling from|based)|where.*located)/.test(la)
   ) {
     profile.location = trimmed;
   }
-
-  // Main goal (e.g. “what’s your main goal over the next 3–6 months?”)
-  if (
-    !profile.mainGoal &&
-    /(main goal.*3-6 months|main goal over the next|what's your main goal\b)/.test(la)
-  ) {
-    profile.mainGoal = trimmed;
-  }
-
-  // Main pain / headache with calls & enquiries
-  if (
-    !profile.mainPain &&
-    /(biggest headache|main headache|most frustrating.*calls|most manual or messy right now)/.test(
-      la
-    )
-  ) {
-    profile.mainPain = trimmed;
-  }
 }
 
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
 
-function buildContextualFallback({ safeUserText, profile = {}, booking = {}, lastAssistant }) {
+function buildContextualFallback({ safeUserText }) {
   const openers = [
-    'Okay, I got the gist there.',
-    'Alright, that makes sense.',
-    'Got you - I think I follow.',
+    'Hmm, I think I might have missed a bit there.',
+    'Okay, I got the gist, but let me just make sure I’m on the right track.',
+    'Alright, I may not have caught every detail there.',
   ];
 
-  const businessType = profile.businessType;
-  const mainPain = profile.mainPain;
-  const mainGoal = profile.mainGoal;
-  const name = booking.name;
-
-  let intro = pickRandom(openers);
-
-  if (name) {
-    intro = `${intro} ${name},`;
-  }
-
   const core =
-    ' MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
+    ' In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
 
-  let followUp;
+  const followUps = [
+    ' Tell me what kind of business you run and what’s frustrating you most about calls or enquiries at the moment.',
+    ' What sort of business are you running, and where do things feel the most manual or messy right now?',
+    ' To point you in the right direction, what type of business are you thinking about using this for, and what’s the main thing you’d love to fix around calls or bookings?',
+  ];
 
-  if (!businessType) {
-    // We still don't know what they actually run
-    followUp =
-      ' To steer you properly, what kind of business are you running at the moment? For example, clinic, salon, trades, garage, online shop, something else?';
-  } else if (!mainPain) {
-    // We know the business, but not the main headache
-    followUp = ` For your ${businessType} right now, what’s the main headache with calls or enquiries - missed calls, WhatsApps piling up, people not booking in properly, or something else?`;
-  } else if (!mainGoal) {
-    // We know pain, but not their goal
-    followUp = ` Given that, what would you most like to improve over the next few months - more new customers, better organisation and reminders, or just getting your time back so you’re not glued to the phone?`;
-  } else if (!booking.intent || booking.intent === 'none') {
-    // We know a lot - gently push towards a call
-    followUp =
-      ' If you like, I can get you booked in for a short Zoom consultation so we can show you exactly how this would plug into your setup. Would that be useful?';
-  } else {
-    // Already clearly in booking flow - ask a light next-step question
-    followUp =
-      ' Next step would just be picking a day and rough time for a 20-30 minute Zoom chat with one of the team. When are you generally free - tomorrow, later this week, mornings or afternoons?';
-  }
-
-  return `${intro}${core}${followUp}`;
+  return pickRandom(openers) + core + pickRandom(followUps);
 }
 
 // ---------- SYSTEM PROMPT ----------
@@ -405,8 +355,6 @@ Known caller profile (from this and previous conversations — do NOT read this 
 - First name: ${name || 'unknown'}
 - Business type: ${profile.businessType || 'unknown'}
 - Location: ${profile.location || 'unknown'}
-- Main pain with calls/enquiries: ${profile.mainPain || 'unknown'}
-- Main goal (next 3–6 months): ${profile.mainGoal || 'unknown'}
 `.trim();
 
   const channelSummary = `
@@ -472,6 +420,10 @@ CONVERSATION RULES
   assume they mean speaking with a MyBizPal adviser about their own business.
 - Ask only ONE clear question at a time.
 - Read the history so you don’t re-ask things like their name, business type, or location.
+- Once you know their first name, business type, main problem and email, do NOT ask for those again
+  in the same conversation unless:
+  - they say something has changed, or
+  - you very briefly acknowledge losing track (e.g. "my mistake, I’ve got you as...") and then move on.
 - Use what you know: say "for your clinic" or "for your garage" rather than repeating generic phrases.
 - When they seem confused, ask a specific clarifying question instead of saying "I didn’t understand".
 - When they ask prices, you can say things are tailored and that pricing depends on their setup,
@@ -512,93 +464,6 @@ ${profileSummary}
 
 ${channelSummary}
 `.trim();
-}
-
-// ---------- REPEATED QUESTION CLEANER ----------
-
-function cleanRepeatedQuestions(botText, callState) {
-  if (!botText) return botText;
-
-  const lower = botText.toLowerCase();
-  const profile = ensureProfile(callState);
-  const booking = callState.booking || {};
-
-  let text = botText;
-
-  // 1) Business type
-  if (
-    profile.businessType &&
-    /what (kind|type|sort) of business/.test(lower)
-  ) {
-    text = text.replace(
-      /(?:^|\n).*what (kind|type|sort) of business[^?\n]*\?\s*/i,
-      ''
-    );
-    if (!/you (run|have) a/.test(text.toLowerCase())) {
-      text = `So just to confirm, you run a ${profile.businessType}. ` + text;
-    }
-  }
-
-  // 2) Main pain
-  if (
-    profile.mainPain &&
-    /(biggest|main) headache[^?\n]*\?/.test(lower)
-  ) {
-    text = text.replace(
-      /(?:^|\n).*?(biggest|main) headache[^?\n]*\?\s*/i,
-      ''
-    );
-    if (!/main headache/.test(text.toLowerCase())) {
-      text = `And your main headache right now is: ${profile.mainPain}. ` + text;
-    }
-  }
-
-  // 3) Main goal
-  if (
-    profile.mainGoal &&
-    /main goal[^?\n]*\?/.test(lower)
-  ) {
-    text = text.replace(
-      /(?:^|\n).*main goal[^?\n]*\?\s*/i,
-      ''
-    );
-    if (!/main goal/.test(text.toLowerCase())) {
-      text = `You mentioned your main goal is: ${profile.mainGoal}. ` + text;
-    }
-  }
-
-  // 4) Name
-  if (
-    booking.name &&
-    /(what('| i)s your (first )?name|who am i (speaking|talking) to)/.test(lower)
-  ) {
-    text = text.replace(
-      /(?:^|\n).*(what('| i)s your (first )?name|who am i (speaking|talking) to)[^?\n]*\?\s*/i,
-      ''
-    );
-    if (!/nice to meet/.test(text.toLowerCase())) {
-      text = `Nice to speak with you, ${booking.name}. ` + text;
-    }
-  }
-
-  // 5) Email
-  if (
-    booking.email &&
-    /(what('| i)s|what is|can i grab|could i grab|may i grab|let me grab|can i take|could i take|may i take).*(email|e-mail|e mail)/.test(
-      lower
-    )
-  ) {
-    text = text.replace(
-      /(?:^|\n).*(what('| i)s|what is|can i grab|could i grab|may i grab|let me grab|can i take|could i take|may i take).*(email|e-mail|e mail)[^?\n]*\?\s*/i,
-      ''
-    );
-    if (!/email/.test(text.toLowerCase())) {
-      text = `I’ve already got your email as ${booking.email}. ` + text;
-    }
-  }
-
-  text = text.trim();
-  return text || botText;
 }
 
 // ---------- MAIN TURN HANDLER ----------
@@ -1061,7 +926,22 @@ export async function handleTurn({ userText, callState }) {
     }
 
     capture.buffer = (capture.buffer + ' ' + safeUserText).trim();
-    const email = extractEmailSmart(capture.buffer);
+
+    // Robust email extraction
+    let email = null;
+    const rawBuffer = capture.buffer;
+
+    const directMatch = rawBuffer.match(
+      /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/
+    );
+    if (directMatch) {
+      email = directMatch[0].toLowerCase();
+    } else {
+      const extracted = extractEmailSmart(rawBuffer);
+      if (extracted) {
+        email = String(extracted).toLowerCase();
+      }
+    }
 
     if (email) {
       if (!callState.booking) callState.booking = {};
@@ -1143,7 +1023,6 @@ export async function handleTurn({ userText, callState }) {
       phoneDigits.length <= 10;
 
     if (looksSuspiciousShortUk) {
-      // Clear the phone and re-ask cleanly
       if (!callState.booking) callState.booking = {};
       callState.booking.phone = null;
 
@@ -1178,6 +1057,34 @@ export async function handleTurn({ userText, callState }) {
     return { text: systemAction.replyText, shouldEnd: false };
   }
 
+  // ---------- SPECIAL CASE: USER SAYS "BOTH" / "ALL OF THEM" TO AN OPTIONS QUESTION ----------
+
+  const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
+  const userSaysBothOrAll =
+    /\b(both|both really|all of (them|those|the above)|all really)\b/.test(userLower);
+
+  if (userSaysBothOrAll && lastAssistant) {
+    const laLower = lastAssistant.content.toLowerCase();
+    const looksLikeOptions =
+      lastAssistant.content.includes('•') ||
+      /\bor\b/.test(laLower) ||
+      /1\)/.test(laLower) ||
+      /2\)/.test(laLower);
+
+    if (looksLikeOptions) {
+      const businessLabel = profile.businessType
+        ? `for your ${profile.businessType}`
+        : 'in your business';
+
+      const replyText = `Got you — sounds like it’s a mix of those issues ${businessLabel}. For most people that just means calls and WhatsApp messages aren’t being handled reliably, which is exactly what MyBizPal fixes.\n\nIf you like, I can get you booked in for a short Zoom consultation so we can show you how that would look for your setup. Would that be useful?`;
+
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+      snapshotSessionFromCall(callState);
+      return { text: replyText, shouldEnd: false };
+    }
+  }
+
   // ---------- OPENAI CALL ----------
 
   const systemPrompt = buildSystemPrompt(callState);
@@ -1203,10 +1110,10 @@ export async function handleTurn({ userText, callState }) {
     console.error('Primary OpenAI call failed:', err);
   }
 
-  // Second-chance minimalist call if first came back empty/whitespace
+  // Second-chance minimalist call
   if (!botText) {
     try {
-      const lastAssistant = [...history]
+      const lastAssistantForSlim = [...history]
         .slice()
         .reverse()
         .find((m) => m.role === 'assistant');
@@ -1219,10 +1126,10 @@ export async function handleTurn({ userText, callState }) {
         },
       ];
 
-      if (lastAssistant) {
+      if (lastAssistantForSlim) {
         slimMessages.push({
           role: 'assistant',
-          content: lastAssistant.content,
+          content: lastAssistantForSlim.content,
         });
       }
 
@@ -1243,26 +1150,13 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // If it's STILL empty, fall back to a contextual, sales-driven reply
   if (!botText) {
-    const lastAssistant = [...history]
-      .slice()
-      .reverse()
-      .find((m) => m.role === 'assistant');
-
-    botText = buildContextualFallback({
-      safeUserText,
-      profile,
-      booking,
-      lastAssistant,
-    });
+    botText = buildContextualFallback({ safeUserText });
   }
 
-  // light clean-up only – we let the AI speak freely
   botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
-  // Strip any "I can't remember past chats" style disclaimers
   botText = botText.replace(
     /I (do not|don't) have (a )?way to (reliably )?remember past (chats|conversations) with you[^.]*\./gi,
     ''
@@ -1272,21 +1166,11 @@ export async function handleTurn({ userText, callState }) {
     ''
   );
 
-  // Strip or rewrite generic "I didn't understand / follow" apologies
   const confusionRegex =
     /sorry[, ]+i (do not|don't|did not|didn't) (quite )?(understand|follow) that[^.]*\.?/gi;
   if (confusionRegex.test(botText)) {
-    const lastAssistant = [...history]
-      .slice()
-      .reverse()
-      .find((m) => m.role === 'assistant');
-
-    botText = buildContextualFallback({
-      safeUserText,
-      profile,
-      booking,
-      lastAssistant,
-    });
+    botText =
+      'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you’re trying to sort out around calls or bookings?';
   }
 
   botText = botText.trim();
@@ -1299,11 +1183,8 @@ export async function handleTurn({ userText, callState }) {
     botText = botText.replace(/\s+,/g, ',');
   }
 
-  // Hard-remove any "agent like me" phrasing just in case
   botText = botText.replace(/agent like me/gi, 'MyBizPal');
 
-  // If we’ve already greeted in this conversation (voice greeting or prior replies),
-  // strip any repeated "Good X, I'm Gabriel from MyBizPal..." opener from GPT.
   const alreadyGreeted =
     !!callState.greeted || history.length > 0 || !!callState._hasTextGreetingSent;
 
@@ -1317,23 +1198,22 @@ export async function handleTurn({ userText, callState }) {
   }
 
   if (!botText) {
-    const lastAssistant = [...history]
-      .slice()
-      .reverse()
-      .find((m) => m.role === 'assistant');
-
-    botText = buildContextualFallback({
-      safeUserText,
-      profile,
-      booking,
-      lastAssistant,
-    });
+    botText = buildContextualFallback({ safeUserText });
   }
 
-  // Remove repeated questions if we already have the answer
-  botText = cleanRepeatedQuestions(botText, callState);
+  const genericFallbackRegex =
+    /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that\./i;
 
-  // Trim long responses
+  if (genericFallbackRegex.test(botText) && bookingIntentRegex.test(userLower)) {
+    botText =
+      'No problem at all — you’re through to MyBizPal. I can help you book a short Zoom consultation with one of the team to talk about your calls and bookings. What should I call you, just your first name?';
+
+    booking.intent = booking.intent || 'mybizpal_consultation';
+    if (behaviour.bookingReadiness === 'unknown') {
+      behaviour.bookingReadiness = 'high';
+    }
+  }
+
   if (botText.length > 420) {
     const cut = botText.slice(0, 420);
     const lastBreak = Math.max(
@@ -1345,8 +1225,6 @@ export async function handleTurn({ userText, callState }) {
     botText = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut;
   }
 
-  // ---------- END-OF-CALL DETECTION ----------
-
   let shouldEnd = false;
   let endByPhrase =
     /\b(no, that'?s all|that'?s all|nothing else|no more|all good|we'?re good)\b/.test(
@@ -1356,8 +1234,14 @@ export async function handleTurn({ userText, callState }) {
     /\b(ok bye|bye|goodbye|cheers,? bye)\b/.test(userLower);
 
   if (!endByPhrase && /^\s*no\s*$/i.test(userLower)) {
-    const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
-    if (lastAssistant && /anything else i can help/i.test(lastAssistant.content.toLowerCase())) {
+    const lastAssistantForEnd = [...history]
+      .slice()
+      .reverse()
+      .find((m) => m.role === 'assistant');
+    if (
+      lastAssistantForEnd &&
+      /anything else i can help/i.test(lastAssistantForEnd.content.toLowerCase())
+    ) {
       endByPhrase = true;
     }
   }
@@ -1365,8 +1249,6 @@ export async function handleTurn({ userText, callState }) {
   if (endByPhrase) {
     shouldEnd = true;
   }
-
-  // ---------- HISTORY + CAPTURE TRIGGERS ----------
 
   history.push({ role: 'user', content: safeUserText });
   history.push({ role: 'assistant', content: botText });
