@@ -187,7 +187,13 @@ function extractNameFromUtterance(text) {
     'okay',
     'fine',
     'good',
+    'great',
+    'nice',
     'perfect',
+    'cool',
+    'amazing',
+    'brilliant',
+    'excellent',
     'thanks',
     'thank',
     'thank you',
@@ -208,6 +214,7 @@ function extractNameFromUtterance(text) {
     'in',
     'out',
     'there',
+    'slot',
   ]);
 
   const explicitMatch = lower.match(
@@ -246,13 +253,17 @@ function hasStrongNoCorrection(text) {
   );
 }
 
-// ---------- PROACTIVE NAME CAPTURE (NEW) ----------
+// ---------- PROACTIVE NAME CAPTURE (UPDATED) ----------
 function tryCaptureNameIfMissing(callState, safeUserText) {
-  if (callState.booking?.name) return;
-
   const candidate = extractNameFromUtterance(safeUserText);
-  if (candidate) {
-    if (!callState.booking) callState.booking = {};
+  if (!candidate) return;
+
+  if (!callState.booking) callState.booking = {};
+  const existing = callState.booking.name;
+
+  // If we do not have a name yet, or the caller is clearly correcting it ("my name is ..."),
+  // allow this new candidate to overwrite the old one.
+  if (!existing || existing.toLowerCase() !== candidate.toLowerCase()) {
     callState.booking.name = candidate;
   }
 }
@@ -341,9 +352,9 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
 function buildContextualFallback({ safeUserText, profile }) {
   const openers = [
-    'Hmm, I think I might have missed a bit there.',
-    'Okay, I got the gist, but let me just make sure I’m on the right track.',
-    'Alright, I may not have caught every detail there.',
+    'I think I might have missed a bit there.',
+    'Let me just make sure I’m on the right track.',
+    'Alright, let me simplify that a bit.',
   ];
 
   const core =
@@ -587,7 +598,7 @@ export async function handleTurn({ userText, callState }) {
   const booking = callState.booking;
   const { isChat, isVoice } = getChannelInfo(callState);
 
-  // NEW: ensure we always have a phone on voice calls (needed for calendar / WhatsApp)
+  // Ensure we always have a phone on voice calls (needed for calendar / WhatsApp)
   if (isVoice && !booking.phone && callState.callerNumber) {
     booking.phone = callState.callerNumber;
   }
@@ -885,8 +896,19 @@ export async function handleTurn({ userText, callState }) {
     behaviour.interestLevel =
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
+    let follow;
+    if (profile.businessType) {
+      const bt = profile.businessType.toLowerCase();
+      follow = `For your ${bt}, where do things feel the most manual at the moment – is it missed calls, WhatsApp messages, or actually booking work in?`;
+    } else {
+      follow =
+        'What kind of business are you running and where do things feel the most manual at the moment?';
+    }
+
     const replyText =
-      'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps and bookings automatically so you’re not forever chasing missed enquiries.\n\nWhat kind of business are you running and where do things feel the most manual at the moment?';
+      'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps and bookings automatically so you’re not forever chasing missed enquiries.' +
+      (isVoice ? ' ' : '\n\n') +
+      follow;
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -1401,7 +1423,7 @@ export async function handleTurn({ userText, callState }) {
     // Remove bullet/list markers at the start of lines
     botText = botText.replace(/^[\s>*•\-]+\s*/gm, '');
 
-    // Hard cap on character length for voice (increased to avoid chopping closings)
+    // Hard cap on character length for voice
     const maxChars = 320;
     if (botText.length > maxChars) {
       const cut = botText.slice(0, maxChars);
