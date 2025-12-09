@@ -587,6 +587,11 @@ export async function handleTurn({ userText, callState }) {
   const booking = callState.booking;
   const { isChat, isVoice } = getChannelInfo(callState);
 
+  // NEW: ensure we always have a phone on voice calls (needed for calendar / WhatsApp)
+  if (isVoice && !booking.phone && callState.callerNumber) {
+    booking.phone = callState.callerNumber;
+  }
+
   if (!callState.capture) {
     callState.capture = {
       mode: 'none',
@@ -696,7 +701,6 @@ export async function handleTurn({ userText, callState }) {
 
       const replyText =
         'No problem, let us do that email again. Give me your full email address from the very start.';
-
       capture.mode = 'email';
       capture.buffer = '';
       capture.emailAttempts += 1;
@@ -1397,8 +1401,8 @@ export async function handleTurn({ userText, callState }) {
     // Remove bullet/list markers at the start of lines
     botText = botText.replace(/^[\s>*•\-]+\s*/gm, '');
 
-    // Hard cap on character length for voice
-    const maxChars = 260;
+    // Hard cap on character length for voice (increased to avoid chopping closings)
+    const maxChars = 320;
     if (botText.length > maxChars) {
       const cut = botText.slice(0, maxChars);
       const lastBreak = Math.max(
