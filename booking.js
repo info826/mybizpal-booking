@@ -257,7 +257,7 @@ Write ONE short paragraph (3–6 sentences, no bullets, no headings) that summar
 
 Tone: concise, professional and practical, written in third person
 (“The caller…”, “They…”, “Gabriel’s impression is that…”).
-Do NOT use bullet points. Do NOT include labels like “Pain points:”.
+Do NOT use bullet points. Do NOT include labels like “Pain points:” or “Focus:”.
 Just write one coherent paragraph.
 `.trim();
 
@@ -967,3 +967,4 @@ export async function handleSystemActionsFirst({ userText, callState }) {
   // No special system action needed
   return { intercept: false };
 }
+
