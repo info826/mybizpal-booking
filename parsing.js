@@ -32,46 +32,6 @@ const NAME_GREETING_STOP_WORDS = new Set([
   'sure',
   'fine',
   'perfect',
-  // extra safety – commonly mis-heard as a "name"
-  'slot',
-  'business',
-  'consultation',
-  'appointment',
-  'meeting',
-  'call',
-]);
-
-// Extra block-list for single-word "names" like "slot", "excellent", etc.
-const SINGLE_WORD_NON_NAMES = new Set([
-  ...NAME_GREETING_STOP_WORDS,
-  'slot',
-  'consultation',
-  'appointment',
-  'meeting',
-  'call',
-  'garage',
-  'salon',
-  'clinic',
-  'dentist',
-  'doctor',
-  'repair',
-  'service',
-  'business',
-  'test',
-  'testing',
-  'both',
-  'all',
-  'thanks',
-  'thankyou',
-  'ok',
-  'okay',
-  'yes',
-  'no',
-  'sure',
-  'great',
-  'nice',
-  'perfect',
-  'excellent',
 ]);
 
 export function extractName(text) {
@@ -89,12 +49,7 @@ export function extractName(text) {
   if (m) {
     const full = m[1].trim().replace(/\s+/g, ' ');
     // Use only first token as the name ("Gabriel" from "Gabriel De Ornelas")
-    const first = full.split(' ')[0];
-    const candidate = first.replace(/[^A-Za-z'-]/g, '');
-    const down = candidate.toLowerCase();
-    if (!candidate || candidate.length < 2) return null;
-    if (SINGLE_WORD_NON_NAMES.has(down)) return null;
-    return candidate;
+    return full.split(' ')[0];
   }
 
   // 2) Short direct answer like: "Gabriel" or "Gabriel Soares"
@@ -102,14 +57,8 @@ export function extractName(text) {
 
   // Only treat it as a name if the caller basically ONLY said their name
   if (words.length <= 2) {
-    const rawFirst = words[0] || '';
-    const candidateRaw = rawFirst.replace(/[^\w'-]/g, '');
-    const down = candidateRaw.toLowerCase();
-
-    if (!candidateRaw || candidateRaw.length < 2) return null;
-    if (SINGLE_WORD_NON_NAMES.has(down)) return null;
-
-    const candidate = candidateRaw.replace(/[^A-Za-z'-]/g, '');
+    // Take the FIRST word as the first name
+    const candidate = words[0].replace(/[^A-Za-z'-]/g, '');
     if (candidate.length >= 3 && candidate.length <= 20) {
       return candidate;
     }
@@ -407,7 +356,7 @@ export function formatSpokenDateTime(iso, tz = DEFAULT_TZ) {
   const hour = formatInTimeZone(d, tz, 'h');
   const mer = formatInTimeZone(d, tz, 'a').toLowerCase();
   const time = mins === '00' ? `${hour} ${mer}` : `${hour}:${mins} ${mer}`;
-  return `${day} ${date} ${month at ${time}`; // NOTE: if you see a typo here, fix to "month} at ${time}"
+  return `${day} ${date} ${month} at ${time}`;
 }
 
 // ---------- YES / NO HELPERS ----------
