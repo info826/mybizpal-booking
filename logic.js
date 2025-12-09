@@ -761,8 +761,9 @@ export async function handleTurn({ userText, callState }) {
   // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
   // Only treat as booking intent when they clearly talk about booking/scheduling,
   // not just saying the word "consultation" on its own.
-  const bookingIntentRegex =
-    /\b(book(ing)?|book me in|book a (call|consultation|meeting)|set up (a )?(call|appointment|consultation)|schedule (a )?(call|consultation|meeting)|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor))\b/;
+  
+  const earlyBookingRegex =
+  /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting))\b/;
 
   if (bookingIntentRegex.test(userLower)) {
     booking.intent = booking.intent || 'mybizpal_consultation';
