@@ -558,6 +558,28 @@ wss.on('connection', (ws, req) => {
     return false;
   }
 
+// ---- HELPER: filter out Gabriel's own speech being transcribed ----
+  function isLikelyBotEcho(text) {
+    const bot = (callState.lastBotText || '').trim().toLowerCase();
+    const user = (text || '').trim().toLowerCase();
+
+    if (!bot || !user) return false;
+
+    // If this transcript arrives well after the bot last spoke, treat it as genuine.
+    const sinceBot = Date.now() - (callState.timing.lastBotReplyAt || 0);
+    if (sinceBot > 4000) return false;
+
+    // Exact or near-exact match to the last bot line → almost certainly echo/feedback.
+    if (user === bot) return true;
+
+    const botWords = bot.split(/\s+/);
+    const userWords = user.split(/\s+/);
+    const overlap = userWords.filter((w) => botWords.includes(w)).length;
+    const overlapRatio = overlap / Math.max(botWords.length, 1);
+
+    return overlapRatio >= 0.6;
+  }
+  
   // ---- HELPER: detect "check-in hello?" when he's been quiet ----
   function isCheckInHello(text) {
     const t = (text || '').trim().toLowerCase();
