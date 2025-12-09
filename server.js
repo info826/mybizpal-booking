@@ -10,7 +10,7 @@ import twilio from 'twilio';
 import { google } from 'googleapis';
 import { handleTurn } from './logic.js';
 import { registerOutboundRoutes } from './outbound.js';
-// Session memory (shared across voice + WhatsApp)
+// NEW: session memory
 import { getSessionForPhone, saveSessionForPhone } from './sessionStore.js';
 
 // ---------- CONFIG ----------
@@ -24,7 +24,7 @@ const {
   ELEVENLABS_VOICE_ID,
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  // Google Calendar creds for WhatsApp cancel/reschedule
+  // NEW: Google Calendar creds for WhatsApp cancel/reschedule
   GOOGLE_CLIENT_EMAIL,
   GOOGLE_PRIVATE_KEY,
   GOOGLE_CALENDAR_ID,
@@ -376,7 +376,7 @@ app.post('/whatsapp/inbound', async (req, res) => {
     return;
   }
 
-  // --- DEFAULT: FULL GABRIEL BRAIN OVER WHATSApp (with session memory) ---
+  // --- DEFAULT: FULL GABRIEL BRAIN OVER WHATSAPP (with session memory) ---
   try {
     const previous = getSessionForPhone(fromPhone) || {};
 
@@ -469,10 +469,10 @@ wss.on('connection', (ws, req) => {
     },
     silenceStage: 0,   // 0 = none, 1 = first "are you still there?", 2 = second prompt sent
     silenceTimer: null,
-    // Tell logic.js we've already greeted on this channel
+    // NEW: tell logic.js we've already greeted on this channel
     _hasTextGreetingSent: false,
     channel: 'voice',
-    // Dedupe last bot text
+    // NEW: dedupe last bot text
     lastBotText: '',
   };
 
@@ -683,7 +683,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // Guard against accidental duplicate replies (same text within 2 seconds)
+      // NEW: guard against accidental duplicate replies (same text within 2 seconds)
       if (
         trimmedReply === callState.lastBotText &&
         nowTs - (callState.timing.lastBotReplyAt || 0) < 2000
@@ -904,6 +904,12 @@ wss.on('connection', (ws, req) => {
       const transcript = (alt.transcript || '').trim();
       if (!transcript) return;
 
+      // OPTIONAL: guard against our own echo
+      if (isLikelyBotEcho(transcript)) {
+        console.log('🔇 Ignoring likely bot echo transcript:', `"${transcript}"`);
+        return;
+      }
+
       const now = Date.now();
 
       // Update timing for user speech
@@ -945,16 +951,31 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // If this looks like the bot's own words echoing back, ignore it
-      if (isLikelyBotEcho(transcript)) {
-        console.log('🔇 Ignoring likely bot echo transcript:', `"${transcript}"`);
-        return;
-      }
-
       // If Gabriel is talking and caller interrupts → cancel TTS (barge-in)
       if (callState.isSpeaking) {
-        console.log('🚫 Barge-in detected – cancelling current TTS');
+        console.log(
+          '🚫 Barge-in detected – cancelling current TTS and queueing latest transcript'
+        );
         callState.cancelSpeaking = true;
+
+        // Always use the latest user transcript after barge-in
+        if (callState.pendingTimer) {
+          clearTimeout(callState.pendingTimer);
+          callState.pendingTimer = null;
+        }
+        callState.pendingTranscript = transcript;
+
+        // Small delay to let Twilio finish clearing audio before we speak again
+        const delayAfterBargeMs = 350;
+        callState.pendingTimer = setTimeout(async () => {
+          if (callState.hangupRequested) return;
+          const tText = callState.pendingTranscript;
+          callState.pendingTranscript = null;
+          callState.pendingTimer = null;
+          await respondToUser(tText);
+        }, delayAfterBargeMs);
+
+        return;
       }
 
       // Debounce + cooldown:
@@ -1000,7 +1021,7 @@ wss.on('connection', (ws, req) => {
     if (event === 'start') {
       streamSid = msg.start.streamSid;
       callState.callSid = msg.start.callSid || null;
-      // Get caller phone from customParameters
+      // NEW: get caller phone from customParameters
       callState.callerNumber =
         (msg.start.customParameters && msg.start.customParameters.caller) ||
         null;
@@ -1045,6 +1066,7 @@ wss.on('connection', (ws, req) => {
         streamSid,
         callSid: callState.callSid,
       });
+      callState.hangupRequested = true;
       try {
         dgSocket.close();
       } catch (e) {
