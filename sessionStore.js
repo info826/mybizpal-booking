@@ -7,15 +7,8 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 // Map<phone, { data: object, savedAt: number }>
 const sessions = new Map();
 
-// Normalise phone so the same human maps to the same key across channels
-// Examples that should all collapse to the same key:
-//  "+447700900123", "whatsapp:+447700900123", " +44 7700 900 123 "
 function normalisePhone(phone) {
-  if (!phone) return '';
-  let s = String(phone).trim();
-  s = s.replace(/^whatsapp:/i, '');       // strip whatsapp: prefix if present
-  s = s.replace(/[^\d+]/g, '');           // keep only + and digits
-  return s;
+  return String(phone || '').trim();
 }
 
 export function getSessionForPhone(phone) {
