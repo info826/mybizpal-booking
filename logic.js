@@ -646,9 +646,18 @@ CONTACT DETAILS
   - Instead, ask for the full email once ("What’s your best email address?").
   - If you need to confirm, read it back briefly in one line and ask "Is that right?".
 
+  WHEN YOU ARE ALLOWED TO START BOOKING
+- Do NOT ask for their email, talk about a "Zoom link", or say you’ll "lock it in"
+  until BOTH of these are true:
+  1) They have clearly said they would like to book / schedule / set up a consultation or call.
+  2) You have understood what their business does and what problem they are trying to solve.
+- Before that point, focus on understanding their business and their headaches with calls,
+  WhatsApps and bookings. You can mention that a consultation is an option later, but do not
+  start collecting email or calendar details yet.
+
 BOOKING BEHAVIOUR
 - If they clearly want to move forward, suggest a short Zoom consultation
-  (about 20–30 minutes, Monday–Friday, roughly 9am–5pm UK time) with a MyBizPal adviser.
+  (about 15–30 minutes, Monday–Friday, roughly 9am–5pm UK time) with a MyBizPal adviser.
 - To book:
   - Confirm their first name if not known.
   - Use the number they are calling/messaging from for confirmations, unless they ask for another.
@@ -750,8 +759,10 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
+  // Only treat as booking intent when they clearly talk about booking/scheduling,
+  // not just saying the word "consultation" on its own.
   const bookingIntentRegex =
-    /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult|discovery call|strategy call|demo call|demo)\b/;
+    /\b(book(ing)?|book me in|book a (call|consultation|meeting)|set up (a )?(call|appointment|consultation)|schedule (a )?(call|consultation|meeting)|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor))\b/;
 
   if (bookingIntentRegex.test(userLower)) {
     booking.intent = booking.intent || 'mybizpal_consultation';
@@ -1006,17 +1017,18 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- FAST PATH FOR HOT-LEAD CONSULTATION REQUESTS (VOICE) ----------
-  if (
-    isVoice &&
-    booking.intent === 'mybizpal_consultation' &&
-    strongBookNowRegex.test(userLower)
-  ) {
-    const replyText = buildFastConsultStep(callState, { isVoice });
-    history.push({ role: 'user', content: safeUserText });
-    history.push({ role: 'assistant', content: replyText });
-    snapshotSessionFromCall(callState);
-    return { text: replyText, shouldEnd: false };
-  }
+if (
+  isVoice &&
+  booking.intent === 'mybizpal_consultation' &&
+  strongBookNowRegex.test(userLower) &&
+  history.some((m) => m.role === 'assistant')
+) {
+  const replyText = buildFastConsultStep(callState, { isVoice });
+  history.push({ role: 'user', content: safeUserText });
+  history.push({ role: 'assistant', content: replyText });
+  snapshotSessionFromCall(callState);
+  return { text: replyText, shouldEnd: false };
+}
 
   // ---------- NAME CAPTURE MODE ----------
   if (capture.mode === 'name') {
@@ -1352,6 +1364,74 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
+// ---------- GUARD: NO BOOKING/EMAIL BEFORE CLEAR INTENT ----------
+
+function cleanEarlyBookingAndEmail(botText, { booking, behaviour, isVoice }) {
+  if (!botText) return botText || '';
+
+  const lower = botText.toLowerCase();
+
+  const hasBookingIntent =
+    booking.intent === 'mybizpal_consultation' ||
+    behaviour.bookingReadiness === 'high';
+
+  const mentionsEmail =
+    /\b(email|e-mail|e mail)\b/.test(lower) ||
+    /\bzoom link\b/.test(lower);
+
+  const hardBookingPhrases =
+    /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting)\b/.test(
+      lower
+    );
+
+  // If model tries to talk about booking or emails too early, strip that out.
+  if (!hasBookingIntent && (mentionsEmail || hardBookingPhrases)) {
+    // Remove sentences that mention email / zoom / booking from the reply
+    const sentences = botText
+      .split(/([.!?])/)
+      .reduce((acc, cur, idx, arr) => {
+        if (idx % 2 === 0) {
+          const punct = arr[idx + 1] || '';
+          acc.push(cur + punct);
+        }
+        return acc;
+      }, [])
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    const filtered = sentences.filter((s) => {
+      const sLower = s.toLowerCase();
+      if (/\b(email|e-mail|e mail|zoom link)\b/.test(sLower)) return false;
+      if (
+        /\b(book you in|get you booked|lock that in|lock it in|book you for\b/.test(
+          sLower
+        )
+      )
+        return false;
+      return true;
+    });
+
+    let cleaned = filtered.join(' ').trim();
+
+    if (!cleaned) {
+      // Fallback message if we stripped everything
+      cleaned = isVoice
+        ? 'Before we think about bookings or emails, tell me a bit about your business. What do you do?'
+        : 'Before we get into bookings or emails, tell me a bit about your business. What do you do and what’s the main thing you’re trying to fix around calls or messages?';
+    } else {
+      // Add a gentle redirect so the user understands why we are not booking yet
+      const tail = isVoice
+        ? ' Before we even think about bookings, tell me a bit about your business and what you are trying to sort out.'
+        : ' Before we even think about bookings, tell me a bit about your business and what you are trying to sort out around calls or enquiries.';
+      cleaned += tail;
+    }
+
+    return cleaned;
+  }
+
+  return botText;
+}
+  
   // ---------- OPENAI CALL ----------
   const systemPrompt = buildSystemPrompt(callState);
   const messages = [{ role: 'system', content: systemPrompt }];
@@ -1423,6 +1503,13 @@ export async function handleTurn({ userText, callState }) {
   // Normalisation and de-robotising
   botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
+
+    // Enforce "no booking/email before clear intent"
+  botText = cleanEarlyBookingAndEmail(botText, {
+    booking,
+    behaviour,
+    isVoice,
+  });
 
   // Remove explicit "I can't remember past chats" style lines
   botText = botText.replace(
