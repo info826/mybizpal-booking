@@ -608,6 +608,10 @@ wss.on('connection', (ws, req) => {
       callState.lastReplyAt = now;
       callState.timing.lastBotReplyAt = now;
       callState.lastBotText = reply;
+      
+      // Record the spoken greeting in history so downstream logic/OpenAI
+      // knows it has already happened (prevents double-greeting responses).
+      callState.history.push({ role: 'assistant', content: reply });
     }
   }
 
