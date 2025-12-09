@@ -817,7 +817,6 @@ export async function handleTurn({ userText, callState }) {
         capture.nameStage = 'confirmed';
         history.push({ role: 'user', content: safeUserText });
         snapshotSessionFromCall(callState);
-        return { text: '', shouldEnd: false };
       }
 
       capture.mode = 'name';
