@@ -339,7 +339,7 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 }
 
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
-function buildContextualFallback({ safeUserText }) {
+function buildContextualFallback({ safeUserText, profile }) {
   const openers = [
     'Hmm, I think I might have missed a bit there.',
     'Okay, I got the gist, but let me just make sure I’m on the right track.',
@@ -349,13 +349,23 @@ function buildContextualFallback({ safeUserText }) {
   const core =
     ' In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
 
-  const followUps = [
-    ' Tell me what kind of business you run and what’s frustrating you most about calls or enquiries at the moment.',
-    ' What sort of business are you running, and where do things feel the most manual or messy right now?',
-    ' To point you in the right direction, what type of business are you thinking about using this for, and what’s the main thing you’d love to fix around calls or bookings?',
-  ];
+  let followUp;
 
-  return pickRandom(openers) + core + pickRandom(followUps);
+  if (profile && profile.businessType) {
+    const bt = profile.businessType.toLowerCase();
+    followUp =
+      ` For your ${bt}, tell me a bit more about where things tend to go wrong ` +
+      'with calls or bookings so I can be specific.';
+  } else {
+    const followUps = [
+      ' Tell me what kind of business you run and what’s frustrating you most about calls or enquiries at the moment.',
+      ' What sort of business are you running, and where do things feel the most manual or messy right now?',
+      ' To point you in the right direction, what type of business are you thinking about using this for, and what’s the main thing you’d love to fix around calls or bookings?',
+    ];
+    followUp = pickRandom(followUps);
+  }
+
+  return pickRandom(openers) + core + followUp;
 }
 
 // ---------- SYSTEM PROMPT ----------
@@ -497,6 +507,21 @@ CONVERSATION RULES
 - When they seem confused, ask a specific clarifying question instead of saying "I didn’t understand".
 - When they ask prices, you can say things are tailored and that pricing depends on their setup,
   and that it is best covered properly on a quick consultation call.
+
+BOOKING QUESTIONS (KEEP IT HUMAN)
+- When you are setting up a Zoom consultation:
+  - Do NOT say "Two quick things so I can lock it in" or use numbered lists like "1) ..." and "2) ...".
+  - Ask short, natural questions instead, one at a time.
+    Example:
+      - "Perfect, 10am today works. What’s the best email to send your Zoom link to?"
+      - After you have the email: "Great, and that’s 10am UK time for you, right?"
+- Do NOT over-explain when confirming – keep it simple and human.
+
+TIME FORMATTING (VERY IMPORTANT)
+- When you say times, always use:
+  - "10am" (no colon, no space) for whole hours.
+  - "4:30pm" (colon and no space) for half hours or similar.
+- Never say "10:00 am", "10 am", "10:00am" or similar formats with a colon and "00" or spaces.
 
 CONTACT DETAILS
 - Internally you already know the phone number they are calling or messaging from.
@@ -1201,7 +1226,7 @@ export async function handleTurn({ userText, callState }) {
     const completion = await openai.chat.completions.create({
       model: 'gpt-5.1',
       reasoning_effort: 'none',
-      temperature: 0.65,
+      temperature: 0.6,
       max_completion_tokens: 140,
       messages,
     });
@@ -1253,12 +1278,14 @@ export async function handleTurn({ userText, callState }) {
   }
 
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText });
+    botText = buildContextualFallback({ safeUserText, profile });
   }
 
+  // Normalisation and de-robotising
   botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
+  // Remove explicit "I can't remember past chats" style lines
   botText = botText.replace(
     /I (do not|don't) have (a )?way to (reliably )?remember past (chats|conversations) with you[^.]*\./gi,
     ''
@@ -1268,11 +1295,19 @@ export async function handleTurn({ userText, callState }) {
     ''
   );
 
+  // Replace generic confusion with a more contextual prompt
   const confusionRegex =
     /sorry[, ]+i (do not|don't|did not|didn't) (quite )?(understand|follow) that[^.]*\.?/gi;
   if (confusionRegex.test(botText)) {
-    botText =
-      'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you’re trying to sort out around calls or bookings?';
+    if (profile.businessType) {
+      const bt = profile.businessType.toLowerCase();
+      botText =
+        `I think I might have missed a bit of that. ` +
+        `For your ${bt}, could you tell me where things most often go wrong with calls or bookings?`;
+    } else {
+      botText =
+        'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you’re trying to sort out around calls or bookings?';
+    }
   }
 
   botText = botText.trim();
@@ -1285,8 +1320,10 @@ export async function handleTurn({ userText, callState }) {
     botText = botText.replace(/\s+,/g, ',');
   }
 
+  // Remove "agent like me"
   botText = botText.replace(/agent like me/gi, 'MyBizPal');
 
+  // Strip greeting if already greeted
   const alreadyGreeted =
     !!callState.greeted || history.length > 0 || !!callState._hasTextGreetingSent;
 
@@ -1299,8 +1336,31 @@ export async function handleTurn({ userText, callState }) {
       .trim();
   }
 
+  // Remove robotic "Two quick things..." pattern and replace with a short, human line
+  if (/two quick things so i can lock it in/i.test(botText)) {
+    botText =
+      'Great, let me just grab your details. What’s the best email to send your Zoom link to?';
+  }
+
+  // Time formatting clean-up:
+  // 1) "10:00 am" / "10:00am" -> "10am"
+  botText = botText.replace(
+    /\b([0-1]?\d):00\s*([AaPp])\.?m\.?\b/g,
+    (_, h, ap) => `${h}${ap.toLowerCase()}m`
+  );
+  // 2) "10 am" / "10 AM" -> "10am"
+  botText = botText.replace(
+    /\b([0-1]?\d)\s*([AaPp])\.?m\.?\b/g,
+    (_, h, ap) => `${h}${ap.toLowerCase()}m`
+  );
+  // 3) "4:30 pm" / "4:30pm" -> "4:30pm" (no space, lowercase)
+  botText = botText.replace(
+    /\b([0-1]?\d):([0-5]\d)\s*([AaPp])\.?m\.?\b/g,
+    (_, h, m, ap) => `${h}:${m}${ap.toLowerCase()}m`
+  );
+
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText });
+    botText = buildContextualFallback({ safeUserText, profile });
   }
 
   const genericFallbackRegex = /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that./i;
@@ -1315,6 +1375,7 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
+  // Trim overly long replies
   if (botText.length > 420) {
     const cut = botText.slice(0, 420);
     const lastBreak = Math.max(
