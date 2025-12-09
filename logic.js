@@ -1336,6 +1336,7 @@ export async function handleTurn({ userText, callState }) {
     callState,
     timezone: TZ,
   });
+  console.log('SYSTEM ACTION DECISION:', JSON.stringify(systemAction, null, 2));
 
   if (systemAction && systemAction.intercept && systemAction.replyText) {
     history.push({ role: 'user', content: safeUserText });
