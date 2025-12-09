@@ -187,13 +187,7 @@ function extractNameFromUtterance(text) {
     'okay',
     'fine',
     'good',
-    'great',
-    'nice',
     'perfect',
-    'cool',
-    'amazing',
-    'brilliant',
-    'excellent',
     'thanks',
     'thank',
     'thank you',
@@ -215,6 +209,21 @@ function extractNameFromUtterance(text) {
     'out',
     'there',
     'slot',
+    'consultation',
+    'appointment',
+    'meeting',
+    'call',
+    'garage',
+    'salon',
+    'clinic',
+    'dentist',
+    'doctor',
+    'repair',
+    'service',
+    'mechanic',
+    'both',
+    'all',
+    'excellent',
   ]);
 
   const explicitMatch = lower.match(
@@ -253,17 +262,13 @@ function hasStrongNoCorrection(text) {
   );
 }
 
-// ---------- PROACTIVE NAME CAPTURE (UPDATED) ----------
+// ---------- PROACTIVE NAME CAPTURE (NEW) ----------
 function tryCaptureNameIfMissing(callState, safeUserText) {
+  if (callState.booking?.name) return;
+
   const candidate = extractNameFromUtterance(safeUserText);
-  if (!candidate) return;
-
-  if (!callState.booking) callState.booking = {};
-  const existing = callState.booking.name;
-
-  // If we do not have a name yet, or the caller is clearly correcting it ("my name is ..."),
-  // allow this new candidate to overwrite the old one.
-  if (!existing || existing.toLowerCase() !== candidate.toLowerCase()) {
+  if (candidate) {
+    if (!callState.booking) callState.booking = {};
     callState.booking.name = candidate;
   }
 }
@@ -352,9 +357,9 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
 // ---------- CONTEXTUAL FALLBACK BUILDER ----------
 function buildContextualFallback({ safeUserText, profile }) {
   const openers = [
-    'I think I might have missed a bit there.',
-    'Let me just make sure I’m on the right track.',
-    'Alright, let me simplify that a bit.',
+    'Hmm, I think I might have missed a bit there.',
+    'Okay, I got the gist, but let me just make sure I’m on the right track.',
+    'Alright, I may not have caught every detail there.',
   ];
 
   const core =
@@ -377,6 +382,57 @@ function buildContextualFallback({ safeUserText, profile }) {
   }
 
   return pickRandom(openers) + core + followUp;
+}
+
+// ---------- FAST CONSULTATION STEP FOR HOT LEADS (VOICE) ----------
+function buildFastConsultStep(callState, { isVoice }) {
+  const booking = callState.booking || {};
+  const profile = ensureProfile(callState);
+  const capture = callState.capture || {
+    mode: 'none',
+    buffer: '',
+    emailAttempts: 0,
+    phoneAttempts: 0,
+    nameAttempts: 0,
+    nameStage: 'initial',
+    pendingConfirm: null,
+  };
+
+  callState.capture = capture;
+
+  // 1) No name yet → ask only for first name
+  if (!booking.name) {
+    const replyText =
+      'Sure, let’s get that consultation booked in. What’s your first name?';
+    capture.mode = 'name';
+    capture.buffer = '';
+    capture.nameStage = 'initial';
+    return replyText;
+  }
+
+  // 2) No business type yet → quick “what type of business” question
+  if (!profile.businessType) {
+    const replyText =
+      'Great, and what type of business is it — for example a car repair garage, salon, clinic, trades or something else?';
+    // No special capture mode – normal text will be parsed into profile.businessType.
+    return replyText;
+  }
+
+  // 3) No email yet → ask for email once
+  if (!booking.email) {
+    const replyText =
+      'Perfect. What’s the best email address to send your Zoom link to?';
+    capture.mode = 'email';
+    capture.buffer = '';
+    capture.emailAttempts = 0;
+    capture.pendingConfirm = null;
+    return replyText;
+  }
+
+  // 4) We have name, business and email → ask for a time window
+  const replyText =
+    'Brilliant, I’ve got what I need. What day and roughly what time suits you for a 20–30 minute Zoom — for example tomorrow morning, tomorrow afternoon, or another weekday between 9am and 5pm?';
+  return replyText;
 }
 
 // ---------- SYSTEM PROMPT ----------
@@ -501,6 +557,23 @@ SALES MINDSET (VERY IMPORTANT)
   4) NEXT STEP: If they show interest, suggest a short Zoom consultation to see how it would plug into their business.
 - Always ask specific, human questions, not generic ones.
 - If what they ask is outside MyBizPal, answer briefly, then steer back to how MyBizPal could help their business.
+
+HOT LEADS ON VOICE (BOOKING FOCUS)
+- On VOICE calls, when the caller clearly says things like "book a consultation", "book me in",
+  "can you book my consultation" or "get me booked", treat them as a HOT LEAD.
+- For these callers your priority is SPEED and CLARITY, not deep discovery:
+  - Only ask the essentials:
+    - Their first name (if you do not already know it),
+    - What type of business it is,
+    - The best email for the Zoom link,
+    - A simple day/time preference.
+  - Do NOT go into long discovery about every process or their full history.
+  - You can always cover details properly on the Zoom consultation.
+
+SPEAKING RHYTHM ON VOICE
+- On voice you should virtually ALWAYS end your reply with a clear question,
+  unless you are clearly closing the conversation ("That’s all booked in, speak then.").
+- Never leave the caller hanging in silence with no question about what happens next.
 
 GREETING
 - On the very first reply in a conversation, you normally say:
@@ -664,6 +737,10 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
+  // Strong "book me now" phrases (for fast path on voice)
+  const strongBookNowRegex =
+    /\b(book (me|my consultation|a consultation|a call)|can you book (me|my consultation|a call)|please book (me|my consultation)|get me booked( in)?|book my consultation|book my call|book a consultation for me)\b/;
+
   // ---------- PENDING CONFIRMATIONS ----------
   if (capture.pendingConfirm === 'name') {
     const strongNo = hasStrongNoCorrection(safeUserText);
@@ -817,8 +894,8 @@ export async function handleTurn({ userText, callState }) {
     let replyText;
 
     if (profile.businessType && /what (kind|type|sort) of business/.test(lastAssistantText)) {
-      const name = booking.name || 'you';
-      replyText = `You’re right, you did — my mistake there. I’ve got you down as ${name}, running a ${profile.businessType}. Let’s pick up from there and focus on how we can stop those missed calls and lost enquiries for you.`;
+      const nameLabel = booking.name || 'you';
+      replyText = `You’re right, you did — my mistake there. I’ve got you down as ${nameLabel}, running a ${profile.businessType}. Let’s pick up from there and focus on how we can stop those missed calls and lost enquiries for you.`;
     } else if (booking.email && /(email|e-mail|e mail)/.test(lastAssistantText)) {
       replyText = `You’re absolutely right, you already gave me your email. I’ve got **${booking.email}** noted, so we’re all set on that front — let’s carry on.`;
     } else if (booking.phone && /(number|mobile|phone)/.test(lastAssistantText)) {
@@ -896,20 +973,22 @@ export async function handleTurn({ userText, callState }) {
     behaviour.interestLevel =
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
-    let follow;
-    if (profile.businessType) {
-      const bt = profile.businessType.toLowerCase();
-      follow = `For your ${bt}, where do things feel the most manual at the moment – is it missed calls, WhatsApp messages, or actually booking work in?`;
-    } else {
-      follow =
-        'What kind of business are you running and where do things feel the most manual at the moment?';
-    }
-
     const replyText =
-      'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps and bookings automatically so you’re not forever chasing missed enquiries.' +
-      (isVoice ? ' ' : '\n\n') +
-      follow;
+      'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps and bookings automatically so you’re not forever chasing missed enquiries.\n\nWhat kind of business are you running and where do things feel the most manual at the moment?';
 
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
+
+  // ---------- FAST PATH FOR HOT-LEAD CONSULTATION REQUESTS (VOICE) ----------
+  if (
+    isVoice &&
+    booking.intent === 'mybizpal_consultation' &&
+    strongBookNowRegex.test(userLower)
+  ) {
+    const replyText = buildFastConsultStep(callState, { isVoice });
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
     snapshotSessionFromCall(callState);
@@ -1485,6 +1564,21 @@ export async function handleTurn({ userText, callState }) {
 
   if (endByPhrase) {
     shouldEnd = true;
+  }
+
+  // VOICE: never leave caller hanging without a question (unless ending)
+  if (isVoice && !shouldEnd) {
+    const hasQuestion = /\?/.test(botText);
+    if (!hasQuestion) {
+      // Add a short, neutral next-step question
+      if (botText.endsWith('.')) {
+        botText += ' What would you like me to do next?';
+      } else if (botText.length === 0) {
+        botText = 'What would you like me to do next?';
+      } else {
+        botText += ' What would you like me to do next?';
+      }
+    }
   }
 
   history.push({ role: 'user', content: safeUserText });
