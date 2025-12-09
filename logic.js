@@ -575,7 +575,7 @@ SELLING THE AGENT / RECEPTIONIST
 
 HOT LEADS ON VOICE (BOOKING FOCUS)
 - On VOICE calls, when the caller clearly says things like "book a consultation", "book me in",
-  "get me booked", "book a discovery call", "book a strategy call" or similar, treat them as a HOT LEAD.
+  "get me booked", "book a discovery call", "book a strategy call", "book a demo call" or similar, treat them as a HOT LEAD.
 - For these callers your priority is SPEED and CLARITY, not deep discovery:
   - Only ask the essentials:
     - Their first name (if you do not already know it),
@@ -710,12 +710,16 @@ export async function handleTurn({ userText, callState }) {
 
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
+  const isFirstTurn = history.length === 0;
 
   // last assistant message (for several heuristics later)
   const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
 
   // CRITICAL FIXES: Proactive name & business capture on every message
-  tryCaptureNameIfMissing(callState, safeUserText);
+  // BUT: do NOT auto-grab name on the very first VOICE message – it can be noisy ("I'm Ra...") and cause early jumps.
+  if (!(isVoice && isFirstTurn)) {
+    tryCaptureNameIfMissing(callState, safeUserText);
+  }
   updateBusinessTypeFromAnyMessage({ safeUserText, profile });
   updateProfileFromUserReply({ safeUserText, history, profile });
 
@@ -972,7 +976,7 @@ export async function handleTurn({ userText, callState }) {
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
     const coreExplanation =
-      'Short version: MyBizPal answers your calls and WhatsApp messages for you 24/7, handles discovery calls and basic sales conversations, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold or leads getting lost. It’s built for busy clinics, salons, dentists, trades and other local service businesses.';
+      'Short version: MyBizPal answers your calls and WhatsApp messages for you, handles discovery calls and basic sales conversations, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It’s built for busy clinics, salons, dentists, trades and other local service businesses.';
 
     const followUps = [
       '\n\nWhat type of business are you running at the moment?',
@@ -993,7 +997,7 @@ export async function handleTurn({ userText, callState }) {
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
     const replyText =
-      'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps, discovery calls and bookings automatically 24/7 so you’re not forever chasing missed enquiries.\n\nWhat kind of business are you running and where do things feel the most manual at the moment?';
+      'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps, discovery calls and bookings automatically so you’re not forever chasing missed enquiries.\n\nWhat kind of business are you running and where do things feel the most manual at the moment?';
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -1452,6 +1456,19 @@ export async function handleTurn({ userText, callState }) {
   }
 
   botText = botText.trim();
+
+  // NEW: prevent the very first reply on a VOICE call from jumping straight to "what's your email"
+  const isFirstAssistantTurn = history.length === 0;
+  if (
+    isVoice &&
+    isFirstAssistantTurn &&
+    /email/i.test(botText) &&
+    !booking.intent &&
+    !profile.businessType
+  ) {
+    const namePrefix = booking.name ? `${booking.name}, ` : '';
+    botText = `${namePrefix}thanks for calling. Before we grab any details, tell me a bit about your business and what you are trying to sort out around calls or bookings.`;
+  }
 
   const { booking: bookingState = {} } = callState;
 
