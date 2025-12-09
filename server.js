@@ -815,11 +815,15 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // If Gabriel is talking and caller interrupts → cancel TTS (barge-in)
-      if (callState.isSpeaking) {
-        console.log('🚫 Barge-in detected – cancelling current TTS');
-        callState.cancelSpeaking = true;
-      }
+// Only treat as barge-in if user said something meaningful
+if (callState.isSpeaking && transcript.length > 4) {
+  console.log('🚫 Barge-in detected – meaningful user interrupt');
+  callState.cancelSpeaking = true;
+} else if (callState.isSpeaking) {
+  // Ignore tiny interjections like "hi", "ok", etc.
+  console.log('⚠️ Ignored tiny user interruption during TTS');
+  return;
+}
 
       // Debounce + cooldown:
       // - at most one reply every ~1800ms (more patient)
