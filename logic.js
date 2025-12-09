@@ -773,7 +773,7 @@ export async function handleTurn({ userText, callState }) {
 
   // Strong "book me now" phrases (for fast path on voice)
   const strongBookNowRegex =
-    /\b(book (me|my consultation|a consultation|a call)|can you book (me|my consultation|a call)|please book (me|my consultation)|get me booked( in)?|book my consultation|book my call|book a consultation for me|book (a )?(discovery|strategy|demo) call))\b/;
+  /\b(book (me|my consultation|a consultation|a call)|can you book (me|my consultation|a call)|please book (me|my consultation)|get me booked( in)?|book my consultation|book my call|book a consultation for me|book (a )?(discovery|strategy|demo) call)\b/;
 
   // ---------- PENDING CONFIRMATIONS ----------
   if (capture.pendingConfirm === 'name') {
