@@ -1345,6 +1345,10 @@ export async function handleTurn({ userText, callState }) {
     return { text: systemAction.replyText, shouldEnd: false };
   }
 
+  if (!systemAction || !systemAction.intercept) {
+  botText = botText.replace(/\byou(\'re| are) booked in\b.*?(\.|\!)/gi, '');
+}
+
   // ---------- SPECIAL CASE: USER SAYS "BOTH" / "ALL OF THEM" TO AN OPTIONS QUESTION ----------
   const userSaysBothOrAll =
     /\b(both|both really|all of (them|those|the above)|all really)\b/.test(userLower);
