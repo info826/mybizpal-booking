@@ -474,6 +474,8 @@ wss.on('connection', (ws, req) => {
     channel: 'voice',
     // NEW: dedupe last bot text
     lastBotText: '',
+    // NEW: prevent overlapping replies
+    replyInProgress: false,
   };
 
   // ---- Deepgram connection (STT) ----
@@ -484,7 +486,7 @@ wss.on('connection', (ws, req) => {
     '&channels=1' +
     '&interim_results=false' +
     '&vad_events=true' +
-    '&endpointing=800';
+    '&endpointing=1600';
 
   const dgSocket = new WebSocket(dgUrl, {
     headers: {
@@ -637,10 +639,20 @@ wss.on('connection', (ws, req) => {
     if (!transcript) return;
     if (callState.hangupRequested) return;
 
+    // Prevent overlapping replies — ensure only one agent response at a time
+    if (callState.replyInProgress) {
+      console.log('⛔ Reply already in progress — ignoring new transcript');
+      return;
+    }
+    callState.replyInProgress = true;
+
     console.log(`👤 Caller said: "${transcript}"`);
 
     // Avoid reacting twice to identical text
-    if (transcript === callState.lastUserTranscript) return;
+    if (transcript === callState.lastUserTranscript) {
+      callState.replyInProgress = false;
+      return;
+    }
     callState.lastUserTranscript = transcript;
 
     try {
@@ -743,6 +755,8 @@ wss.on('connection', (ws, req) => {
       }
     } catch (err) {
       console.error('Error in respondToUser:', err);
+    } finally {
+      callState.replyInProgress = false;
     }
   }
 
@@ -815,20 +829,20 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-// Only treat as barge-in if user said something meaningful
-if (callState.isSpeaking && transcript.length > 4) {
-  console.log('🚫 Barge-in detected – meaningful user interrupt');
-  callState.cancelSpeaking = true;
-} else if (callState.isSpeaking) {
-  // Ignore tiny interjections like "hi", "ok", etc.
-  console.log('⚠️ Ignored tiny user interruption during TTS');
-  return;
-}
+      // Only treat as barge-in if user said something meaningful
+      if (callState.isSpeaking && transcript.length > 4) {
+        console.log('🚫 Barge-in detected – meaningful user interrupt');
+        callState.cancelSpeaking = true;
+      } else if (callState.isSpeaking) {
+        // Ignore tiny interjections like "hi", "ok", etc.
+        console.log('⚠️ Ignored tiny user interruption during TTS');
+        return;
+      }
 
       // Debounce + cooldown:
-      // - at most one reply every ~1800ms (more patient)
+      // - at most one reply every ~2200ms (more patient)
       // - if multiple transcripts arrive, respond only to the latest
-      const minGap = 1800;
+      const minGap = 2200;
 
       if (callState.pendingTimer) {
         clearTimeout(callState.pendingTimer);
