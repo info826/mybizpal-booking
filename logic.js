@@ -475,7 +475,11 @@ SPEAKING STYLE
 - No robotic phrases. No corporate waffle.
 - Do NOT say "in plain English". Just explain simply and clearly.
 - Do NOT repeat the same sentence word-for-word multiple times in one conversation.
-- Keep answers reasonably short on chat. On voice you can be slightly more descriptive but still concise.
+- On voice calls, keep replies very short and clean:
+  - Aim for one or two short sentences.
+  - Avoid long paragraphs, bullet lists and numbered lists.
+  - Ask ONE clear question per reply.
+- On chat you can use slightly longer answers, but still keep them tight and focused.
 
 SALES MINDSET (VERY IMPORTANT)
 - You are a calm, confident closer, not a pushy telemarketer.
@@ -533,6 +537,11 @@ CONTACT DETAILS
 - Do NOT repeatedly ask for their number if you already have one, unless they specifically ask you to use another.
 - On voice: you may ask them to repeat numbers and emails and you can read them back.
 - On chat: do NOT say "digit by digit" or "slowly"; just accept what they type.
+- CRITICAL: Do NOT try to build an email or phone number step by step.
+  - Do NOT talk about "the first part", "after the @", or "before dot com".
+  - Do NOT ask them to give their email in separate pieces.
+  - Instead, ask for the full email once ("What’s your best email address?").
+  - If you need to confirm, read it back briefly in one line and ask "Is that right?".
 
 BOOKING BEHAVIOUR
 - If they clearly want to move forward, suggest a short Zoom consultation
@@ -686,7 +695,7 @@ export async function handleTurn({ userText, callState }) {
       callState.booking.email = null;
 
       const replyText =
-        'No problem at all, let us do that email again. Could you give me your full email address from the very start?';
+        'No problem, let us do that email again. Give me your full email address from the very start.';
 
       capture.mode = 'email';
       capture.buffer = '';
@@ -873,7 +882,7 @@ export async function handleTurn({ userText, callState }) {
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
     const replyText =
-      'Yes – that’s exactly the world we live in. MyBizPal takes a big chunk of the day-to-day off your plate by handling calls, WhatsApps and bookings automatically, so you’re not forever chasing missed enquiries.\n\nTo point you in the right direction, what kind of business are you running, and where do things feel the most manual or messy at the moment?';
+      'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps and bookings automatically so you’re not forever chasing missed enquiries.\n\nWhat kind of business are you running and where do things feel the most manual at the moment?';
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -1085,7 +1094,7 @@ export async function handleTurn({ userText, callState }) {
       let replyText;
       if (isVoice) {
         const spokenEmail = verbaliseEmail(email);
-        replyText = `Brilliant, let me check I have that right: ${spokenEmail}. Does that look correct?`;
+        replyText = `Brilliant, I have ${spokenEmail}. Is that correct?`;
         capture.pendingConfirm = 'email';
       } else {
         replyText = 'Brilliant, thanks for that.';
@@ -1206,7 +1215,7 @@ export async function handleTurn({ userText, callState }) {
         ? `for your ${profile.businessType}`
         : 'in your business';
 
-      const replyText = `Got you — sounds like it’s a mix of those issues ${businessLabel}. For most people that just means calls and WhatsApp messages aren’t being handled reliably, which is exactly what MyBizPal fixes.\n\nIf you like, I can get you booked in for a short Zoom consultation so we can show you how that would look for your setup. Would that be useful?`;
+      const replyText = `Got you — sounds like it is a mix of those issues ${businessLabel}. MyBizPal makes sure calls and WhatsApps are answered and people are booked in instead of going cold.\n\nWould a short Zoom with one of the team be useful so you can see how that would look for you?`;
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
@@ -1300,7 +1309,7 @@ export async function handleTurn({ userText, callState }) {
   // If model drifts into old consulting bullet-list ("business planning and strategy..."), override hard
   if (/business planning and strategy/i.test(botText) && /marketing and sales funnels/i.test(botText)) {
     botText =
-      'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It’s built for busy clinics, salons, dentists, trades and other local service businesses.\n\nWhat type of business are you running at the moment?';
+      'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It is built for busy clinics, salons, dentists, trades and other local service businesses.\n\nWhat type of business are you running at the moment?';
   }
 
   // Replace generic confusion with a more contextual prompt
@@ -1314,7 +1323,7 @@ export async function handleTurn({ userText, callState }) {
         `For your ${bt}, could you tell me where things most often go wrong with calls or bookings?`;
     } else {
       botText =
-        'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you’re trying to sort out around calls or bookings?';
+        'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you are trying to sort out around calls or bookings?';
     }
   }
 
@@ -1347,7 +1356,7 @@ export async function handleTurn({ userText, callState }) {
   // Remove robotic "Two quick things..." pattern and replace with a short, human line
   if (/two quick things so i can lock it in/i.test(botText)) {
     botText =
-      'Great, let me just grab your details. What’s the best email to send your Zoom link to?';
+      'Great, let me just grab your details. What is the best email to send your Zoom link to?';
   }
 
   // Time formatting clean-up:
@@ -1375,7 +1384,7 @@ export async function handleTurn({ userText, callState }) {
 
   if (genericFallbackRegex.test(botText) && bookingIntentRegex.test(userLower)) {
     botText =
-      'No problem at all — you’re through to MyBizPal. I can help you book a short Zoom consultation with one of the team to talk about your calls and bookings. What should I call you, just your first name?';
+      'No problem at all — you are through to MyBizPal. I can help you book a short Zoom consultation with one of the team to talk about your calls and bookings. What should I call you, just your first name?';
 
     booking.intent = booking.intent || 'mybizpal_consultation';
     if (behaviour.bookingReadiness === 'unknown') {
@@ -1383,7 +1392,39 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // Trim overly long replies
+  // VOICE-SPECIFIC SHORTENING (to reduce over-talking and barge-in pain)
+  if (isVoice) {
+    // Remove bullet/list markers at the start of lines
+    botText = botText.replace(/^[\s>*•\-]+\s*/gm, '');
+
+    // Hard cap on character length for voice
+    const maxChars = 260;
+    if (botText.length > maxChars) {
+      const cut = botText.slice(0, maxChars);
+      const lastBreak = Math.max(
+        cut.lastIndexOf('. '),
+        cut.lastIndexOf('! '),
+        cut.lastIndexOf('? ')
+      );
+      botText = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut;
+    }
+
+    // Limit to at most two questions per reply
+    const questionParts = botText.split('?');
+    if (questionParts.length > 3) {
+      botText = questionParts.slice(0, 2).join('?') + '?';
+    }
+
+    // Remove extra paragraphs – keep first paragraph only
+    const paragraphs = botText.split(/\n{2,}/);
+    if (paragraphs.length > 1) {
+      botText = paragraphs[0];
+    }
+
+    botText = botText.trim();
+  }
+
+  // Trim overly long replies (safety net)
   if (botText.length > 420) {
     const cut = botText.slice(0, 420);
     const lastBreak = Math.max(
