@@ -536,7 +536,7 @@ export async function updateBookingStateFromUtterance({
 
 /**
  * Step 2: system actions that must happen BEFORE GPT speaks:
- *  - If we already have a confirmed time + phone (+ email), create or move events.
+ *  - If we already have a confirmed time + contact, create or move events.
  *  - User confirms or rejects a suggested time (earliest suggestion).
  */
 export async function handleSystemActionsFirst({ userText, callState }) {
@@ -546,6 +546,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
   const phone = booking.phone || callState.callerNumber || null;
   const email = booking.email || null;
   const name = booking.name || null;
+  const hasContact = !!phone || !!email; // allow booking if we have at least email
 
   // Time that we would book if confirmed
   const timeCandidate = booking.timeISO || booking.earliestSlotISO || null;
@@ -635,12 +636,14 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
         const startISO = event.start?.dateTime || timeCandidate;
 
-        // Standard confirmation (card + reminders)
-        await sendConfirmationAndReminders({
-          to: phone,
-          startISO,
-          name,
-        });
+        // Standard confirmation (card + reminders) – only if we have a phone
+        if (phone) {
+          await sendConfirmationAndReminders({
+            to: phone,
+            startISO,
+            name,
+          });
+        }
 
         // 🔔 Extra reschedule notice (short plain text)
         if (phone && oldStartISO) {
@@ -695,7 +698,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
     }
 
     // KEEP EXISTING TIME (no extra)
-    if (/keep|leave it|as it is|as it is|as it is|don'?t change/i.test(t) || noInAnyLang(t)) {
+    if (/keep|leave it|as it is|don'?t change/i.test(t) || noInAnyLang(t)) {
       const existingSpoken =
         booking.existingEventStartISO
           ? formatSpokenDateTime(
@@ -729,15 +732,16 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
   // ---------- MAIN BOOKING FLOW ----------
 
-  // A) If we already have a CONFIRMED time candidate + phone, and no booking yet
+  // A) If we already have a CONFIRMED time candidate + some contact,
+  // and no booking yet
   if (
     timeCandidate &&
-    phone &&
+    hasContact &&
     !booking.bookingConfirmed &&
     !booking.awaitingTimeConfirm
   ) {
-    // If email missing → ask once, then wait for it
-    if (!email) {
+    // If we have a phone but email is missing → ask once, then wait for it
+    if (phone && !email) {
       if (!booking.needEmailBeforeBooking) {
         booking.needEmailBeforeBooking = true;
         const replyText =
@@ -749,6 +753,11 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       }
       // We've already asked for email; let GPT handle the conversation while
       // the email-capture logic does its thing.
+      return { intercept: false };
+    }
+
+    // If we somehow have no phone AND no email, we bail out (shouldn’t happen because of hasContact)
+    if (!phone && !email) {
       return { intercept: false };
     }
 
@@ -862,7 +871,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       }
     }
 
-    // We have time + phone + email and either no conflict or we trust user time → create booking now
+    // We have time + at least one contact and either no conflict or we trust user time → create booking now
     try {
       // Build smart summary from call history for the calendar notes
       const summaryNotes = await buildSmartSummary(callState);
@@ -879,11 +888,14 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
       const startISO = event.start?.dateTime || timeCandidate;
 
-      await sendConfirmationAndReminders({
-        to: phone,
-        startISO,
-        name,
-      });
+      // Send WhatsApp/SMS confirmation only if we have a phone
+      if (phone) {
+        await sendConfirmationAndReminders({
+          to: phone,
+          startISO,
+          name,
+        });
+      }
 
       booking.bookingConfirmed = true;
       booking.lastEventId = event.id;
@@ -896,8 +908,8 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       const spoken = booking.timeSpoken;
       const replyText =
         name
-          ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
-          : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
+          ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get the Zoom details shortly. Anything else I can help with today?`
+          : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get the Zoom details shortly. Anything else I can help with today?`;
 
       return {
         intercept: true,
@@ -934,7 +946,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       }
 
       // Store this as the confirmed time; booking of the event
-      // will be handled by the "A" block once we have phone + email.
+      // will be handled by the "A" block once we have contact details.
       booking.timeISO = timeISO;
       booking.timeSpoken =
         booking.timeSpoken ||
@@ -967,4 +979,3 @@ export async function handleSystemActionsFirst({ userText, callState }) {
   // No special system action needed
   return { intercept: false };
 }
-
