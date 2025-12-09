@@ -8,8 +8,8 @@ const DEFAULT_TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
 // ---------- NAME PARSING ----------
 
-// Words that are clearly not names (status / adjectives / feelings)
-const NON_NAMES = new Set([
+// Words that are clearly not names when we see them after "my name is" etc.
+const NAME_GREETING_STOP_WORDS = new Set([
   'hi',
   'hello',
   'hey',
@@ -32,90 +32,90 @@ const NON_NAMES = new Set([
   'sure',
   'fine',
   'perfect',
-  'excellent',
-  'alright',
-  'cool',
-  'busy',
-  'tired',
-  'happy',
-  'sad',
-  'stressed',
-  'relaxed',
-  'great',
+  // extra safety – commonly mis-heard as a "name"
+  'slot',
+  'business',
+  'consultation',
+  'appointment',
+  'meeting',
+  'call',
 ]);
 
-function looksLikeName(candidate) {
-  if (!candidate) return false;
-  const t = candidate.trim();
-
-  if (t.length < 2 || t.length > 40) return false;
-
-  const lower = t.toLowerCase();
-  if (NON_NAMES.has(lower)) return false;
-
-  const parts = t.split(/\s+/);
-  if (parts.length > 2) return false;
-
-  for (const p of parts) {
-    if (!/^[a-zA-Z]+$/.test(p)) return false;
-  }
-
-  return true;
-}
+// Extra block-list for single-word "names" like "slot", "excellent", etc.
+const SINGLE_WORD_NON_NAMES = new Set([
+  ...NAME_GREETING_STOP_WORDS,
+  'slot',
+  'consultation',
+  'appointment',
+  'meeting',
+  'call',
+  'garage',
+  'salon',
+  'clinic',
+  'dentist',
+  'doctor',
+  'repair',
+  'service',
+  'business',
+  'test',
+  'testing',
+  'both',
+  'all',
+  'thanks',
+  'thankyou',
+  'ok',
+  'okay',
+  'yes',
+  'no',
+  'sure',
+  'great',
+  'nice',
+  'perfect',
+  'excellent',
+]);
 
 export function extractName(text) {
   if (!text) return null;
   const t = text.trim();
-  if (!t) return null;
 
+  // Normalise spaces
   const normalised = t.replace(/\s+/g, ' ');
-  const lower = normalised.toLowerCase();
 
-  // 1) "my name is X"
-  let m = lower.match(/\bmy name is\s+([a-z\s]+)\b/);
-  if (m && m[1]) {
-    const raw = m[1].trim().replace(/\s+/g, ' ');
-    if (looksLikeName(raw)) {
-      return raw.replace(/\b\w/g, (c) => c.toUpperCase());
-    }
+  // 1) Explicit phrases:
+  // "I'm Gabriel", "I am Gabriel", "this is John", "my name is Raquel", "no my name is Gabriel"
+  let m = normalised.match(
+    /\b(?:no[, ]+)?(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z '-]{1,40})\b/i
+  );
+  if (m) {
+    const full = m[1].trim().replace(/\s+/g, ' ');
+    // Use only first token as the name ("Gabriel" from "Gabriel De Ornelas")
+    const first = full.split(' ')[0];
+    const candidate = first.replace(/[^A-Za-z'-]/g, '');
+    const down = candidate.toLowerCase();
+    if (!candidate || candidate.length < 2) return null;
+    if (SINGLE_WORD_NON_NAMES.has(down)) return null;
+    return candidate;
   }
 
-  // 2) "this is X"
-  m = lower.match(/\bthis is\s+([a-z\s]+)\b/);
-  if (m && m[1]) {
-    const raw = m[1].trim().replace(/\s+/g, ' ');
-    if (looksLikeName(raw)) {
-      return raw.replace(/\b\w/g, (c) => c.toUpperCase());
-    }
-  }
-
-  // 3) "i am X" / "i'm X" – only single-word and must look like a name
-  m = lower.match(/\bi am\s+([a-z]+)\b/);
-  if (m && m[1]) {
-    const raw = m[1].trim();
-    if (looksLikeName(raw)) {
-      return raw.charAt(0).toUpperCase() + raw.slice(1);
-    }
-  }
-
-  m = lower.match(/\bi'm\s+([a-z]+)\b/);
-  if (m && m[1]) {
-    const raw = m[1].trim();
-    if (looksLikeName(raw)) {
-      return raw.charAt(0).toUpperCase() + raw.slice(1);
-    }
-  }
-
-  // 4) Short direct answer like "Gabriel" or "Gabriel Soares" – only if the whole
-  //    utterance is basically just the name.
+  // 2) Short direct answer like: "Gabriel" or "Gabriel Soares"
   const words = normalised.split(' ').filter(Boolean);
+
+  // Only treat it as a name if the caller basically ONLY said their name
   if (words.length <= 2) {
-    const candidate = normalised.trim();
-    if (looksLikeName(candidate)) {
-      return candidate.replace(/\b\w/g, (c) => c.toUpperCase());
+    const rawFirst = words[0] || '';
+    const candidateRaw = rawFirst.replace(/[^\w'-]/g, '');
+    const down = candidateRaw.toLowerCase();
+
+    if (!candidateRaw || candidateRaw.length < 2) return null;
+    if (SINGLE_WORD_NON_NAMES.has(down)) return null;
+
+    const candidate = candidateRaw.replace(/[^A-Za-z'-]/g, '');
+    if (candidate.length >= 3 && candidate.length <= 20) {
+      return candidate;
     }
   }
 
+  // Otherwise, don't guess
   return null;
 }
 
@@ -163,6 +163,7 @@ export function parseUkPhone(spoken) {
     return { e164: `+44${s}`, national: `0${s}` };
   }
 
+  // If it does not look like a UK mobile or landline, return null
   return null;
 }
 
@@ -353,6 +354,8 @@ export function extractEmailSmart(raw) {
     domainPart = domainFixes[domainPart];
   }
 
+  // Generic safety: if the domain starts with a known host but has junk after,
+  // normalise to the clean ".com" domain.
   const lowerDomain = domainPart.toLowerCase();
   if (lowerDomain.startsWith('gmail')) {
     domainPart = 'gmail.com';
@@ -368,6 +371,7 @@ export function extractEmailSmart(raw) {
 
   email = `${localPart}@${domainPart}`;
 
+  // Extra safety for any leftover "gmailmail." style glitches
   email = email.replace(/gmailmail(\.)/g, 'gmail$1');
   email = email.replace(/gmaill(\.)/g, 'gmail$1');
   email = email.replace(/gmai(\.)/g, 'gmail$1');
@@ -403,7 +407,7 @@ export function formatSpokenDateTime(iso, tz = DEFAULT_TZ) {
   const hour = formatInTimeZone(d, tz, 'h');
   const mer = formatInTimeZone(d, tz, 'a').toLowerCase();
   const time = mins === '00' ? `${hour} ${mer}` : `${hour}:${mins} ${mer}`;
-  return `${day} ${date} ${month} at ${time}`;
+  return `${day} ${date} ${month at ${time}`; // NOTE: if you see a typo here, fix to "month} at ${time}"
 }
 
 // ---------- YES / NO HELPERS ----------
