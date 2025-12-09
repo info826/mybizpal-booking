@@ -162,6 +162,8 @@ const GENERAL_FILLERS = new Set([
   'the',
   'address',
   'email',
+  'zip',
+  'account',
 ]);
 
 // Extra email-specific fillers that often appear before the real address
@@ -199,10 +201,6 @@ function isEmailFiller(word) {
   return GENERAL_FILLERS.has(w) || EMAIL_LEAD_IN_FILLERS.has(w);
 }
 
-function normaliseDigits(words) {
-  return words.map((w) => DIGIT_WORDS[w] || w).join('');
-}
-
 export function extractEmailSmart(raw) {
   if (!raw) return null;
 
@@ -212,11 +210,11 @@ export function extractEmailSmart(raw) {
     .replace(/_/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  
-// Fix common "g mail" / "g male" → "gmail"
+
+  // Fix common "g mail" / "g male" → "gmail"
   text = text.replace(/\bg\s+mail\b/g, 'gmail');
   text = text.replace(/\bg\s+male\b/g, 'gmail');
-  
+
   // Tokenise
   let tokens = text.split(' ');
 
@@ -237,7 +235,7 @@ export function extractEmailSmart(raw) {
     const w = tokens[i];
     const next = tokens[i + 1];
     if (
-      (w === 'gmail' || w === 'hotmail' || w === 'outlook') &&
+      (w === 'gmail' || w === 'hotmail' || w === 'outlook' || w === 'yahoo') &&
       next === 'mail'
     ) {
       compactTokens.push(w);
@@ -263,8 +261,12 @@ export function extractEmailSmart(raw) {
   text = text.replace(/\bdot\s+co\b/g, '.co');
   text = text.replace(/\bdot\b/g, '.');
 
-  // Collapse spaced letters: "j w" → "jw"
-  text = text.replace(/\b([a-z])\s+([a-z])\b/g, '$1$2');
+  // Collapse spaced letters: "j w" → "jw", do this repeatedly for longer sequences
+  let last;
+  do {
+    last = text;
+    text = text.replace(/\b([a-z])\s+([a-z])\b/g, '$1$2');
+  } while (text !== last);
 
   // Build a compact version with no spaces
   const compact = text.replace(/\s+/g, '');
@@ -299,6 +301,21 @@ export function extractEmailSmart(raw) {
 
   if (domainFixes[domainPart]) {
     domainPart = domainFixes[domainPart];
+  }
+
+  // Generic safety: if the domain starts with a known host but has junk after,
+  // normalise to the clean ".com" domain.
+  const lowerDomain = domainPart.toLowerCase();
+  if (lowerDomain.startsWith('gmail')) {
+    domainPart = 'gmail.com';
+  } else if (lowerDomain.startsWith('hotmail')) {
+    domainPart = 'hotmail.com';
+  } else if (lowerDomain.startsWith('outlook')) {
+    domainPart = 'outlook.com';
+  } else if (lowerDomain.startsWith('yahoo')) {
+    domainPart = 'yahoo.com';
+  } else if (lowerDomain.startsWith('googlemail')) {
+    domainPart = 'googlemail.com';
   }
 
   email = `${localPart}@${domainPart}`;
