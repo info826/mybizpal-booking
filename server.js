@@ -474,10 +474,6 @@ wss.on('connection', (ws, req) => {
     channel: 'voice',
     // NEW: dedupe last bot text
     lastBotText: '',
-    // NEW: track if a reply is in progress (OpenAI/ElevenLabs)
-    pendingReply: false,
-    // NEW: track timing between user utterances
-    lastTranscriptAt: 0,
   };
 
   // ---- Deepgram connection (STT) ----
@@ -513,35 +509,21 @@ wss.on('connection', (ws, req) => {
     const t = (text || '').trim().toLowerCase();
     if (!t) return true;
 
-    const words = t.split(/\s+/);
-
-    // Always ignore very short "ack" phrases that don't change the conversation
-    const ackAlways = new Set([
-      'great',
-      'perfect',
-      'thanks',
-      'thank you',
-      'thankyou',
-      'brilliant',
-      'awesome',
-      'fantastic',
-      'lovely',
-      'cool',
-      'nice',
-      'cheers',
-    ]);
-    if (words.length <= 3 && ackAlways.has(t)) return true;
-
     // Very short nothingness
     if (t.length <= 2) return true;
 
-    // Common back-channel / reflex utterances (only ignored if very soon after bot)
+    // Common back-channel / reflex utterances
     const boringSet = new Set([
       'hi',
       'hello',
       'hey',
       'ok',
       'okay',
+      'yes',
+      'yeah',
+      'yep',
+      'no',
+      'nope',
       'mm',
       'mmm',
       'uh',
@@ -559,13 +541,14 @@ wss.on('connection', (ws, req) => {
       const now = Date.now();
       const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
 
-      // If they say "hello/ok/etc." within ~2.5s of Gabriel speaking,
+      // If they say "hello/yes/ok/etc." within ~2.5s of Gabriel speaking,
       // it's probably echo or reflex → ignore.
       if (sinceBot < 2500) return true;
     }
 
     // Very short (1–2 word) utterances immediately after Gabriel spoke
     // that don't carry much meaning → ignore as likely reflex.
+    const words = t.split(/\s+/);
     if (words.length <= 2) {
       const now = Date.now();
       const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
@@ -663,13 +646,9 @@ wss.on('connection', (ws, req) => {
 
     // Avoid reacting twice to identical text
     if (transcript === callState.lastUserTranscript) return;
-
-    // Mark that a reply is in progress so silence watchdog doesn't fire
-    callState.pendingReply = true;
+    callState.lastUserTranscript = transcript;
 
     try {
-      callState.lastUserTranscript = transcript;
-
       // Make sure logic.js knows this is a voice call
       callState.channel = 'voice';
 
@@ -704,7 +683,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // Guard against accidental duplicate replies (same text within 2 seconds)
+      // NEW: guard against accidental duplicate replies (same text within 2 seconds)
       if (
         trimmedReply === callState.lastBotText &&
         nowTs - (callState.timing.lastBotReplyAt || 0) < 2000
@@ -769,9 +748,6 @@ wss.on('connection', (ws, req) => {
       }
     } catch (err) {
       console.error('Error in respondToUser:', err);
-    } finally {
-      // Whatever happens, we are no longer "waiting to reply"
-      callState.pendingReply = false;
     }
   }
 
@@ -782,7 +758,6 @@ wss.on('connection', (ws, req) => {
       if (!callState.greeted) return;
       if (!streamSid) return;
       if (callState.isSpeaking) return;
-      if (callState.pendingReply) return; // don't nag while we're computing a reply
 
       const now = Date.now();
       const lastUser = callState.timing.lastUserSpeechAt || 0;
@@ -796,123 +771,18 @@ wss.on('connection', (ws, req) => {
       // Extra safety: don't nag if Gabriel has spoken very recently.
       if (idleSinceBot < 5000) return;
 
-      // Stage thresholds (slightly more patient now):
-      //  - 9 seconds  → "Are you still there?"
-      //  - 19 seconds → "This is Gabriel at MyBizPal, are you still there?"
-      //  - 29 seconds → polite goodbye + hang up
-      if (
-        callState.silenceStage === 0 &&
-        idleSinceUser >= 9000 &&
-        idleSinceUser < 19000
-      ) {
-        callState.silenceStage = 1;
-
-        const reply = 'Are you still there?';
-        console.log('🤖 Gabriel (silence check 1):', `"${reply}"`);
-
-        callState.isSpeaking = true;
-        callState.cancelSpeaking = false;
-
-        try {
-          const audioBuffer = await synthesizeWithElevenLabs(reply);
-          await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
-        } catch (err) {
-          console.error('Error during silence check TTS (stage 1):', err);
-        } finally {
-          callState.isSpeaking = false;
-          callState.cancelSpeaking = false;
-          const t = Date.now();
-          callState.lastReplyAt = t;
-          callState.timing.lastBotReplyAt = t;
-          callState.lastBotText = reply;
-        }
-      } else if (
-        callState.silenceStage === 1 &&
-        idleSinceUser >= 19000 &&
-        idleSinceUser < 29000
-      ) {
-        callState.silenceStage = 2;
-
-        const reply = 'This is Gabriel at MyBizPal, are you still there?';
-        console.log('🤖 Gabriel (silence check 2):', `"${reply}"`);
-
-        callState.isSpeaking = true;
-        callState.cancelSpeaking = false;
-
-        try {
-          const audioBuffer = await synthesizeWithElevenLabs(reply);
-          await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
-        } catch (err) {
-          console.error('Error during silence check TTS (stage 2):', err);
-        } finally {
-          callState.isSpeaking = false;
-          callState.cancelSpeaking = false;
-          const t = Date.now();
-          callState.lastReplyAt = t;
-          callState.timing.lastBotReplyAt = t;
-          callState.lastBotText = reply;
-        }
-      } else if (callState.silenceStage === 2 && idleSinceUser >= 29000) {
-        // Final goodbye and hang up
-        callState.silenceStage = 3; // prevent repeating
-        callState.hangupRequested = true;
-
-        // Clear any queued reply
-        if (callState.pendingTimer) {
-          clearTimeout(callState.pendingTimer);
-          callState.pendingTimer = null;
-          callState.pendingTranscript = null;
-        }
-
-        const reply =
-          'I’ll let you go for now, but if you ever want to talk to the MyBizPal team about automating your calls and bookings, just reach out again. Have a great day.';
-        console.log('🤖 Gabriel (silence goodbye):', `"${reply}"`);
-
-        callState.isSpeaking = true;
-        callState.cancelSpeaking = false;
-
-        try {
-          const audioBuffer = await synthesizeWithElevenLabs(reply);
-          await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
-        } catch (err) {
-          console.error('Error during silence goodbye TTS:', err);
-        } finally {
-          callState.isSpeaking = false;
-          callState.cancelSpeaking = false;
-          const t = Date.now();
-          callState.lastReplyAt = t;
-          callState.timing.lastBotReplyAt = t;
-          callState.lastBotText = reply;
-        }
-
-        // End call via Twilio API or close WS
-        if (twilioClient && callState.callSid) {
-          try {
-            await twilioClient
-              .calls(callState.callSid)
-              .update({ status: 'completed' });
-            console.log('📞 Call ended by Gabriel after prolonged silence');
-          } catch (e) {
-            console.error(
-              'Error ending call via Twilio API (silence):',
-              e?.message || e
-            );
-            ws.close();
-          }
-        } else {
-          ws.close();
-        }
-      }
+      // NOTE: SILENCE NUDGES CURRENTLY DISABLED (timer below is commented out)
+      // Keeping function body for future use if we want a gentle hang-up.
+      return;
     } catch (err) {
       console.error('Error in checkSilenceAndNudge:', err);
     }
   }
 
-  // Start silence timer (every second)
-  callState.silenceTimer = setInterval(() => {
-    // fire and forget
-    checkSilenceAndNudge();
-  }, 1000);
+  // Start silence timer (DISABLED for now – too intrusive "are you still there?")
+  // callState.silenceTimer = setInterval(() => {
+  //   checkSilenceAndNudge();
+  // }, 1000);
 
   // Deepgram → transcript handler with cooldown & debouncing
   dgSocket.on('message', async (data) => {
@@ -929,18 +799,12 @@ wss.on('connection', (ws, req) => {
       const transcript = (alt.transcript || '').trim();
       if (!transcript) return;
 
-      // OPTIONAL: guard against our own echo
-      if (isLikelyBotEcho(transcript)) {
-        console.log('🔇 Ignoring likely bot echo transcript:', `"${transcript}"`);
-        return;
-      }
-
       const now = Date.now();
 
       // Update timing for user speech
       callState.timing.lastUserSpeechAt = now;
-      callState.silenceStage = 0; // reset once user speaks
-      callState.lastTranscriptAt = now;
+      // Reset silence stage once user speaks
+      callState.silenceStage = 0;
 
       // If this is a "check-in hello" after a pause, answer gently and skip full logic
       if (isCheckInHello(transcript)) {
@@ -971,40 +835,25 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // Ignore tiny noise / reflex utterances
+      // Ignore tiny noise / reflex utterances straight after Gabriel spoke
       if (shouldIgnoreUtterance(transcript)) {
+        return;
+      }
+
+      // Ignore likely echo of Gabriel himself
+      if (isLikelyBotEcho(transcript)) {
+        console.log('🪞 Ignoring echo of bot speech');
         return;
       }
 
       // If Gabriel is talking and caller interrupts → cancel TTS (barge-in)
       if (callState.isSpeaking) {
-        console.log(
-          '🚫 Barge-in detected – cancelling current TTS and queueing latest transcript'
-        );
+        console.log('🚫 Barge-in detected – cancelling current TTS');
         callState.cancelSpeaking = true;
-
-        // Always use the latest user transcript after barge-in
-        if (callState.pendingTimer) {
-          clearTimeout(callState.pendingTimer);
-          callState.pendingTimer = null;
-        }
-        callState.pendingTranscript = transcript;
-
-        // Small delay to let Twilio finish clearing audio before we speak again
-        const delayAfterBargeMs = 350;
-        callState.pendingTimer = setTimeout(async () => {
-          if (callState.hangupRequested) return;
-          const tText = callState.pendingTranscript;
-          callState.pendingTranscript = null;
-          callState.pendingTimer = null;
-          await respondToUser(tText);
-        }, delayAfterBargeMs);
-
-        return;
       }
 
       // Debounce + cooldown:
-      // - at most one reply every ~1800ms
+      // - at most one reply every ~1800ms (more patient)
       // - if multiple transcripts arrive, respond only to the latest
       const minGap = 1800;
 
@@ -1046,7 +895,7 @@ wss.on('connection', (ws, req) => {
     if (event === 'start') {
       streamSid = msg.start.streamSid;
       callState.callSid = msg.start.callSid || null;
-      // get caller phone from customParameters (if present)
+      // NEW: get caller phone from customParameters
       callState.callerNumber =
         (msg.start.customParameters && msg.start.customParameters.caller) ||
         null;
@@ -1091,7 +940,6 @@ wss.on('connection', (ws, req) => {
         streamSid,
         callSid: callState.callSid,
       });
-      callState.hangupRequested = true;
       try {
         dgSocket.close();
       } catch (e) {
