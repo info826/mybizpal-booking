@@ -1293,6 +1293,8 @@ export async function handleTurn({ userText, callState }) {
     callState,
     timezone: TZ,
   });
+  console.log('BOOKING STATE AFTER NLU:', JSON.stringify(callState.booking, null, 2));
+  console.log('PROFILE AFTER NLU:', JSON.stringify(callState.profile, null, 2));
 
   // ---------- INCOMPLETE / SUSPICIOUS PHONE SANITY CHECK ----------
   try {
