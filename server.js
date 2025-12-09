@@ -197,11 +197,11 @@ app.post('/twilio/voice', (req, res) => {
   const from = req.body.From || '';
 
   const connect = twiml.connect();
-  // Pass caller number into the stream as a custom parameter
-  connect.stream({
-    url: wsUrl,
-    parameter: [{ name: 'caller', value: from }],
-  });
+
+  // IMPORTANT: Twilio's Node helper expects <Stream> + nested <Parameter/>
+  // We cannot pass "parameter" as an option; it must be child nodes.
+  const stream = connect.stream({ url: wsUrl });
+  stream.parameter({ name: 'caller', value: from });
 
   res.type('text/xml');
   res.send(twiml.toString());
@@ -865,9 +865,11 @@ wss.on('connection', (ws, req) => {
       streamSid = msg.start.streamSid;
       callState.callSid = msg.start.callSid || null;
 
-      // Get caller phone from customParameters (array or object)
-      let callerNumber = null;
+      // Inspect and extract customParameters for caller number
       const cp = msg.start.customParameters;
+      console.log('🧾 Twilio start.customParameters:', cp);
+
+      let callerNumber = null;
 
       if (Array.isArray(cp)) {
         const found = cp.find((p) => p && p.name === 'caller');
