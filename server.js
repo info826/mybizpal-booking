@@ -509,8 +509,8 @@ wss.on('connection', (ws, req) => {
     const t = (text || '').trim().toLowerCase();
     if (!t) return true;
 
-    // Very short nothingness
-    if (t.length <= 2) return true;
+    // Very short single-character noise
+    if (t.length === 1) return true;
 
     // Common back-channel / reflex utterances
     const boringSet = new Set([
@@ -537,22 +537,19 @@ wss.on('connection', (ws, req) => {
       'got it',
     ]);
 
-    if (boringSet.has(t)) {
-      const now = Date.now();
-      const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
+    const now = Date.now();
+    const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
 
-      // If they say "hello/yes/ok/etc." within ~2.5s of Gabriel speaking,
-      // it's probably echo or reflex → ignore.
-      if (sinceBot < 2500) return true;
+    // Single-word reflex ("yes", "ok", "yeah") straight after Gabriel spoke
+    if (boringSet.has(t) && sinceBot < 1800) {
+      return true;
     }
 
-    // Very short (1–2 word) utterances immediately after Gabriel spoke
-    // that don't carry much meaning → ignore as likely reflex.
+    // Two-word combos where BOTH are fillers (e.g. "yes ok", "yeah sure")
     const words = t.split(/\s+/);
-    if (words.length <= 2) {
-      const now = Date.now();
-      const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
-      if (sinceBot < 2500) return true;
+    if (words.length === 2 && sinceBot < 1800) {
+      const allBoring = words.every((w) => boringSet.has(w));
+      if (allBoring) return true;
     }
 
     return false;
@@ -581,6 +578,7 @@ wss.on('connection', (ws, req) => {
   }
 
   // ---- HELPER: detect "check-in hello?" when he's been quiet ----
+  // (Currently unused – we have disabled the special check-in reply behaviour.)
   function isCheckInHello(text) {
     const t = (text || '').trim().toLowerCase();
     if (!t) return false;
@@ -595,9 +593,6 @@ wss.on('connection', (ws, req) => {
 
     const now = Date.now();
     const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
-
-    // If it's been quiet for more than ~4 seconds after Gabriel spoke,
-    // treat this as "are you still there?"
     return sinceBot > 4000;
   }
 
@@ -806,34 +801,8 @@ wss.on('connection', (ws, req) => {
       // Reset silence stage once user speaks
       callState.silenceStage = 0;
 
-      // If this is a "check-in hello" after a pause, answer gently and skip full logic
-      if (isCheckInHello(transcript)) {
-        if (callState.hangupRequested) return;
-
-        const reply =
-          'I’m still here, don’t worry — I was just thinking for a second. Where were we?';
-
-        console.log('🤖 Gabriel (check-in reply):', `"${reply}"`);
-
-        callState.isSpeaking = true;
-        callState.cancelSpeaking = false;
-
-        try {
-          const audioBuffer = await synthesizeWithElevenLabs(reply);
-          await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
-        } catch (err) {
-          console.error('Error during check-in TTS or sendAudio:', err);
-        } finally {
-          callState.isSpeaking = false;
-          callState.cancelSpeaking = false;
-          const t = Date.now();
-          callState.lastReplyAt = t;
-          callState.timing.lastBotReplyAt = t;
-          callState._hasTextGreetingSent = true;
-          callState.lastBotText = reply;
-        }
-        return;
-      }
+      // DISABLED: special "check-in hello" reply. We just handle this as normal input now.
+      // if (isCheckInHello(transcript)) { ... }
 
       // Ignore tiny noise / reflex utterances straight after Gabriel spoke
       if (shouldIgnoreUtterance(transcript)) {
@@ -895,10 +864,21 @@ wss.on('connection', (ws, req) => {
     if (event === 'start') {
       streamSid = msg.start.streamSid;
       callState.callSid = msg.start.callSid || null;
-      // NEW: get caller phone from customParameters
-      callState.callerNumber =
-        (msg.start.customParameters && msg.start.customParameters.caller) ||
-        null;
+
+      // Get caller phone from customParameters (array or object)
+      let callerNumber = null;
+      const cp = msg.start.customParameters;
+
+      if (Array.isArray(cp)) {
+        const found = cp.find((p) => p && p.name === 'caller');
+        if (found && found.value) {
+          callerNumber = found.value;
+        }
+      } else if (cp && typeof cp === 'object') {
+        callerNumber = cp.caller || cp.From || cp.from || null;
+      }
+
+      callState.callerNumber = callerNumber;
 
       console.log('▶️  Twilio stream started', {
         streamSid,
