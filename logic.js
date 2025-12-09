@@ -1403,16 +1403,16 @@ export async function handleTurn({ userText, callState }) {
         .filter(Boolean);
 
       const filtered = sentences.filter((s) => {
-        const sLower = s.toLowerCase();
-        if (/\b(email|e-mail|e mail|zoom link)\b/.test(sLower)) return false;
-        if (
-          /\b(book you in|get you booked|lock that in|lock it in|book you for\b/.test(
-            sLower
-          )
-        )
-          return false;
-        return true;
-      });
+  const sLower = s.toLowerCase();
+  if (/\b(email|e-mail|e mail|zoom link)\b/.test(sLower)) return false;
+  if (
+    /\b(book you in|get you booked|lock that in|lock it in|book you for)\b/.test(
+      sLower
+    )
+  )
+    return false;
+  return true;
+});
 
       let cleaned = filtered.join(' ').trim();
 
