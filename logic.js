@@ -758,27 +758,27 @@ export async function handleTurn({ userText, callState }) {
     behaviour.decisionPower = 'decision-maker';
   }
 
-// ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
-// Only treat as booking intent when they clearly talk about booking/scheduling,
-// not just saying the word "consultation" on its own.
+  // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
+  // Only treat as booking intent when they clearly talk about booking/scheduling,
+  // not just saying the word "consultation" on its own.
 
-const earlyBookingRegex =
-  /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting))\b/;
+  const earlyBookingRegex =
+    /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting))\b/;
 
-const bookingIntentRegex =
-  /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult)\b/;
+  const bookingIntentRegex =
+    /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult)\b/;
 
-if (bookingIntentRegex.test(userLower) || earlyBookingRegex.test(userLower)) {
-  booking.intent = booking.intent || 'mybizpal_consultation';
-  if (behaviour.bookingReadiness === 'unknown') {
-    behaviour.bookingReadiness = 'high';
+  if (bookingIntentRegex.test(userLower) || earlyBookingRegex.test(userLower)) {
+    booking.intent = booking.intent || 'mybizpal_consultation';
+    if (behaviour.bookingReadiness === 'unknown') {
+      behaviour.bookingReadiness = 'high';
+    }
   }
-}
 
-// Strong "book me now" phrases (for fast path on voice)
-const strongBookNowRegex =
-  /\b(book (me|my consultation|a consultation|a call)|can you book (me|my consultation|a call)|please book (me|my consultation)|get me booked( in)?|book my consultation|book my call|book a consultation for me|book (a )?(discovery|strategy|demo) call)\b/;
-  
+  // Strong "book me now" phrases (for fast path on voice)
+  const strongBookNowRegex =
+    /\b(book (me|my consultation|a consultation|a call)|can you book (me|my consultation|a call)|please book (me|my consultation)|get me booked( in)?|book my consultation|book my call|book a consultation for me|book (a )?(discovery|strategy|demo) call)\b/;
+
   // ---------- PENDING CONFIRMATIONS ----------
   if (capture.pendingConfirm === 'name') {
     const strongNo = hasStrongNoCorrection(safeUserText);
@@ -1021,18 +1021,18 @@ const strongBookNowRegex =
   }
 
   // ---------- FAST PATH FOR HOT-LEAD CONSULTATION REQUESTS (VOICE) ----------
-if (
-  isVoice &&
-  booking.intent === 'mybizpal_consultation' &&
-  strongBookNowRegex.test(userLower) &&
-  history.some((m) => m.role === 'assistant')
-) {
-  const replyText = buildFastConsultStep(callState, { isVoice });
-  history.push({ role: 'user', content: safeUserText });
-  history.push({ role: 'assistant', content: replyText });
-  snapshotSessionFromCall(callState);
-  return { text: replyText, shouldEnd: false };
-}
+  if (
+    isVoice &&
+    booking.intent === 'mybizpal_consultation' &&
+    strongBookNowRegex.test(userLower) &&
+    history.some((m) => m.role === 'assistant')
+  ) {
+    const replyText = buildFastConsultStep(callState, { isVoice });
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
 
   // ---------- NAME CAPTURE MODE ----------
   if (capture.mode === 'name') {
@@ -1368,74 +1368,73 @@ if (
     }
   }
 
-// ---------- GUARD: NO BOOKING/EMAIL BEFORE CLEAR INTENT ----------
+  // ---------- GUARD: NO BOOKING/EMAIL BEFORE CLEAR INTENT ----------
+  function cleanEarlyBookingAndEmail(botText, { booking, behaviour, isVoice }) {
+    if (!botText) return botText || '';
 
-function cleanEarlyBookingAndEmail(botText, { booking, behaviour, isVoice }) {
-  if (!botText) return botText || '';
+    const lower = botText.toLowerCase();
 
-  const lower = botText.toLowerCase();
+    const hasBookingIntent =
+      booking.intent === 'mybizpal_consultation' ||
+      behaviour.bookingReadiness === 'high';
 
-  const hasBookingIntent =
-    booking.intent === 'mybizpal_consultation' ||
-    behaviour.bookingReadiness === 'high';
+    const mentionsEmail =
+      /\b(email|e-mail|e mail)\b/.test(lower) ||
+      /\bzoom link\b/.test(lower);
 
-  const mentionsEmail =
-    /\b(email|e-mail|e mail)\b/.test(lower) ||
-    /\bzoom link\b/.test(lower);
+    const hardBookingPhrases =
+      /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting))\b/.test(
+        lower
+      );
 
-  const hardBookingPhrases =
-    /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting)\b/.test(
-      lower
-    );
+    // If model tries to talk about booking or emails too early, strip that out.
+    if (!hasBookingIntent && (mentionsEmail || hardBookingPhrases)) {
+      // Remove sentences that mention email / zoom / booking from the reply
+      const sentences = botText
+        .split(/([.!?])/)
+        .reduce((acc, cur, idx, arr) => {
+          if (idx % 2 === 0) {
+            const punct = arr[idx + 1] || '';
+            acc.push(cur + punct);
+          }
+          return acc;
+        }, [])
+        .map((s) => s.trim())
+        .filter(Boolean);
 
-  // If model tries to talk about booking or emails too early, strip that out.
-  if (!hasBookingIntent && (mentionsEmail || hardBookingPhrases)) {
-    // Remove sentences that mention email / zoom / booking from the reply
-    const sentences = botText
-      .split(/([.!?])/)
-      .reduce((acc, cur, idx, arr) => {
-        if (idx % 2 === 0) {
-          const punct = arr[idx + 1] || '';
-          acc.push(cur + punct);
-        }
-        return acc;
-      }, [])
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    const filtered = sentences.filter((s) => {
-      const sLower = s.toLowerCase();
-      if (/\b(email|e-mail|e mail|zoom link)\b/.test(sLower)) return false;
-      if (
-        /\b(book you in|get you booked|lock that in|lock it in|book you for\b/.test(
-          sLower
+      const filtered = sentences.filter((s) => {
+        const sLower = s.toLowerCase();
+        if (/\b(email|e-mail|e mail|zoom link)\b/.test(sLower)) return false;
+        if (
+          /\b(book you in|get you booked|lock that in|lock it in|book you for\b/.test(
+            sLower
+          )
         )
-      )
-        return false;
-      return true;
-    });
+          return false;
+        return true;
+      });
 
-    let cleaned = filtered.join(' ').trim();
+      let cleaned = filtered.join(' ').trim();
 
-    if (!cleaned) {
-      // Fallback message if we stripped everything
-      cleaned = isVoice
-        ? 'Before we think about bookings or emails, tell me a bit about your business. What do you do?'
-        : 'Before we get into bookings or emails, tell me a bit about your business. What do you do and what’s the main thing you’re trying to fix around calls or messages?';
-    } else {
-      // Add a gentle redirect so the user understands why we are not booking yet
-      const tail = isVoice
-        ? ' Before we even think about bookings, tell me a bit about your business and what you are trying to sort out.'
-        : ' Before we even think about bookings, tell me a bit about your business and what you are trying to sort out around calls or enquiries.';
-      cleaned += tail;
+      if (!cleaned) {
+        // Fallback message if we stripped everything
+        cleaned = isVoice
+          ? 'Before we think about bookings or emails, tell me a bit about your business. What do you do?'
+          : 'Before we get into bookings or emails, tell me a bit about your business. What do you do and what’s the main thing you’re trying to fix around calls or messages?';
+      } else {
+        // Add a gentle redirect so the user understands why we are not booking yet
+        const tail = isVoice
+          ? ' Before we even think about bookings, tell me a bit about your business and what you are trying to sort out.'
+          : ' Before we even think about bookings, tell me a bit about your business and what you are trying to sort out around calls or enquiries.';
+        cleaned += tail;
+      }
+
+      return cleaned;
     }
 
-    return cleaned;
+    return botText;
   }
 
-  return botText;
-}
-  
   // ---------- OPENAI CALL ----------
   const systemPrompt = buildSystemPrompt(callState);
   const messages = [{ role: 'system', content: systemPrompt }];
@@ -1508,7 +1507,7 @@ function cleanEarlyBookingAndEmail(botText, { booking, behaviour, isVoice }) {
   botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
   botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
-    // Enforce "no booking/email before clear intent"
+  // Enforce "no booking/email before clear intent"
   botText = cleanEarlyBookingAndEmail(botText, {
     booking,
     behaviour,
