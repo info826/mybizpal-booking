@@ -758,14 +758,19 @@ export async function handleTurn({ userText, callState }) {
     behaviour.decisionPower = 'decision-maker';
   }
 
-  // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
+    // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
   // Only treat as booking intent when they clearly talk about booking/scheduling,
   // not just saying the word "consultation" on its own.
-  
-  const earlyBookingRegex =
-  /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting))\b/;
 
-  if (bookingIntentRegex.test(userLower)) {
+  // Phrases that mean they are already talking about locking something in
+  const earlyBookingRegex =
+    /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting))\b/;
+
+  // General “I want to book / speak to someone” intent
+  const bookingIntentRegex =
+    /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult)\b/;
+
+  if (bookingIntentRegex.test(userLower) || earlyBookingRegex.test(userLower)) {
     booking.intent = booking.intent || 'mybizpal_consultation';
     if (behaviour.bookingReadiness === 'unknown') {
       behaviour.bookingReadiness = 'high';
@@ -774,7 +779,7 @@ export async function handleTurn({ userText, callState }) {
 
   // Strong "book me now" phrases (for fast path on voice)
   const strongBookNowRegex =
-  /\b(book (me|my consultation|a consultation|a call)|can you book (me|my consultation|a call)|please book (me|my consultation)|get me booked( in)?|book my consultation|book my call|book a consultation for me|book (a )?(discovery|strategy|demo) call)\b/;
+    /\b(book (me|my consultation|a consultation|a call)|can you book (me|my consultation|a call)|please book (me|my consultation)|get me booked( in)?|book my consultation|book my call|book a consultation for me|book (a )?(discovery|strategy|demo) call)\b/;
 
   // ---------- PENDING CONFIRMATIONS ----------
   if (capture.pendingConfirm === 'name') {
