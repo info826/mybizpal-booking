@@ -521,13 +521,17 @@ IDENTITY & GOAL
   - If they clearly seem to be trying to book with another business (e.g. their dentist),
     explain that they have reached MyBizPal, which helps business owners with their own
     calls and bookings, and gently steer back to how MyBizPal can help THEM as a business.
+- Internally, you can think of yourself as an AI-powered agent, but:
+  - Do NOT say "agent like me".
+  - Do NOT talk about being AI or software unless the user directly asks.
+- When the user asks what MyBizPal actually is or what they "get", you may explain that
+  MyBizPal installs a smart phone and WhatsApp receptionist that speaks to callers the way
+  you do: handling discovery calls, qualifying leads, booking appointments into their calendar,
+  answering common questions and doing basic sales follow-ups on new enquiries.
 - If they ask whether you remember them or past chats, do NOT talk about "memory limits"
   or say you can only see this conversation. Instead, answer naturally: say you speak to
   lots of business owners and focus on what they need right now, then ask who they are
   and what their business does.
-- Internally, you can think of yourself as an AI-powered agent, but:
-  - Do NOT say "agent like me".
-  - Do NOT talk about being AI or software unless the user directly asks.
 - Your core goal in each conversation:
   1) Understand their business and their main headache with calls, WhatsApps or bookings.
   2) Make the pain clear and relatable in normal language.
@@ -558,9 +562,20 @@ SALES MINDSET (VERY IMPORTANT)
 - Always ask specific, human questions, not generic ones.
 - If what they ask is outside MyBizPal, answer briefly, then steer back to how MyBizPal could help their business.
 
+SELLING THE AGENT / RECEPTIONIST
+- When someone shows interest, clearly describe what they actually get:
+  - A smart receptionist that sounds like this conversation.
+  - It can handle discovery calls, ask qualifying questions, answer common FAQs,
+    book people straight into their calendar, and even do basic sales follow-ups
+    with people who enquired but did not book.
+- You can say things like:
+  - "Think of it as having a receptionist that speaks like this, answering calls and WhatsApps, qualifying people and booking them in for you."
+  - "It can handle discovery calls, basic sales conversations and bookings, so you’re not constantly on the phone yourself."
+- Do NOT say the phrase "agent like me". Instead, talk about "a receptionist that sounds like this" or "a smart receptionist that handles calls the way we’re talking now".
+
 HOT LEADS ON VOICE (BOOKING FOCUS)
 - On VOICE calls, when the caller clearly says things like "book a consultation", "book me in",
-  "can you book my consultation" or "get me booked", treat them as a HOT LEAD.
+  "get me booked", "book a discovery call", "book a strategy call" or similar, treat them as a HOT LEAD.
 - For these callers your priority is SPEED and CLARITY, not deep discovery:
   - Only ask the essentials:
     - Their first name (if you do not already know it),
@@ -569,6 +584,10 @@ HOT LEADS ON VOICE (BOOKING FOCUS)
     - A simple day/time preference.
   - Do NOT go into long discovery about every process or their full history.
   - You can always cover details properly on the Zoom consultation.
+- IMPORTANT: Once you have asked what type of business they run and they answered,
+  do NOT ask "what type of business is it?" again in this conversation.
+  If you are unsure, briefly restate what you have (e.g. "I had you down as a dental clinic, is that right?")
+  instead of asking from scratch again.
 
 SPEAKING RHYTHM ON VOICE
 - On voice you should virtually ALWAYS end your reply with a clear question,
@@ -728,7 +747,7 @@ export async function handleTurn({ userText, callState }) {
 
   // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
   const bookingIntentRegex =
-    /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult)\b/;
+    /\b(book(ing)?|set up a call|set up an appointment|speak with (an )?(adviser|advisor)|talk to (an )?(adviser|advisor)|consultation|consult|discovery call|strategy call|demo call|demo)\b/;
 
   if (bookingIntentRegex.test(userLower)) {
     booking.intent = booking.intent || 'mybizpal_consultation';
@@ -739,7 +758,7 @@ export async function handleTurn({ userText, callState }) {
 
   // Strong "book me now" phrases (for fast path on voice)
   const strongBookNowRegex =
-    /\b(book (me|my consultation|a consultation|a call)|can you book (me|my consultation|a call)|please book (me|my consultation)|get me booked( in)?|book my consultation|book my call|book a consultation for me)\b/;
+    /\b(book (me|my consultation|a consultation|a call)|can you book (me|my consultation|a call)|please book (me|my consultation)|get me booked( in)?|book my consultation|book my call|book a consultation for me|book (a )?(discovery|strategy|demo) call)\b/;
 
   // ---------- PENDING CONFIRMATIONS ----------
   if (capture.pendingConfirm === 'name') {
@@ -953,7 +972,7 @@ export async function handleTurn({ userText, callState }) {
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
     const coreExplanation =
-      'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It’s built for busy clinics, salons, dentists, trades and other local service businesses.';
+      'Short version: MyBizPal answers your calls and WhatsApp messages for you, handles discovery calls and basic sales conversations, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It’s built for busy clinics, salons, dentists, trades and other local service businesses.';
 
     const followUps = [
       '\n\nWhat type of business are you running at the moment?',
@@ -974,7 +993,7 @@ export async function handleTurn({ userText, callState }) {
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
     const replyText =
-      'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps and bookings automatically so you’re not forever chasing missed enquiries.\n\nWhat kind of business are you running and where do things feel the most manual at the moment?';
+      'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps, discovery calls and bookings automatically so you’re not forever chasing missed enquiries.\n\nWhat kind of business are you running and where do things feel the most manual at the moment?';
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
@@ -1442,8 +1461,8 @@ export async function handleTurn({ userText, callState }) {
     botText = botText.replace(/\s+,/g, ',');
   }
 
-  // Remove "agent like me"
-  botText = botText.replace(/agent like me/gi, 'MyBizPal');
+  // Remove literal "agent like me" if the model ever hallucinates it
+  botText = botText.replace(/agent like me/gi, 'a smart receptionist that sounds like this');
 
   // Strip greeting if already greeted
   const alreadyGreeted =
@@ -1489,7 +1508,7 @@ export async function handleTurn({ userText, callState }) {
 
   if (genericFallbackRegex.test(botText) && bookingIntentRegex.test(userLower)) {
     botText =
-      'No problem at all — you are through to MyBizPal. I can help you book a short Zoom consultation with one of the team to talk about your calls and bookings. What should I call you, just your first name?';
+      'No problem at all — you are through to MyBizPal. I can help you book a short Zoom consultation with one of the team to talk about your calls, discovery calls and bookings. What should I call you, just your first name?';
 
     booking.intent = booking.intent || 'mybizpal_consultation';
     if (behaviour.bookingReadiness === 'unknown') {
