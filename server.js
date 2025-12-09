@@ -474,6 +474,10 @@ wss.on('connection', (ws, req) => {
     channel: 'voice',
     // NEW: dedupe last bot text
     lastBotText: '',
+    // NEW: track if a reply is in progress (OpenAI/ElevenLabs)
+    pendingReply: false,
+    // NEW: track timing between user utterances
+    lastTranscriptAt: 0,
   };
 
   // ---- Deepgram connection (STT) ----
@@ -509,21 +513,35 @@ wss.on('connection', (ws, req) => {
     const t = (text || '').trim().toLowerCase();
     if (!t) return true;
 
+    const words = t.split(/\s+/);
+
+    // Always ignore very short "ack" phrases that don't change the conversation
+    const ackAlways = new Set([
+      'great',
+      'perfect',
+      'thanks',
+      'thank you',
+      'thankyou',
+      'brilliant',
+      'awesome',
+      'fantastic',
+      'lovely',
+      'cool',
+      'nice',
+      'cheers',
+    ]);
+    if (words.length <= 3 && ackAlways.has(t)) return true;
+
     // Very short nothingness
     if (t.length <= 2) return true;
 
-    // Common back-channel / reflex utterances
+    // Common back-channel / reflex utterances (only ignored if very soon after bot)
     const boringSet = new Set([
       'hi',
       'hello',
       'hey',
       'ok',
       'okay',
-      'yes',
-      'yeah',
-      'yep',
-      'no',
-      'nope',
       'mm',
       'mmm',
       'uh',
@@ -541,14 +559,13 @@ wss.on('connection', (ws, req) => {
       const now = Date.now();
       const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
 
-      // If they say "hello/yes/ok/etc." within ~2.5s of Gabriel speaking,
+      // If they say "hello/ok/etc." within ~2.5s of Gabriel speaking,
       // it's probably echo or reflex → ignore.
       if (sinceBot < 2500) return true;
     }
 
     // Very short (1–2 word) utterances immediately after Gabriel spoke
     // that don't carry much meaning → ignore as likely reflex.
-    const words = t.split(/\s+/);
     if (words.length <= 2) {
       const now = Date.now();
       const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
@@ -646,9 +663,13 @@ wss.on('connection', (ws, req) => {
 
     // Avoid reacting twice to identical text
     if (transcript === callState.lastUserTranscript) return;
-    callState.lastUserTranscript = transcript;
+
+    // Mark that a reply is in progress so silence watchdog doesn't fire
+    callState.pendingReply = true;
 
     try {
+      callState.lastUserTranscript = transcript;
+
       // Make sure logic.js knows this is a voice call
       callState.channel = 'voice';
 
@@ -683,7 +704,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // NEW: guard against accidental duplicate replies (same text within 2 seconds)
+      // Guard against accidental duplicate replies (same text within 2 seconds)
       if (
         trimmedReply === callState.lastBotText &&
         nowTs - (callState.timing.lastBotReplyAt || 0) < 2000
@@ -748,6 +769,9 @@ wss.on('connection', (ws, req) => {
       }
     } catch (err) {
       console.error('Error in respondToUser:', err);
+    } finally {
+      // Whatever happens, we are no longer "waiting to reply"
+      callState.pendingReply = false;
     }
   }
 
@@ -758,6 +782,7 @@ wss.on('connection', (ws, req) => {
       if (!callState.greeted) return;
       if (!streamSid) return;
       if (callState.isSpeaking) return;
+      if (callState.pendingReply) return; // don't nag while we're computing a reply
 
       const now = Date.now();
       const lastUser = callState.timing.lastUserSpeechAt || 0;
@@ -771,14 +796,14 @@ wss.on('connection', (ws, req) => {
       // Extra safety: don't nag if Gabriel has spoken very recently.
       if (idleSinceBot < 5000) return;
 
-      // Stage thresholds:
-      //  - 6 seconds  → "Are you still there?"
-      //  - 14 seconds → "This is Gabriel at MyBizPal, are you still there?"
-      //  - 22 seconds → polite goodbye + hang up
+      // Stage thresholds (slightly more patient now):
+      //  - 9 seconds  → "Are you still there?"
+      //  - 19 seconds → "This is Gabriel at MyBizPal, are you still there?"
+      //  - 29 seconds → polite goodbye + hang up
       if (
         callState.silenceStage === 0 &&
-        idleSinceUser >= 6000 &&
-        idleSinceUser < 14000
+        idleSinceUser >= 9000 &&
+        idleSinceUser < 19000
       ) {
         callState.silenceStage = 1;
 
@@ -803,8 +828,8 @@ wss.on('connection', (ws, req) => {
         }
       } else if (
         callState.silenceStage === 1 &&
-        idleSinceUser >= 14000 &&
-        idleSinceUser < 22000
+        idleSinceUser >= 19000 &&
+        idleSinceUser < 29000
       ) {
         callState.silenceStage = 2;
 
@@ -827,7 +852,7 @@ wss.on('connection', (ws, req) => {
           callState.timing.lastBotReplyAt = t;
           callState.lastBotText = reply;
         }
-      } else if (callState.silenceStage === 2 && idleSinceUser >= 22000) {
+      } else if (callState.silenceStage === 2 && idleSinceUser >= 29000) {
         // Final goodbye and hang up
         callState.silenceStage = 3; // prevent repeating
         callState.hangupRequested = true;
@@ -914,8 +939,8 @@ wss.on('connection', (ws, req) => {
 
       // Update timing for user speech
       callState.timing.lastUserSpeechAt = now;
-      // Reset silence stage once user speaks
-      callState.silenceStage = 0;
+      callState.silenceStage = 0; // reset once user speaks
+      callState.lastTranscriptAt = now;
 
       // If this is a "check-in hello" after a pause, answer gently and skip full logic
       if (isCheckInHello(transcript)) {
@@ -946,7 +971,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // Ignore tiny noise / reflex utterances straight after Gabriel spoke
+      // Ignore tiny noise / reflex utterances
       if (shouldIgnoreUtterance(transcript)) {
         return;
       }
@@ -979,7 +1004,7 @@ wss.on('connection', (ws, req) => {
       }
 
       // Debounce + cooldown:
-      // - at most one reply every ~1800ms (more patient)
+      // - at most one reply every ~1800ms
       // - if multiple transcripts arrive, respond only to the latest
       const minGap = 1800;
 
@@ -1021,7 +1046,7 @@ wss.on('connection', (ws, req) => {
     if (event === 'start') {
       streamSid = msg.start.streamSid;
       callState.callSid = msg.start.callSid || null;
-      // NEW: get caller phone from customParameters
+      // get caller phone from customParameters (if present)
       callState.callerNumber =
         (msg.start.customParameters && msg.start.customParameters.caller) ||
         null;
