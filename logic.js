@@ -840,11 +840,13 @@ export async function handleTurn({ userText, callState }) {
     return { text: replyText, shouldEnd: false };
   }
 
+  // "What do you guys do?" and similar – always explain calls & bookings, not consulting
   if (
     /\bwhat do you do\b/.test(userLower) ||
+    /\bwhat you do\b/.test(userLower) ||
+    /\bwhat you guys do\b/.test(userLower) ||
     /see what you do/.test(userLower) ||
-    /what (is|does) mybizpal\b/.test(userLower) ||
-    /what you do\??$/.test(userLower)
+    /what (is|does) mybizpal\b/.test(userLower)
   ) {
     behaviour.interestLevel =
       behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
@@ -1294,6 +1296,12 @@ export async function handleTurn({ userText, callState }) {
     /I (only|can only) see (what('?s| is) )?in this conversation( right now)?\.?/gi,
     ''
   );
+
+  // If model drifts into old consulting bullet-list ("business planning and strategy..."), override hard
+  if (/business planning and strategy/i.test(botText) && /marketing and sales funnels/i.test(botText)) {
+    botText =
+      'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It’s built for busy clinics, salons, dentists, trades and other local service businesses.\n\nWhat type of business are you running at the moment?';
+  }
 
   // Replace generic confusion with a more contextual prompt
   const confusionRegex =
