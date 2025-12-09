@@ -553,6 +553,21 @@ export async function handleSystemActionsFirst({ userText, callState }) {
   const isUserSpecifiedTime =
     !!booking.timeISO && booking.timeISO === timeCandidate;
 
+  // DEBUG SNAPSHOT: see why bookings do / do not trigger
+  console.log('BOOKING SNAPSHOT IN handleSystemActionsFirst:', {
+    name,
+    email,
+    phone,
+    hasContact,
+    timeISO: booking.timeISO,
+    earliestSlotISO: booking.earliestSlotISO,
+    timeCandidate,
+    isUserSpecifiedTime,
+    intent: booking.intent,
+    bookingConfirmed: booking.bookingConfirmed,
+    awaitingTimeConfirm: booking.awaitingTimeConfirm,
+  });
+
   // ---------- EXISTING BOOKING DECISION FLOW (MOVE / CANCEL / KEEP) ----------
 
   // If we previously asked what to do with an existing booking
@@ -740,6 +755,14 @@ export async function handleSystemActionsFirst({ userText, callState }) {
     !booking.bookingConfirmed &&
     !booking.awaitingTimeConfirm
   ) {
+    console.log('MAIN BOOKING FLOW TRIGGERED with:', {
+      name,
+      email,
+      phone,
+      timeCandidate,
+      isUserSpecifiedTime,
+    });
+
     // If we have a phone but email is missing → ask once, then wait for it
     if (phone && !email) {
       if (!booking.needEmailBeforeBooking) {
@@ -758,6 +781,9 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
     // If we somehow have no phone AND no email, we bail out (shouldn’t happen because of hasContact)
     if (!phone && !email) {
+      console.log(
+        'MAIN BOOKING FLOW aborted: no phone or email, despite hasContact = true'
+      );
       return { intercept: false };
     }
 
@@ -910,6 +936,8 @@ export async function handleSystemActionsFirst({ userText, callState }) {
         name
           ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get the Zoom details shortly. Anything else I can help with today?`
           : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get the Zoom details shortly. Anything else I can help with today?`;
+
+      console.log('BOOKING SUCCESSFULLY CREATED with event id:', event.id);
 
       return {
         intercept: true,
