@@ -1635,3 +1635,9 @@ botText = botText.replace(
 if (!botText) {
   botText = buildContextualFallback({ safeUserText, profile });
 }
+
+history.push({ role: 'assistant', content: botText });
+snapshotSessionFromCall(callState);
+
+return { text: botText, shouldEnd: false };
+} 
