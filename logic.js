@@ -684,20 +684,15 @@ ${channelSummary}
 // ---------- MAIN TURN HANDLER ----------
 export async function handleTurn({ userText, callState }) {
 
-  let botText = "";          // safely declared
-  let summaryText = "";      // optional, for logs
+  let botText = "";
+  let summaryText = "";
 
   try {
-    // your real flow starts here
+    // we don't put logic here
   } catch (err) {
-    console.error("Error in handleTurn:", err);
-    botText = "Sorry, something went a bit funny on my side there. Could you try that again in a slightly different way?";
-    return { botText };
+    botText = "Sorry something went wrong";
+    return { text: botText, shouldEnd: false };
   }
-
-  // normal return
-  return { botText };
-}
  
   ensureHistory(callState);
   ensureBehaviourState(callState);
