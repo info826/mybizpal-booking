@@ -1452,330 +1452,186 @@ export async function handleTurn({ userText, callState }) {
     return botText;
   }
 
-  // ---------- OPENAI CALL ----------
-  const systemPrompt = buildSystemPrompt(callState);
-  const messages = [{ role: 'system', content: systemPrompt }];
-  const recent = history.slice(-12);
-  for (const msg of recent) messages.push({ role: msg.role, content: msg.content });
-  messages.push({ role: 'user', content: safeUserText });
+ // ---------- OPENAI CALL ----------
+const systemPrompt = buildSystemPrompt(callState);
+const messages = [{ role: 'system', content: systemPrompt }];
+const recent = history.slice(-12);
+for (const msg of recent) messages.push({ role: msg.role, content: msg.content });
+messages.push({ role: 'user', content: safeUserText });
 
-  let botText = '';
+// IMPORTANT FIX: do NOT redeclare botText here.
+// It already exists at the top of handleTurn().
+botText = '';
 
-  try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-5.1',
-      reasoning_effort: 'none',
-      temperature: 0.6,
-      max_completion_tokens: 140,
-      messages,
-    });
-
-    botText = completion.choices?.[0]?.message?.content || '';
-    botText = botText.trim();
-  } catch (err) {
-    console.error('Primary OpenAI call failed:', err);
-  }
-
-  // Second-chance minimalist call
-  if (!botText) {
-    try {
-      const lastAssistantForSlim = [...history]
-        .slice()
-        .reverse()
-        .find((m) => m.role === 'assistant');
-
-      const slimMessages = [
-        {
-          role: 'system',
-          content:
-            'You are Gabriel from MyBizPal. Continue the conversation naturally based on the last assistant message and the user reply. Keep it short, human and slightly sales-focused. Do not apologise for not understanding; ask a specific clarifying question instead.',
-        },
-      ];
-
-      if (lastAssistantForSlim) {
-        slimMessages.push({
-          role: 'assistant',
-          content: lastAssistantForSlim.content,
-        });
-      }
-
-      slimMessages.push({ role: 'user', content: safeUserText });
-
-      const completion2 = await openai.chat.completions.create({
-        model: 'gpt-5.1',
-        reasoning_effort: 'none',
-        temperature: 0.7,
-        max_completion_tokens: 120,
-        messages: slimMessages,
-      });
-
-      botText = completion2.choices?.[0]?.message?.content || '';
-      botText = botText.trim();
-    } catch (err2) {
-      console.error('Second OpenAI call failed:', err2);
-    }
-  }
-
-  if (!botText) {
-    botText = buildContextualFallback({ safeUserText, profile });
-  }
-
-  // Normalisation and de-robotising
-  botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
-  botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
-
-  // Enforce "no booking/email before clear intent"
-  botText = cleanEarlyBookingAndEmail(botText, {
-    booking,
-    behaviour,
-    isVoice,
+try {
+  const completion = await openai.chat.completions.create({
+    model: 'gpt-5.1',
+    reasoning_effort: 'none',
+    temperature: 0.6,
+    max_completion_tokens: 140,
+    messages,
   });
 
-  // Remove explicit "I can't remember past chats" style lines
-  botText = botText.replace(
-    /I (do not|don't) have (a )?way to (reliably )?remember past (chats|conversations) with you[^.]*\./gi,
-    ''
-  );
-  botText = botText.replace(
-    /I (only|can only) see (what('?s| is) )?in this conversation( right now)?\.?/gi,
-    ''
-  );
-
-  // If model drifts into old consulting bullet-list ("business planning and strategy..."), override hard
-  if (/business planning and strategy/i.test(botText) && /marketing and sales funnels/i.test(botText)) {
-    botText =
-      'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It is built for busy clinics, salons, dentists, trades and other local service businesses.\n\nWhat type of business are you running at the moment?';
-  }
-
-  // Replace generic confusion with a more contextual prompt
-  const confusionRegex =
-    /sorry[, ]+i (do not|don't|did not|didn't) (quite )?(understand|follow) that[^.]*\.?/gi;
-  if (confusionRegex.test(botText)) {
-    if (profile.businessType) {
-      const bt = profile.businessType.toLowerCase();
-      botText =
-        `I think I might have missed a bit of that. ` +
-        `For your ${bt}, could you tell me where things most often go wrong with calls or bookings?`;
-    } else {
-      botText =
-        'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you are trying to sort out around calls or bookings?';
-    }
-  }
-
+  botText = completion.choices?.[0]?.message?.content || '';
   botText = botText.trim();
+} catch (err) {
+  console.error('Primary OpenAI call failed:', err);
+}
 
-  // NEW: prevent the very first reply on a VOICE call from jumping straight to "what's your email"
-  const isFirstAssistantTurn = history.length === 0;
-  if (
-    isVoice &&
-    isFirstAssistantTurn &&
-    /email/i.test(botText) &&
-    !booking.intent &&
-    !profile.businessType
-  ) {
-    const namePrefix = booking.name ? `${booking.name}, ` : '';
-    botText = `${namePrefix}thanks for calling. Before we grab any details, tell me a bit about your business and what you are trying to sort out around calls or bookings.`;
-  }
-
-  const { booking: bookingState = {} } = callState;
-
-  if (isChat) {
-    botText = botText.replace(/digit by digit/gi, '').replace(/nice and slowly/gi, '');
-    botText = botText.replace(/\bslowly\b/gi, '');
-    botText = botText.replace(/\s+,/g, ',');
-  }
-
-  // Remove literal "agent like me" if the model ever hallucinates it
-  botText = botText.replace(/agent like me/gi, 'a smart receptionist that sounds like this');
-
-  // Strip greeting if already greeted
-  const alreadyGreeted =
-    !!callState.greeted || history.length > 0 || !!callState._hasTextGreetingSent;
-
-  if (alreadyGreeted) {
-    botText = botText
-      .replace(
-        /^Good\s+(morning|afternoon|evening|late)[^.!\n]*?I['’` ]m\s+Gabriel\s+from\s+MyBizPal[.!?]*\s*/i,
-        ''
-      )
-      .trim();
-  }
-
-  // Remove robotic "Two quick things..." pattern and replace with a short, human line
-  if (/two quick things so i can lock it in/i.test(botText)) {
-    botText =
-      'Great, let me just grab your details. What is the best email to send your Zoom link to?';
-  }
-
-  // Time formatting clean-up:
-  // 1) "10:00 am" / "10:00am" -> "10am"
-  botText = botText.replace(
-    /\b([0-1]?\d):00\s*([AaPp])\.?m\.?\b/g,
-    (_, h, ap) => `${h}${ap.toLowerCase()}m`
-  );
-  // 2) "10 am" / "10 AM" -> "10am"
-  botText = botText.replace(
-    /\b([0-1]?\d)\s*([AaPp])\.?m\.?\b/g,
-    (_, h, ap) => `${h}${ap.toLowerCase()}m`
-  );
-  // 3) "4:30 pm" / "4:30pm" -> "4:30pm" (no space, lowercase)
-  botText = botText.replace(
-    /\b([0-1]?\d):([0-5]\d)\s*([AaPp])\.?m\.?\b/g,
-    (_, h, m, ap) => `${h}:${m}${ap.toLowerCase()}m`
-  );
-
-  if (!botText) {
-    botText = buildContextualFallback({ safeUserText, profile });
-  }
-
-  const genericFallbackRegex = /^sorry,\s*i\s+did\s+not\s+quite\s+follow\s+that./i;
-
-  if (genericFallbackRegex.test(botText) && bookingIntentRegex.test(userLower)) {
-    botText =
-      'No problem at all — you are through to MyBizPal. I can help you book a short Zoom consultation with one of the team to talk about your calls, discovery calls and bookings. What should I call you, just your first name?';
-
-    booking.intent = booking.intent || 'mybizpal_consultation';
-    if (behaviour.bookingReadiness === 'unknown') {
-      behaviour.bookingReadiness = 'high';
-    }
-  }
-
-  // VOICE-SPECIFIC SHORTENING (to reduce over-talking and barge-in pain)
-  if (isVoice) {
-    // Remove bullet/list markers at the start of lines
-    botText = botText.replace(/^[\s>*•\-]+\s*/gm, '');
-
-    // Hard cap on character length for voice
-    const maxChars = 320;
-    if (botText.length > maxChars) {
-      const cut = botText.slice(0, maxChars);
-      const lastBreak = Math.max(
-        cut.lastIndexOf('. '),
-        cut.lastIndexOf('! '),
-        cut.lastIndexOf('? ')
-      );
-      botText = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut;
-    }
-
-    // Limit to at most two questions per reply
-    const questionParts = botText.split('?');
-    if (questionParts.length > 3) {
-      botText = questionParts.slice(0, 2).join('?') + '?';
-    }
-
-    // Remove extra paragraphs – keep first paragraph only
-    const paragraphs = botText.split(/\n{2,}/);
-    if (paragraphs.length > 1) {
-      botText = paragraphs[0];
-    }
-
-    botText = botText.trim();
-  }
-
-  // Trim overly long replies (safety net)
-  if (botText.length > 420) {
-    const cut = botText.slice(0, 420);
-    const lastBreak = Math.max(
-      cut.lastIndexOf('\n'),
-      cut.lastIndexOf('. '),
-      cut.lastIndexOf('! '),
-      cut.lastIndexOf('? ')
-    );
-    botText = lastBreak > 0 ? cut.slice(0, lastBreak + 1) : cut;
-  }
-
-  let shouldEnd = false;
-  let endByPhrase =
-    /\b(no, that'?s all|that'?s all|nothing else|no more|all good|we'?re good)\b/.test(
-      userLower
-    ) ||
-    /\b(no thanks|no thank you|i'?m good|i am good)\b/.test(userLower) ||
-    /\b(ok bye|bye|goodbye|cheers,? bye)\b/.test(userLower);
-
-  if (!endByPhrase && /^\s*no\s*$/i.test(userLower)) {
-    const lastAssistantForEnd = [...history]
+// ---------- SECOND-CHANCE MINIMALIST CALL ----------
+if (!botText) {
+  try {
+    const lastAssistantForSlim = [...history]
       .slice()
       .reverse()
       .find((m) => m.role === 'assistant');
-    if (
-      lastAssistantForEnd &&
-      /anything else i can help/i.test(lastAssistantForEnd.content.toLowerCase())
-    ) {
-      endByPhrase = true;
+
+    const slimMessages = [
+      {
+        role: 'system',
+        content:
+          'You are Gabriel from MyBizPal. Continue the conversation naturally based on the last assistant message and the user reply. Keep it short, human and slightly sales-focused. Do not apologise for not understanding; ask a specific clarifying question instead.',
+      },
+    ];
+
+    if (lastAssistantForSlim) {
+      slimMessages.push({
+        role: 'assistant',
+        content: lastAssistantForSlim.content,
+      });
     }
+
+    slimMessages.push({ role: 'user', content: safeUserText });
+
+    const completion2 = await openai.chat.completions.create({
+      model: 'gpt-5.1',
+      reasoning_effort: 'none',
+      temperature: 0.7,
+      max_completion_tokens: 120,
+      messages: slimMessages,
+    });
+
+    botText = completion2.choices?.[0]?.message?.content || '';
+    botText = botText.trim();
+  } catch (err2) {
+    console.error('Second OpenAI call failed:', err2);
   }
+}
 
-  if (endByPhrase) {
-    shouldEnd = true;
-  }
+// ---------- FALLBACK ----------
+if (!botText) {
+  botText = buildContextualFallback({ safeUserText, profile });
+}
 
-  // VOICE: never leave caller hanging without a question (unless ending)
-  if (isVoice && !shouldEnd) {
-    const hasQuestion = /\?/.test(botText);
-    if (!hasQuestion) {
-      // Add a short, neutral next-step question
-      if (botText.endsWith('.')) {
-        botText += ' What would you like me to do next?';
-      } else if (botText.length === 0) {
-        botText = 'What would you like me to do next?';
-      } else {
-        botText += ' What would you like me to do next?';
-      }
-    }
-  }
+// ---------- NORMALISATION ----------
+botText = botText.replace(/—/g, '-').replace(/\.{2,}/g, '.');
+botText = botText.replace(/(\w)\s*-\s+/g, '$1, ');
 
-  history.push({ role: 'user', content: safeUserText });
-  history.push({ role: 'assistant', content: botText });
+// No booking/email too early
+botText = cleanEarlyBookingAndEmail(botText, {
+  booking,
+  behaviour,
+  isVoice,
+});
 
-  callState._hasTextGreetingSent = true;
+// Remove memory disclaimers hallucinations
+botText = botText.replace(
+  /I (do not|don't) have (a )?way to (reliably )?remember past (chats|conversations) with you[^.]*\./gi,
+  ''
+);
+botText = botText.replace(
+  /I (only|can only) see (what('?s| is) )?in this conversation( right now)?\.?/gi,
+  ''
+);
 
-  const lower = botText.toLowerCase();
+// Remove legacy consulting sales pitch hallucination
+if (
+  /business planning and strategy/i.test(botText) &&
+  /marketing and sales funnels/i.test(botText)
+) {
+  botText =
+    'Short version: MyBizPal answers your calls and WhatsApp messages for you, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It is built for busy clinics, salons, dentists, trades and other local service businesses.\n\nWhat type of business are you running at the moment?';
+}
 
-  if (
-    (
-      /spell your name/.test(lower) ||
-      /spell it for me/.test(lower) ||
-      /spell your first name/.test(lower) ||
-      (/letter by letter/.test(lower) && /name/.test(lower)) ||
-      /(what('| i)s your name\??)/.test(lower) ||
-      /(what('| i)s your first name\??)/.test(lower) ||
-      /who am i speaking with/.test(lower) ||
-      /who am i talking to/.test(lower) ||
-      /your name, by the way/.test(lower) ||
-      /and your name is\??/.test(lower) ||
-      /what should i call you/.test(lower)
-    ) &&
-    (!bookingState.name || capture.pendingConfirm === 'name')
-  ) {
-    capture.mode = 'name';
-    capture.buffer = '';
-    if (capture.nameStage === 'confirmed') capture.nameStage = 'initial';
-  } else if (
-    /(what('| i)s|what is|can i grab|could i grab|may i grab|let me grab|can i take|could i take|may i take).*(mobile|phone number|your number|best number|contact number|cell number)/.test(
-      lower
-    ) ||
-    /(what('| i)s your mobile\b)/.test(lower)
-  ) {
-    capture.mode = 'phone';
-    capture.buffer = '';
-    capture.phoneAttempts = 0;
-  } else if (
-    /(what('| i)s|what is|can i grab|could i grab|may i grab|let me grab|can i take|could i take|may i take).*(email|e-mail|e mail)/.test(
-      lower
-    ) ||
-    /(your best email|best email for you|best email address)/.test(lower)
-  ) {
-    capture.mode = 'email';
-    capture.buffer = '';
-    capture.emailAttempts = 0;
+// ---------- CONFUSION HANDLER ----------
+const confusionRegex =
+  /sorry[, ]+i (do not|don't|did not|didn't) (quite )?(understand|follow) that[^.]*\.?/gi;
+
+if (confusionRegex.test(botText)) {
+  if (profile.businessType) {
+    const bt = profile.businessType.toLowerCase();
+    botText =
+      `I think I might have missed a bit of that. For your ${bt}, could you tell me where things most often go wrong with calls or bookings?`;
   } else {
-    if (capture.mode !== 'none') capture.buffer = '';
-    else {
-      capture.mode = 'none';
-      capture.buffer = '';
-    }
+    botText =
+      'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you are trying to sort out around calls or bookings?';
   }
+}
 
-  snapshotSessionFromCall(callState);
-  return { text: botText, shouldEnd };
+botText = botText.trim();
+
+// ---------- FIRST VOICE TURN: BLOCK EMAIL QUESTIONS ----------
+const isFirstAssistantTurn = history.length === 0;
+if (
+  isVoice &&
+  isFirstAssistantTurn &&
+  /email/i.test(botText) &&
+  !booking.intent &&
+  !profile.businessType
+) {
+  const namePrefix = booking.name ? `${booking.name}, ` : '';
+  botText = `${namePrefix}thanks for calling. Before we grab any details, tell me a bit about your business and what you are trying to sort out around calls or bookings.`;
+}
+
+// ---------- CHAT CLEANUP ----------
+if (isChat) {
+  botText = botText
+    .replace(/digit by digit/gi, '')
+    .replace(/nice and slowly/gi, '')
+    .replace(/\bslowly\b/gi, '')
+    .replace(/\s+,/g, ',');
+}
+
+// Remove "agent like me" hallucination
+botText = botText.replace(
+  /agent like me/gi,
+  'a smart receptionist that sounds like this'
+);
+
+// Strip greeting if already greeted
+const alreadyGreeted =
+  !!callState.greeted || history.length > 0 || !!callState._hasTextGreetingSent;
+
+if (alreadyGreeted) {
+  botText = botText
+    .replace(
+      /^Good\s+(morning|afternoon|evening|late)[^.!\n]*?I['’` ]m\s+Gabriel\s+from\s+MyBizPal[.!?]*\s*/i,
+      ''
+    )
+    .trim();
+}
+
+// Remove corporate phrase
+if (/two quick things so i can lock it in/i.test(botText)) {
+  botText =
+    'Great, let me just grab your details. What is the best email to send your Zoom link to?';
+}
+
+// ---------- TIME NORMALISATION ----------
+botText = botText.replace(
+  /\b([0-1]?\d):00\s*([AaPp])\.?m\.?\b/g,
+  (_, h, ap) => `${h}${ap.toLowerCase()}m`
+);
+botText = botText.replace(
+  /\b([0-1]?\d)\s*([AaPp])\.?m\.?\b/g,
+  (_, h, ap) => `${h}${ap.toLowerCase()}m`
+);
+botText = botText.replace(
+  /\b([0-1]?\d):([0-5]\d)\s*([AaPp])\.?m\.?\b/g,
+  (_, h, m, ap) => `${h}:${m}${ap.toLowerCase()}m`
+);
+
+// Final fallback
+if (!botText) {
+  botText = buildContextualFallback({ safeUserText, profile });
 }
