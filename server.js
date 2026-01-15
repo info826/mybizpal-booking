@@ -479,6 +479,7 @@ wss.on('connection', (ws, req) => {
   };
 
   // ---- Deepgram connection (STT) ----
+  // CHANGE: endpointing reduced from 1600 -> 800 to reduce finalization delay
   const dgUrl =
     'wss://api.deepgram.com/v1/listen' +
     '?encoding=mulaw' +
@@ -486,7 +487,7 @@ wss.on('connection', (ws, req) => {
     '&channels=1' +
     '&interim_results=false' +
     '&vad_events=true' +
-    '&endpointing=1600';
+    '&endpointing=800';
 
   const dgSocket = new WebSocket(dgUrl, {
     headers: {
@@ -616,8 +617,8 @@ wss.on('connection', (ws, req) => {
     callState.cancelSpeaking = false;
 
     try {
-      const audioBuffer = await synthesizeWithElevenLabs(reply);
-      await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
+      // CHANGE: stream TTS directly to Twilio (no buffering)
+      await synthesizeWithElevenLabsToTwilio(reply, ws, streamSid, callState);
     } catch (err) {
       console.error('Error during greeting TTS or sendAudio:', err);
     } finally {
@@ -721,8 +722,8 @@ wss.on('connection', (ws, req) => {
       callState.cancelSpeaking = false;
 
       try {
-        const audioBuffer = await synthesizeWithElevenLabs(trimmedReply);
-        await sendAudioToTwilio(ws, streamSid, audioBuffer, callState);
+        // CHANGE: stream TTS directly to Twilio (no buffering)
+        await synthesizeWithElevenLabsToTwilio(trimmedReply, ws, streamSid, callState);
       } catch (err) {
         console.error('Error during TTS or sendAudio:', err);
       } finally {
@@ -814,9 +815,6 @@ wss.on('connection', (ws, req) => {
       callState.timing.lastUserSpeechAt = now;
       // Reset silence stage once user speaks
       callState.silenceStage = 0;
-
-      // DISABLED: special "check-in hello" reply. We just handle this as normal input now.
-      // if (isCheckInHello(transcript)) { ... }
 
       // Ignore tiny noise / reflex utterances straight after Gabriel spoke
       if (shouldIgnoreUtterance(transcript)) {
@@ -989,6 +987,164 @@ wss.on('connection', (ws, req) => {
 
 // ---------- TTS + AUDIO HELPERS ----------
 
+// CHANGE: stream ElevenLabs audio directly to Twilio (no buffering whole audio first)
+async function synthesizeWithElevenLabsToTwilio(text, ws, streamSid, callState) {
+  if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+    console.warn('ElevenLabs config missing – cannot synthesize');
+    return;
+  }
+
+  // NOTE: increasing optimize_streaming_latency can reduce time-to-first-audio.
+  // Keeping at 3 for safety; can try 4 if you want it even snappier.
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?optimize_streaming_latency=3&output_format=ulaw_8000`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': ELEVENLABS_API_KEY,
+      'Content-Type': 'application/json',
+      Accept: 'audio/ulaw;rate=8000',
+    },
+    body: JSON.stringify({
+      text,
+      voice_settings: {
+        stability: 0.5,
+        similarity_boost: 0.8,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error('ElevenLabs error:', res.status, errText);
+    throw new Error(`ElevenLabs TTS failed: ${res.status}`);
+  }
+
+  // Clear any queued audio in Twilio before streaming new audio
+  try {
+    ws.send(
+      JSON.stringify({
+        event: 'clear',
+        streamSid,
+      })
+    );
+  } catch (err) {
+    console.warn('Error sending clear event to Twilio:', err);
+  }
+
+  // Stream chunks as they arrive
+  for await (const chunk of res.body) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!streamSid) return;
+
+    if (callState?.cancelSpeaking) {
+      console.log('🛑 Stopping TTS playback due to barge-in (stream)');
+      return;
+    }
+
+    // ElevenLabs may send arbitrary chunk sizes; Twilio expects 20ms frames (160 bytes at 8k ulaw).
+    // We buffer and emit in 160-byte chunks to keep timing stable.
+    await sendAudioChunkedToTwilio(ws, streamSid, Buffer.from(chunk), callState);
+  }
+
+  // Flush any remainder
+  await flushAudioRemainder(ws, streamSid, callState);
+}
+
+// Internal buffer for chunking to 160-byte frames
+const _audioChunker = {
+  buf: Buffer.alloc(0),
+};
+
+function sendAudioChunkedToTwilio(ws, streamSid, incomingBuf, callState) {
+  return new Promise((resolve) => {
+    if (!incomingBuf || incomingBuf.length === 0) return resolve();
+
+    _audioChunker.buf = Buffer.concat([_audioChunker.buf, incomingBuf]);
+
+    const chunkSize = 160; // 20ms at 8kHz ulaw
+    const frames = Math.floor(_audioChunker.buf.length / chunkSize);
+
+    if (frames <= 0) return resolve();
+
+    let i = 0;
+
+    const sendNext = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return resolve();
+      if (callState?.cancelSpeaking) return resolve();
+
+      if (i >= frames) {
+        // keep remainder in buffer
+        _audioChunker.buf = _audioChunker.buf.slice(frames * chunkSize);
+        return resolve();
+      }
+
+      const frame = _audioChunker.buf.slice(i * chunkSize, (i + 1) * chunkSize);
+      i += 1;
+
+      const payload = frame.toString('base64');
+
+      ws.send(
+        JSON.stringify({
+          event: 'media',
+          streamSid,
+          media: { payload },
+        }),
+        (err) => {
+          if (err) return resolve();
+          // pace frames at 20ms to sound natural
+          setTimeout(sendNext, 20);
+        }
+      );
+    };
+
+    sendNext();
+  });
+}
+
+function flushAudioRemainder(ws, streamSid, callState) {
+  return new Promise((resolve) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return resolve();
+    if (callState?.cancelSpeaking) return resolve();
+
+    const chunkSize = 160;
+    const buf = _audioChunker.buf || Buffer.alloc(0);
+
+    if (buf.length === 0) return resolve();
+
+    const usableLength = buf.length - (buf.length % chunkSize);
+    if (usableLength <= 0) return resolve();
+
+    let offset = 0;
+
+    const sendNext = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return resolve();
+      if (callState?.cancelSpeaking) return resolve();
+
+      if (offset >= usableLength) {
+        _audioChunker.buf = buf.slice(usableLength);
+        return resolve();
+      }
+
+      const frame = buf.slice(offset, offset + chunkSize);
+      offset += chunkSize;
+
+      ws.send(
+        JSON.stringify({
+          event: 'media',
+          streamSid,
+          media: { payload: frame.toString('base64') },
+        }),
+        () => setTimeout(sendNext, 20)
+      );
+    };
+
+    sendNext();
+  });
+}
+
+// NOTE: Kept for compatibility in case anything else calls it.
+// Not used by voice path anymore (we stream now).
 async function synthesizeWithElevenLabs(text) {
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
     console.warn('ElevenLabs config missing – returning empty Buffer');
