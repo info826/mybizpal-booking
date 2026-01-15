@@ -476,7 +476,19 @@ wss.on('connection', (ws, req) => {
     lastBotText: '',
     // NEW: prevent overlapping replies
     replyInProgress: false,
+    // NEW: barge-in queue so we never lose the user's interrupt
+    queuedUserDuringReply: null,
+    drainingQueue: false,
   };
+
+  // NEW: helper to immediately clear Twilio buffered audio
+  function sendClear() {
+    try {
+      if (ws && ws.readyState === WebSocket.OPEN && streamSid) {
+        ws.send(JSON.stringify({ event: 'clear', streamSid }));
+      }
+    } catch {}
+  }
 
   // ---- Deepgram connection (STT) ----
   // CHANGE: endpointing reduced from 1600 -> 800 to reduce finalization delay
@@ -642,7 +654,9 @@ wss.on('connection', (ws, req) => {
 
     // Prevent overlapping replies — ensure only one agent response at a time
     if (callState.replyInProgress) {
-      console.log('⛔ Reply already in progress — ignoring new transcript');
+      // NEW: do not lose the user's barge-in; keep the latest
+      callState.queuedUserDuringReply = transcript;
+      console.log('⏳ Reply in progress — queued new transcript');
       return;
     }
     callState.replyInProgress = true;
@@ -758,6 +772,15 @@ wss.on('connection', (ws, req) => {
       console.error('Error in respondToUser:', err);
     } finally {
       callState.replyInProgress = false;
+
+      // NEW: if user barged in while we were talking, handle their latest line now
+      if (!callState.drainingQueue && callState.queuedUserDuringReply) {
+        callState.drainingQueue = true;
+        const queued = callState.queuedUserDuringReply;
+        callState.queuedUserDuringReply = null;
+        callState.drainingQueue = false;
+        await respondToUser(queued);
+      }
     }
   }
 
@@ -831,6 +854,13 @@ wss.on('connection', (ws, req) => {
       if (callState.isSpeaking && transcript.length > 4) {
         console.log('🚫 Barge-in detected – meaningful user interrupt');
         callState.cancelSpeaking = true;
+
+        // NEW: flush Twilio audio buffer immediately
+        sendClear();
+
+        // NEW: store what the user said so it is handled right after current reply ends
+        callState.queuedUserDuringReply = transcript;
+        return;
       } else if (callState.isSpeaking) {
         // Ignore tiny interjections like "hi", "ok", etc.
         console.log('⚠️ Ignored tiny user interruption during TTS');
@@ -838,9 +868,9 @@ wss.on('connection', (ws, req) => {
       }
 
       // Debounce + cooldown:
-      // - at most one reply every ~2200ms (more patient)
+      // - at most one reply every ~900ms
       // - if multiple transcripts arrive, respond only to the latest
-      const minGap = 2200;
+      const minGap = 900;
 
       if (callState.pendingTimer) {
         clearTimeout(callState.pendingTimer);
