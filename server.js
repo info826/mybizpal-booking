@@ -479,6 +479,11 @@ wss.on('connection', (ws, req) => {
     // NEW: barge-in queue so we never lose the user's interrupt
     queuedUserDuringReply: null,
     drainingQueue: false,
+
+    // FIX: per-connection audio chunker (prevents cross-call buffer contamination)
+    _audioChunker: {
+      buf: Buffer.alloc(0),
+    },
   };
 
   // NEW: helper to immediately clear Twilio buffered audio
@@ -491,7 +496,8 @@ wss.on('connection', (ws, req) => {
   }
 
   // ---- Deepgram connection (STT) ----
-  // CHANGE: endpointing reduced from 1600 -> 800 to reduce finalization delay
+  // Keeping interim_results=false for stability (final-only path).
+  // endpointing reduced to reduce finalization delay.
   const dgUrl =
     'wss://api.deepgram.com/v1/listen' +
     '?encoding=mulaw' +
@@ -592,25 +598,6 @@ wss.on('connection', (ws, req) => {
     return overlapRatio >= 0.6;
   }
 
-  // ---- HELPER: detect "check-in hello?" when he's been quiet ----
-  // (Currently unused – we have disabled the special check-in reply behaviour.)
-  function isCheckInHello(text) {
-    const t = (text || '').trim().toLowerCase();
-    if (!t) return false;
-
-    const simpleHello =
-      t === 'hello' ||
-      t === 'hi' ||
-      t === 'hey' ||
-      t === 'you there' ||
-      t === 'are you there';
-    if (!simpleHello) return false;
-
-    const now = Date.now();
-    const sinceBot = now - (callState.timing.lastBotReplyAt || 0);
-    return sinceBot > 4000;
-  }
-
   // ---- HELPER: initial greeting (Gabriel speaks first) ----
   async function sendInitialGreeting() {
     if (callState.greeted) return;
@@ -629,7 +616,7 @@ wss.on('connection', (ws, req) => {
     callState.cancelSpeaking = false;
 
     try {
-      // CHANGE: stream TTS directly to Twilio (no buffering)
+      // Stream TTS directly to Twilio
       await synthesizeWithElevenLabsToTwilio(reply, ws, streamSid, callState);
     } catch (err) {
       console.error('Error during greeting TTS or sendAudio:', err);
@@ -654,7 +641,7 @@ wss.on('connection', (ws, req) => {
 
     // Prevent overlapping replies — ensure only one agent response at a time
     if (callState.replyInProgress) {
-      // NEW: do not lose the user's barge-in; keep the latest
+      // Do not lose the user's barge-in; keep the latest
       callState.queuedUserDuringReply = transcript;
       console.log('⏳ Reply in progress — queued new transcript');
       return;
@@ -682,8 +669,7 @@ wss.on('connection', (ws, req) => {
       const trimmedReply = (reply || '').trim();
       const nowTs = Date.now();
 
-      // If logic says "say nothing" (e.g. still capturing phone/email),
-      // then do not send any TTS at all — just stay quiet.
+      // If logic says "say nothing" then do not send any TTS at all — just stay quiet.
       if (!trimmedReply) {
         if (shouldEnd && !callState.hangupRequested) {
           callState.hangupRequested = true;
@@ -705,7 +691,7 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
-      // NEW: guard against accidental duplicate replies (same text within 2 seconds)
+      // Guard against accidental duplicate replies (same text within 2 seconds)
       if (
         trimmedReply === callState.lastBotText &&
         nowTs - (callState.timing.lastBotReplyAt || 0) < 2000
@@ -736,7 +722,7 @@ wss.on('connection', (ws, req) => {
       callState.cancelSpeaking = false;
 
       try {
-        // CHANGE: stream TTS directly to Twilio (no buffering)
+        // Stream TTS directly to Twilio
         await synthesizeWithElevenLabsToTwilio(trimmedReply, ws, streamSid, callState);
       } catch (err) {
         console.error('Error during TTS or sendAudio:', err);
@@ -773,7 +759,7 @@ wss.on('connection', (ws, req) => {
     } finally {
       callState.replyInProgress = false;
 
-      // NEW: if user barged in while we were talking, handle their latest line now
+      // If user barged in while we were talking, handle their latest line now
       if (!callState.drainingQueue && callState.queuedUserDuringReply) {
         callState.drainingQueue = true;
         const queued = callState.queuedUserDuringReply;
@@ -805,7 +791,6 @@ wss.on('connection', (ws, req) => {
       if (idleSinceBot < 5000) return;
 
       // NOTE: SILENCE NUDGES CURRENTLY DISABLED (timer below is commented out)
-      // Keeping function body for future use if we want a gentle hang-up.
       return;
     } catch (err) {
       console.error('Error in checkSilenceAndNudge:', err);
@@ -855,10 +840,10 @@ wss.on('connection', (ws, req) => {
         console.log('🚫 Barge-in detected – meaningful user interrupt');
         callState.cancelSpeaking = true;
 
-        // NEW: flush Twilio audio buffer immediately
+        // Flush Twilio audio buffer immediately
         sendClear();
 
-        // NEW: store what the user said so it is handled right after current reply ends
+        // Store what the user said so it is handled right after current reply ends
         callState.queuedUserDuringReply = transcript;
         return;
       } else if (callState.isSpeaking) {
@@ -1017,11 +1002,17 @@ wss.on('connection', (ws, req) => {
 
 // ---------- TTS + AUDIO HELPERS ----------
 
-// CHANGE: stream ElevenLabs audio directly to Twilio (no buffering whole audio first)
+// Stream ElevenLabs audio directly to Twilio (no full buffering)
+// FIX: uses per-connection callState._audioChunker (no global shared buffer)
 async function synthesizeWithElevenLabsToTwilio(text, ws, streamSid, callState) {
   if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
     console.warn('ElevenLabs config missing – cannot synthesize');
     return;
+  }
+
+  // Reset per-call chunk buffer to avoid leftovers from previous replies on the same call
+  if (callState && callState._audioChunker) {
+    callState._audioChunker.buf = Buffer.alloc(0);
   }
 
   // NOTE: increasing optimize_streaming_latency can reduce time-to-first-audio.
@@ -1052,12 +1043,7 @@ async function synthesizeWithElevenLabsToTwilio(text, ws, streamSid, callState) 
 
   // Clear any queued audio in Twilio before streaming new audio
   try {
-    ws.send(
-      JSON.stringify({
-        event: 'clear',
-        streamSid,
-      })
-    );
+    ws.send(JSON.stringify({ event: 'clear', streamSid }));
   } catch (err) {
     console.warn('Error sending clear event to Twilio:', err);
   }
@@ -1081,19 +1067,17 @@ async function synthesizeWithElevenLabsToTwilio(text, ws, streamSid, callState) 
   await flushAudioRemainder(ws, streamSid, callState);
 }
 
-// Internal buffer for chunking to 160-byte frames
-const _audioChunker = {
-  buf: Buffer.alloc(0),
-};
-
 function sendAudioChunkedToTwilio(ws, streamSid, incomingBuf, callState) {
   return new Promise((resolve) => {
     if (!incomingBuf || incomingBuf.length === 0) return resolve();
 
-    _audioChunker.buf = Buffer.concat([_audioChunker.buf, incomingBuf]);
+    const chunker = callState?._audioChunker;
+    if (!chunker) return resolve();
+
+    chunker.buf = Buffer.concat([chunker.buf, incomingBuf]);
 
     const chunkSize = 160; // 20ms at 8kHz ulaw
-    const frames = Math.floor(_audioChunker.buf.length / chunkSize);
+    const frames = Math.floor(chunker.buf.length / chunkSize);
 
     if (frames <= 0) return resolve();
 
@@ -1105,11 +1089,11 @@ function sendAudioChunkedToTwilio(ws, streamSid, incomingBuf, callState) {
 
       if (i >= frames) {
         // keep remainder in buffer
-        _audioChunker.buf = _audioChunker.buf.slice(frames * chunkSize);
+        chunker.buf = chunker.buf.slice(frames * chunkSize);
         return resolve();
       }
 
-      const frame = _audioChunker.buf.slice(i * chunkSize, (i + 1) * chunkSize);
+      const frame = chunker.buf.slice(i * chunkSize, (i + 1) * chunkSize);
       i += 1;
 
       const payload = frame.toString('base64');
@@ -1137,8 +1121,11 @@ function flushAudioRemainder(ws, streamSid, callState) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return resolve();
     if (callState?.cancelSpeaking) return resolve();
 
+    const chunker = callState?._audioChunker;
+    if (!chunker) return resolve();
+
     const chunkSize = 160;
-    const buf = _audioChunker.buf || Buffer.alloc(0);
+    const buf = chunker.buf || Buffer.alloc(0);
 
     if (buf.length === 0) return resolve();
 
@@ -1152,7 +1139,7 @@ function flushAudioRemainder(ws, streamSid, callState) {
       if (callState?.cancelSpeaking) return resolve();
 
       if (offset >= usableLength) {
-        _audioChunker.buf = buf.slice(usableLength);
+        chunker.buf = buf.slice(usableLength);
         return resolve();
       }
 
