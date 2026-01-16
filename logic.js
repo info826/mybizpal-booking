@@ -22,6 +22,16 @@ const openai = new OpenAI({
 
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 
+// Debug logging (keeps existing logs but avoids expensive JSON.stringify in production)
+const DEBUG_LOG = process.env.DEBUG_LOG === '1';
+
+// Model selection (lets you swap to a faster model without code edits)
+const MODEL_VOICE = process.env.MYBIZPAL_MODEL_VOICE || 'gpt-5.1';
+const MODEL_CHAT = process.env.MYBIZPAL_MODEL_CHAT || 'gpt-5.1';
+
+// Optional: disable rule-based fast replies (for testing)
+const DISABLE_RULE_BASED = process.env.MYBIZPAL_DISABLE_RULE_BASED === '1';
+
 // small helper for more natural variation
 function pickRandom(arr) {
   if (!arr || !arr.length) return '';
@@ -144,6 +154,15 @@ function snapshotSessionFromCall(callState) {
   };
 
   saveSessionForPhone(phoneKey, snapshot);
+}
+
+// Ensure the latest user utterance is persisted (fixes missing user turns in history on the main path)
+function ensureLastUserInHistory(history, safeUserText) {
+  if (!safeUserText) return;
+  const last = history[history.length - 1];
+  if (!last || last.role !== 'user' || last.content !== safeUserText) {
+    history.push({ role: 'user', content: safeUserText });
+  }
 }
 
 // ---------- VERBALISERS ----------
@@ -436,9 +455,6 @@ function buildFastConsultStep(callState, { isVoice }) {
 }
 
 // ---------- SPEED: COMPACT SYSTEM PROMPTS ----------
-// Big prompts slow things down. For VOICE we keep it very tight.
-// For CHAT we keep it moderate (still much smaller than before).
-
 function buildCompactContext(callState) {
   const booking = callState.booking || {};
   const behaviour = ensureBehaviourState(callState);
@@ -1196,8 +1212,11 @@ export async function handleTurn({ userText, callState }) {
     callState,
     timezone: TZ,
   });
-  console.log('BOOKING STATE AFTER NLU:', JSON.stringify(callState.booking, null, 2));
-  console.log('PROFILE AFTER NLU:', JSON.stringify(callState.profile, null, 2));
+
+  if (DEBUG_LOG) {
+    console.log('BOOKING STATE AFTER NLU:', JSON.stringify(callState.booking, null, 2));
+    console.log('PROFILE AFTER NLU:', JSON.stringify(callState.profile, null, 2));
+  }
 
   // ---------- INCOMPLETE / SUSPICIOUS PHONE SANITY CHECK ----------
   try {
@@ -1239,7 +1258,10 @@ export async function handleTurn({ userText, callState }) {
     callState,
     timezone: TZ,
   });
-  console.log('SYSTEM ACTION DECISION:', JSON.stringify(systemAction, null, 2));
+
+  if (DEBUG_LOG) {
+    console.log('SYSTEM ACTION DECISION:', JSON.stringify(systemAction, null, 2));
+  }
 
   if (systemAction && systemAction.intercept && systemAction.replyText) {
     history.push({ role: 'user', content: safeUserText });
@@ -1271,6 +1293,56 @@ export async function handleTurn({ userText, callState }) {
       history.push({ role: 'assistant', content: replyText });
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
+    }
+  }
+
+  // ---------- LATENCY KILLER: RULE-BASED FAST REPLIES (VOICE FIRST) ----------
+  // This avoids an OpenAI call for the most common conversational steps.
+  if (!DISABLE_RULE_BASED) {
+    const hasBookingIntent =
+      booking.intent === 'mybizpal_consultation' ||
+      behaviour.bookingReadiness === 'high' ||
+      strongBookNowRegex.test(userLower);
+
+    if (isVoice && hasBookingIntent) {
+      const replyText = buildFastConsultStep(callState, { isVoice });
+      history.push({ role: 'user', content: safeUserText });
+      history.push({ role: 'assistant', content: replyText });
+      snapshotSessionFromCall(callState);
+      return { text: replyText, shouldEnd: false };
+    }
+
+    if (isVoice) {
+      // If we still don't know business type, ask it directly (fast + consistent)
+      if (!profile.businessType) {
+        const replyText =
+          'Got you. What type of business is it — for example a clinic, salon, trades, dentist, garage or something else?';
+        history.push({ role: 'user', content: safeUserText });
+        history.push({ role: 'assistant', content: replyText });
+        snapshotSessionFromCall(callState);
+        return { text: replyText, shouldEnd: false };
+      }
+
+      // If we have business type but no pain point yet, ask the pain question (avoids OpenAI)
+      if (!behaviour.painPointsMentioned) {
+        const bt = profile.businessType ? profile.businessType.toLowerCase() : 'business';
+        const replyText =
+          `For your ${bt}, where do enquiries most often go wrong — missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
+        history.push({ role: 'user', content: safeUserText });
+        history.push({ role: 'assistant', content: replyText });
+        snapshotSessionFromCall(callState);
+        return { text: replyText, shouldEnd: false };
+      }
+
+      // If pain point is known, move to close
+      if (behaviour.painPointsMentioned && behaviour.bookingReadiness !== 'low') {
+        const replyText =
+          'Makes sense. Would a quick Zoom with one of the team help so you can see how it would work for you?';
+        history.push({ role: 'user', content: safeUserText });
+        history.push({ role: 'assistant', content: replyText });
+        snapshotSessionFromCall(callState);
+        return { text: replyText, shouldEnd: false };
+      }
     }
   }
 
@@ -1345,8 +1417,8 @@ export async function handleTurn({ userText, callState }) {
   const systemPrompt = isVoice ? buildSystemPromptVoice(callState) : buildSystemPromptChat(callState);
   const messages = [{ role: 'system', content: systemPrompt }];
 
-  // SPEED: fewer history messages
-  const recent = history.slice(-8);
+  // SPEED: fewer history messages (voice gets fewer than chat)
+  const recent = isVoice ? history.slice(-4) : history.slice(-8);
   for (const msg of recent) messages.push({ role: msg.role, content: msg.content });
   messages.push({ role: 'user', content: safeUserText });
 
@@ -1358,7 +1430,7 @@ export async function handleTurn({ userText, callState }) {
     const maxTokens = isVoice ? 80 : 140;
 
     botText = await callOpenAIWithTimeout({
-      model: 'gpt-5.1',
+      model: isVoice ? MODEL_VOICE : MODEL_CHAT,
       messages,
       maxTokens,
       temperature: isVoice ? 0.5 : 0.6,
@@ -1394,7 +1466,7 @@ export async function handleTurn({ userText, callState }) {
       slimMessages.push({ role: 'user', content: safeUserText });
 
       botText = await callOpenAIWithTimeout({
-        model: 'gpt-5.1',
+        model: MODEL_CHAT,
         messages: slimMessages,
         maxTokens: 110,
         temperature: 0.6,
@@ -1527,6 +1599,9 @@ export async function handleTurn({ userText, callState }) {
   if (!botText) {
     botText = buildContextualFallback({ safeUserText, profile });
   }
+
+  // FIX: persist the user message before the assistant on the main path (prevents history gaps)
+  ensureLastUserInHistory(history, safeUserText);
 
   history.push({ role: 'assistant', content: botText });
   snapshotSessionFromCall(callState);
