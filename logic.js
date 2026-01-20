@@ -71,6 +71,70 @@ function ensureProfile(callState) {
   return callState.profile;
 }
 
+// ---------- FLOW / LOOP GUARD (NEW) ----------
+function ensureFlowState(callState) {
+  if (!callState.flow) {
+    callState.flow = {
+      stage: 'discovery', // discovery | offer_zoom | collect_contact | pick_time | confirm_booking | done
+      lastAssistantNorm: null,
+      lastAssistantAt: 0,
+      repeatCount: 0,
+      lastQuestionTag: null,
+    };
+  }
+  return callState.flow;
+}
+
+function normForRepeat(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[^\w\s?]/g, '')
+    .trim();
+}
+
+function registerAssistantForLoopGuard(callState, text, tag = null) {
+  const flow = ensureFlowState(callState);
+  const now = Date.now();
+  const norm = normForRepeat(text);
+
+  if (flow.lastAssistantNorm && norm && flow.lastAssistantNorm === norm && now - flow.lastAssistantAt < 60000) {
+    flow.repeatCount = (flow.repeatCount || 0) + 1;
+  } else {
+    flow.repeatCount = 0;
+  }
+
+  flow.lastAssistantNorm = norm;
+  flow.lastAssistantAt = now;
+  if (tag) flow.lastQuestionTag = tag;
+}
+
+function wouldRepeat(callState, text) {
+  const flow = ensureFlowState(callState);
+  const now = Date.now();
+  const norm = normForRepeat(text);
+  if (!norm || !flow.lastAssistantNorm) return false;
+  if (norm !== flow.lastAssistantNorm) return false;
+  // within 60s and already repeated at least once -> block
+  return now - flow.lastAssistantAt < 60000 && (flow.repeatCount || 0) >= 1;
+}
+
+function lastAssistantOfferedZoom(lastAssistantText) {
+  if (!lastAssistantText) return false;
+  const t = String(lastAssistantText).toLowerCase();
+  return (
+    /\bzoom\b/.test(t) &&
+    (/\bquick\b/.test(t) || /\bshort\b/.test(t) || /\bwith one of the team\b/.test(t) || /\bsee how\b/.test(t))
+  );
+}
+
+function isCleanYes(text) {
+  if (!text) return false;
+  // avoid treating corrections as yes
+  if (hasStrongNoCorrection(text)) return false;
+  return yesInAnyLang(text);
+}
+
 // ---------- CHANNEL HELPER: VOICE vs CHAT ----------
 function getChannelInfo(callState) {
   const channel =
@@ -129,6 +193,9 @@ function loadSessionForCallIfNeeded(callState) {
     if (saved.history && Array.isArray(saved.history) && saved.history.length) {
       callState.history = [...saved.history];
     }
+    if (saved.flow) {
+      callState.flow = { ...(saved.flow || {}), ...(callState.flow || {}) };
+    }
   }
 
   callState._sessionLoadedForPhone = phoneKey;
@@ -144,12 +211,14 @@ function snapshotSessionFromCall(callState) {
   const booking = callState.booking || {};
   const capture = callState.capture || {};
   const profile = ensureProfile(callState);
+  const flow = ensureFlowState(callState);
 
   const snapshot = {
     booking,
     behaviour,
     capture,
     profile,
+    flow,
     history: history.slice(-40),
   };
 
@@ -243,6 +312,13 @@ function extractNameFromUtterance(text) {
     'both',
     'all',
     'excellent',
+    // NEW: stop “Correct / Right / Exactly” being captured as a name
+    'correct',
+    'right',
+    'exactly',
+    'affirmative',
+    'sure',
+    'certainly',
   ]);
 
   const explicitMatch = lower.match(
@@ -373,34 +449,29 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
   }
 }
 
-// ---------- CONTEXTUAL FALLBACK BUILDER ----------
-function buildContextualFallback({ safeUserText, profile }) {
-  const openers = [
-    'Hmm, I think I might have missed a bit there.',
-    'Okay, I got the gist, but let me just make sure I’m on the right track.',
-    'Alright, I may not have caught every detail there.',
-  ];
+// ---------- CONTEXTUAL FALLBACK BUILDER (UPDATED: no “safe generic”, always a productive next step) ----------
+function buildContextualFallback({ safeUserText, profile, callState }) {
+  const flow = ensureFlowState(callState);
 
-  const core =
-    ' In short, MyBizPal makes sure your calls and WhatsApp enquiries are answered, booked in and followed up without you having to chase them.';
+  // keep it action-oriented and stage-aware
+  if (flow.stage === 'offer_zoom') {
+    return 'Got it. Do you want me to book a quick Zoom so you can see it working, or do you just want a quick summary first?';
+  }
 
-  let followUp;
+  if (flow.stage === 'collect_contact') {
+    return 'Perfect. What’s the best email to send the calendar invite and Zoom link to?';
+  }
+
+  if (flow.stage === 'pick_time') {
+    return 'Nice. What day and roughly what time suits you for a 20–30 minute Zoom - tomorrow morning, tomorrow afternoon, or another weekday 9am to 5pm?';
+  }
 
   if (profile && profile.businessType) {
     const bt = profile.businessType.toLowerCase();
-    followUp =
-      ` For your ${bt}, tell me a bit more about where things tend to go wrong ` +
-      'with calls or bookings so I can be specific.';
-  } else {
-    const followUps = [
-      ' Tell me what kind of business you run and what’s frustrating you most about calls or enquiries at the moment.',
-      ' What sort of business are you running, and where do things feel the most manual or messy right now?',
-      ' To point you in the right direction, what type of business are you thinking about using this for, and what’s the main thing you’d love to fix around calls or bookings?',
-    ];
-    followUp = pickRandom(followUps);
+    return `For your ${bt}, what’s the biggest issue right now - missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
   }
 
-  return pickRandom(openers) + core + followUp;
+  return 'What type of business is it, and what’s the main headache you want to fix - missed calls, slow replies, or messy bookings?';
 }
 
 // ---------- FAST CONSULTATION STEP FOR HOT LEADS (VOICE) ----------
@@ -460,10 +531,15 @@ function buildCompactContext(callState) {
   const behaviour = ensureBehaviourState(callState);
   const profile = ensureProfile(callState);
   const { isChat, isVoice } = getChannelInfo(callState);
+  const flow = ensureFlowState(callState);
 
   return {
     isChat,
     isVoice,
+    flow: {
+      stage: flow.stage || 'discovery',
+      lastQuestionTag: flow.lastQuestionTag || 'none',
+    },
     booking: {
       intent: booking.intent || 'none',
       name: booking.name || 'unknown',
@@ -500,6 +576,8 @@ Voice rules (critical):
 Goal:
 - Understand their business + main headache with calls/WhatsApp/bookings.
 - If they want to proceed, book a short Zoom with a human adviser.
+Flow context (for you only):
+stage=${ctx.flow.stage}; lastQuestion=${ctx.flow.lastQuestionTag}.
 Booking context (for you only):
 intent=${ctx.booking.intent}; name=${ctx.booking.name}; phone=${ctx.booking.phone}; email=${ctx.booking.email}; time=${ctx.booking.timeSpoken}; awaitingConfirm=${ctx.booking.awaitingTimeConfirm}; earliest=${ctx.booking.earliestSlotSpoken}.
 Profile (for you only):
@@ -518,6 +596,8 @@ Chat rules:
 Goal:
 - Understand their business + main headache with calls/WhatsApp/bookings.
 - If they want to proceed, offer a short Zoom with a human adviser.
+Flow context (for you only):
+stage=${ctx.flow.stage}; lastQuestion=${ctx.flow.lastQuestionTag}.
 Booking context (for you only):
 intent=${ctx.booking.intent}; name=${ctx.booking.name}; phone=${ctx.booking.phone}; email=${ctx.booking.email}; time=${ctx.booking.timeSpoken}; awaitingConfirm=${ctx.booking.awaitingTimeConfirm}; earliest=${ctx.booking.earliestSlotSpoken}.
 Profile (for you only):
@@ -609,6 +689,7 @@ export async function handleTurn({ userText, callState }) {
   ensureHistory(callState);
   ensureBehaviourState(callState);
   ensureProfile(callState);
+  ensureFlowState(callState);
 
   if (!callState.booking) {
     callState.booking = {};
@@ -620,6 +701,7 @@ export async function handleTurn({ userText, callState }) {
   const behaviour = ensureBehaviourState(callState);
   const profile = ensureProfile(callState);
   const booking = callState.booking;
+  const flow = ensureFlowState(callState);
   const { isChat, isVoice } = getChannelInfo(callState);
 
   // Ensure we always have a phone on voice calls (needed for calendar / WhatsApp)
@@ -646,6 +728,7 @@ export async function handleTurn({ userText, callState }) {
 
   // last assistant message (for several heuristics later)
   const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
+  const lastAssistantText = lastAssistant ? lastAssistant.content : '';
 
   // CRITICAL FIXES: Proactive name & business capture on every message
   // BUT: do NOT auto-grab name on the very first VOICE message – it can be noisy ("I'm Ra...") and cause early jumps.
@@ -681,6 +764,24 @@ export async function handleTurn({ userText, callState }) {
     behaviour.decisionPower = 'decision-maker';
   }
 
+  // ---------- LOOP FIX: if last message was a Zoom offer and user says YES, progress immediately (NEW) ----------
+  if (lastAssistantOfferedZoom(lastAssistantText) && isCleanYes(safeUserText)) {
+    booking.intent = 'mybizpal_consultation';
+    if (behaviour.bookingReadiness === 'unknown' || behaviour.bookingReadiness === 'medium') {
+      behaviour.bookingReadiness = 'high';
+    }
+    if (behaviour.interestLevel === 'unknown') behaviour.interestLevel = 'high';
+    flow.stage = 'collect_contact';
+
+    const replyText = buildFastConsultStep(callState, { isVoice });
+
+    history.push({ role: 'user', content: safeUserText });
+    history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'collect_contact');
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
+
   // ---------- QUICK INTENT: BOOKING WITH MYBIZPAL ----------
   const earlyBookingRegex =
     /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting))\b/;
@@ -693,6 +794,7 @@ export async function handleTurn({ userText, callState }) {
     if (behaviour.bookingReadiness === 'unknown') {
       behaviour.bookingReadiness = 'high';
     }
+    flow.stage = flow.stage === 'discovery' ? 'collect_contact' : flow.stage;
   }
 
   // Strong "book me now" phrases (for fast path on voice)
@@ -729,6 +831,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'name_confirm');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -753,6 +856,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'email_retry');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -777,6 +881,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'phone_retry');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -811,6 +916,7 @@ export async function handleTurn({ userText, callState }) {
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'repeat_phone');
     snapshotSessionFromCall(callState);
     return { text: replyText, shouldEnd: false };
   }
@@ -823,6 +929,7 @@ export async function handleTurn({ userText, callState }) {
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'repeat_email');
     snapshotSessionFromCall(callState);
     return { text: replyText, shouldEnd: false };
   }
@@ -839,23 +946,24 @@ export async function handleTurn({ userText, callState }) {
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'repeat_details');
     snapshotSessionFromCall(callState);
     return { text: replyText, shouldEnd: false };
   }
 
   // ---------- USER SAYS THEY ALREADY ANSWERED ----------
   if (/\bi already (told you|answered that|said that)\b/.test(userLower)) {
-    const lastAssistantText = lastAssistant
+    const lastAssistantTextLower = lastAssistant
       ? lastAssistant.content.toLowerCase()
       : '';
     let replyText;
 
-    if (profile.businessType && /what (kind|type|sort) of business/.test(lastAssistantText)) {
+    if (profile.businessType && /what (kind|type|sort) of business/.test(lastAssistantTextLower)) {
       const nameLabel = booking.name || 'you';
       replyText = `You’re right, you did — my mistake there. I’ve got you down as ${nameLabel}, running a ${profile.businessType}. Let’s pick up from there and focus on how we can stop those missed calls and lost enquiries for you.`;
-    } else if (booking.email && /(email|e-mail|e mail)/.test(lastAssistantText)) {
+    } else if (booking.email && /(email|e-mail|e mail)/.test(lastAssistantTextLower)) {
       replyText = `You’re absolutely right, you already gave me your email. I’ve got **${booking.email}** noted, so we’re all set on that front — let’s carry on.`;
-    } else if (booking.phone && /(number|mobile|phone)/.test(lastAssistantText)) {
+    } else if (booking.phone && /(number|mobile|phone)/.test(lastAssistantTextLower)) {
       replyText = `You’re right, you already shared your number. I’ve got **${booking.phone}** saved, so we can move on.`;
     } else {
       const bits = [];
@@ -871,6 +979,7 @@ export async function handleTurn({ userText, callState }) {
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'already_answered');
     snapshotSessionFromCall(callState);
     return { text: replyText, shouldEnd: false };
   }
@@ -894,6 +1003,7 @@ export async function handleTurn({ userText, callState }) {
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'remember_me');
     snapshotSessionFromCall(callState);
     return { text: replyText, shouldEnd: false };
   }
@@ -922,6 +1032,7 @@ export async function handleTurn({ userText, callState }) {
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'what_do_you_do');
     snapshotSessionFromCall(callState);
     return { text: replyText, shouldEnd: false };
   }
@@ -935,6 +1046,7 @@ export async function handleTurn({ userText, callState }) {
 
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'automation');
     snapshotSessionFromCall(callState);
     return { text: replyText, shouldEnd: false };
   }
@@ -946,9 +1058,11 @@ export async function handleTurn({ userText, callState }) {
     strongBookNowRegex.test(userLower) &&
     history.some((m) => m.role === 'assistant')
   ) {
+    flow.stage = 'collect_contact';
     const replyText = buildFastConsultStep(callState, { isVoice });
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'collect_contact');
     snapshotSessionFromCall(callState);
     return { text: replyText, shouldEnd: false };
   }
@@ -994,6 +1108,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'name');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1005,6 +1120,7 @@ export async function handleTurn({ userText, callState }) {
       capture.nameAttempts += 1;
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'name_retry');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1039,6 +1155,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'phone');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1063,6 +1180,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'phone');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1091,6 +1209,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'phone_retry');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1119,6 +1238,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'email_none');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1170,6 +1290,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'email');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1198,6 +1319,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'email_retry');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1245,6 +1367,7 @@ export async function handleTurn({ userText, callState }) {
 
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'phone_sanity');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1266,6 +1389,7 @@ export async function handleTurn({ userText, callState }) {
   if (systemAction && systemAction.intercept && systemAction.replyText) {
     history.push({ role: 'user', content: safeUserText });
     history.push({ role: 'assistant', content: systemAction.replyText });
+    registerAssistantForLoopGuard(callState, systemAction.replyText, 'system_action');
     snapshotSessionFromCall(callState);
     return { text: systemAction.replyText, shouldEnd: false };
   }
@@ -1289,8 +1413,11 @@ export async function handleTurn({ userText, callState }) {
 
       const replyText = `Got you — sounds like it is a mix of those issues ${businessLabel}. MyBizPal makes sure calls and WhatsApps are answered and people are booked in instead of going cold.\n\nWould a short Zoom with one of the team be useful so you can see how that would look for you?`;
 
+      flow.stage = 'offer_zoom';
+
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'offer_zoom');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1305,9 +1432,11 @@ export async function handleTurn({ userText, callState }) {
       strongBookNowRegex.test(userLower);
 
     if (isVoice && hasBookingIntent) {
+      flow.stage = 'collect_contact';
       const replyText = buildFastConsultStep(callState, { isVoice });
       history.push({ role: 'user', content: safeUserText });
       history.push({ role: 'assistant', content: replyText });
+      registerAssistantForLoopGuard(callState, replyText, 'collect_contact');
       snapshotSessionFromCall(callState);
       return { text: replyText, shouldEnd: false };
     }
@@ -1315,33 +1444,56 @@ export async function handleTurn({ userText, callState }) {
     if (isVoice) {
       // If we still don't know business type, ask it directly (fast + consistent)
       if (!profile.businessType) {
+        flow.stage = 'discovery';
         const replyText =
           'Got you. What type of business is it — for example a clinic, salon, trades, dentist, garage or something else?';
         history.push({ role: 'user', content: safeUserText });
         history.push({ role: 'assistant', content: replyText });
+        registerAssistantForLoopGuard(callState, replyText, 'business_type');
         snapshotSessionFromCall(callState);
         return { text: replyText, shouldEnd: false };
       }
 
       // If we have business type but no pain point yet, ask the pain question (avoids OpenAI)
       if (!behaviour.painPointsMentioned) {
+        flow.stage = 'discovery';
         const bt = profile.businessType ? profile.businessType.toLowerCase() : 'business';
         const replyText =
           `For your ${bt}, where do enquiries most often go wrong — missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
         history.push({ role: 'user', content: safeUserText });
         history.push({ role: 'assistant', content: replyText });
+        registerAssistantForLoopGuard(callState, replyText, 'pain_point');
         snapshotSessionFromCall(callState);
         return { text: replyText, shouldEnd: false };
       }
 
-      // If pain point is known, move to close
+      // If pain point is known, move to close - but DO NOT LOOP (FIX)
       if (behaviour.painPointsMentioned && behaviour.bookingReadiness !== 'low') {
-        const replyText =
+        const offerText =
           'Makes sense. Would a quick Zoom with one of the team help so you can see how it would work for you?';
+
+        // if we’d repeat the offer, progress instead of looping
+        if (wouldRepeat(callState, offerText) || flow.lastQuestionTag === 'offer_zoom') {
+          booking.intent = booking.intent || 'mybizpal_consultation';
+          behaviour.bookingReadiness = behaviour.bookingReadiness === 'low' ? 'low' : 'high';
+          flow.stage = 'collect_contact';
+
+          const replyText = buildFastConsultStep(callState, { isVoice });
+
+          history.push({ role: 'user', content: safeUserText });
+          history.push({ role: 'assistant', content: replyText });
+          registerAssistantForLoopGuard(callState, replyText, 'collect_contact');
+          snapshotSessionFromCall(callState);
+          return { text: replyText, shouldEnd: false };
+        }
+
+        flow.stage = 'offer_zoom';
+
         history.push({ role: 'user', content: safeUserText });
-        history.push({ role: 'assistant', content: replyText });
+        history.push({ role: 'assistant', content: offerText });
+        registerAssistantForLoopGuard(callState, offerText, 'offer_zoom');
         snapshotSessionFromCall(callState);
-        return { text: replyText, shouldEnd: false };
+        return { text: offerText, shouldEnd: false };
       }
     }
   }
@@ -1477,9 +1629,9 @@ export async function handleTurn({ userText, callState }) {
     }
   }
 
-  // ---------- FALLBACK ----------
+  // ---------- FALLBACK (UPDATED: stage-aware, not generic) ----------
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText, profile });
+    botText = buildContextualFallback({ safeUserText, profile, callState });
   }
 
   // ---------- NORMALISATION ----------
@@ -1520,10 +1672,10 @@ export async function handleTurn({ userText, callState }) {
     if (profile.businessType) {
       const bt = profile.businessType.toLowerCase();
       botText =
-        `I think I might have missed a bit of that. For your ${bt}, could you tell me where things most often go wrong with calls or bookings?`;
+        `For your ${bt}, what’s the biggest issue right now — missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
     } else {
       botText =
-        'I think I might have missed a bit of that. Could you put it another way for me – maybe tell me what type of business you run and what you are trying to sort out around calls or bookings?';
+        'What type of business is it, and what’s the main headache — missed calls, slow replies, or messy bookings?';
     }
   }
 
@@ -1597,13 +1749,28 @@ export async function handleTurn({ userText, callState }) {
 
   // Final fallback
   if (!botText) {
-    botText = buildContextualFallback({ safeUserText, profile });
+    botText = buildContextualFallback({ safeUserText, profile, callState });
   }
 
   // FIX: persist the user message before the assistant on the main path (prevents history gaps)
   ensureLastUserInHistory(history, safeUserText);
 
+  // ---------- LOOP GUARD: if model repeats itself, force progress (NEW) ----------
+  if (wouldRepeat(callState, botText)) {
+    // if we are looping on a close/offer, progress into booking capture
+    if (lastAssistantOfferedZoom(lastAssistantText) || /\bzoom\b/i.test(botText)) {
+      booking.intent = booking.intent || 'mybizpal_consultation';
+      behaviour.bookingReadiness = behaviour.bookingReadiness === 'low' ? 'low' : 'high';
+      flow.stage = 'collect_contact';
+      botText = buildFastConsultStep(callState, { isVoice });
+    } else {
+      // otherwise, ask a crisp disambiguation question
+      botText = buildContextualFallback({ safeUserText, profile, callState });
+    }
+  }
+
   history.push({ role: 'assistant', content: botText });
+  registerAssistantForLoopGuard(callState, botText, flow.stage || null);
   snapshotSessionFromCall(callState);
 
   return { text: botText, shouldEnd: false };
