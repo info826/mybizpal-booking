@@ -72,15 +72,46 @@ function ensureBooking(callState) {
   return callState.booking;
 }
 
+// ✅ FIX: booking intent must mean "schedule/arrange a meeting", NOT "missed calls"
 function detectBookingIntent(text) {
-  const t = (text || '').toLowerCase();
+  const t = (text || '').toLowerCase().trim();
+  if (!t) return false;
+
+  // Negative guard: operational pain ≠ booking intent
+  // Examples from your logs: "missed calls", "no calls been answered"
   if (
-    /(book|schedule|set up|arrange|appointment|consultation|call|meeting|demo)/.test(
+    /\b(missed calls?|no calls?( been)? answered|calls? not answered|missed call|lost calls?)\b/.test(
+      t
+    )
+  ) {
+    return false;
+  }
+
+  // Strong scheduling verbs
+  if (/\b(book|schedule|set up|setup|arrange)\b/.test(t)) {
+    // If they mention a call/meeting/consultation alongside scheduling verbs, it’s booking intent
+    if (/\b(call|zoom|meeting|appointment|consultation|demo)\b/.test(t)) return true;
+
+    // Even without those nouns, "book/schedule" alone is often enough
+    return true;
+  }
+
+  // Noun-only booking intent, but must be explicit
+  if (
+    /\b(appointment|consultation|demo)\b/.test(t)
+  ) {
+    return true;
+  }
+
+  // "call/meeting" should only count if explicitly about setting one up
+  if (
+    /\b(book a call|schedule a call|set up a call|arrange a call|book a meeting|schedule a meeting|set up a meeting|arrange a meeting|zoom call)\b/.test(
       t
     )
   ) {
     return true;
   }
+
   return false;
 }
 
@@ -509,10 +540,7 @@ export async function updateBookingStateFromUtterance({
 
   // If user wants earliest and we don't yet have a candidate, look it up.
   // If they mentioned a day ("tomorrow", "next Tuesday"), use that as a starting point.
-  if (
-    booking.wantsEarliest &&
-    !booking.earliestSlotISO
-  ) {
+  if (booking.wantsEarliest && !booking.earliestSlotISO) {
     const fromISO = booking.timeISO || null;
 
     const earliest = await findEarliestAvailableSlot({
