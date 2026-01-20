@@ -32,7 +32,27 @@ const NAME_GREETING_STOP_WORDS = new Set([
   'sure',
   'fine',
   'perfect',
+
+  // ✅ Added: common confirmations / corrections that are NOT names
+  'correct',
+  'right',
+  'exactly',
+  'indeed',
+  'affirmative',
 ]);
+
+function isStopWordName(w) {
+  if (!w) return true;
+  const cleaned = String(w).toLowerCase().replace(/[^a-z]/g, '');
+  if (!cleaned) return true;
+  return NAME_GREETING_STOP_WORDS.has(cleaned);
+}
+
+function looksLikeNameToken(token) {
+  if (!token) return false;
+  // allow letters + apostrophe + hyphen (no numbers)
+  return /^[A-Za-z][A-Za-z'-]*$/.test(token);
+}
 
 export function extractName(text) {
   if (!text) return null;
@@ -48,8 +68,11 @@ export function extractName(text) {
   );
   if (m) {
     const full = m[1].trim().replace(/\s+/g, ' ');
-    // Use only first token as the name ("Gabriel" from "Gabriel De Ornelas")
-    return full.split(' ')[0];
+    const firstToken = (full.split(' ')[0] || '').replace(/[^A-Za-z'-]/g, '');
+    if (!firstToken) return null;
+    if (firstToken.length < 2) return null;
+    if (isStopWordName(firstToken)) return null;
+    return firstToken;
   }
 
   // 2) Short direct answer like: "Gabriel" or "Gabriel Soares"
@@ -57,11 +80,28 @@ export function extractName(text) {
 
   // Only treat it as a name if the caller basically ONLY said their name
   if (words.length <= 2) {
-    // Take the FIRST word as the first name
-    const candidate = words[0].replace(/[^A-Za-z'-]/g, '');
-    if (candidate.length >= 3 && candidate.length <= 20) {
-      return candidate;
+    const w1 = words[0] || '';
+    const w2 = words[1] || '';
+
+    // Must look like a name token (no "correct", no numbers, no punctuation-only)
+    const candidate = w1.replace(/[^A-Za-z'-]/g, '');
+    if (!candidate) return null;
+
+    // Hard filters
+    if (candidate.length < 3 || candidate.length > 20) return null;
+    if (!looksLikeNameToken(candidate)) return null;
+    if (isStopWordName(candidate)) return null;
+
+    // If they said two words, reject if the second is a confirmer/correction
+    // e.g. "correct yes", "yes correct", "right yeah"
+    if (w2) {
+      const w2Clean = w2.replace(/[^A-Za-z'-]/g, '');
+      if (w2Clean && isStopWordName(w2Clean)) return null;
+      // also reject patterns like "yes <name>" where first token is yes
+      if (isStopWordName(words[0])) return null;
     }
+
+    return candidate;
   }
 
   // Otherwise, don't guess
