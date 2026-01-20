@@ -98,7 +98,12 @@ function registerAssistantForLoopGuard(callState, text, tag = null) {
   const now = Date.now();
   const norm = normForRepeat(text);
 
-  if (flow.lastAssistantNorm && norm && flow.lastAssistantNorm === norm && now - flow.lastAssistantAt < 60000) {
+  if (
+    flow.lastAssistantNorm &&
+    norm &&
+    flow.lastAssistantNorm === norm &&
+    now - flow.lastAssistantAt < 60000
+  ) {
     flow.repeatCount = (flow.repeatCount || 0) + 1;
   } else {
     flow.repeatCount = 0;
@@ -124,7 +129,10 @@ function lastAssistantOfferedZoom(lastAssistantText) {
   const t = String(lastAssistantText).toLowerCase();
   return (
     /\bzoom\b/.test(t) &&
-    (/\bquick\b/.test(t) || /\bshort\b/.test(t) || /\bwith one of the team\b/.test(t) || /\bsee how\b/.test(t))
+    (/\bquick\b/.test(t) ||
+      /\bshort\b/.test(t) ||
+      /\bwith one of the team\b/.test(t) ||
+      /\bsee how\b/.test(t))
   );
 }
 
@@ -958,7 +966,10 @@ export async function handleTurn({ userText, callState }) {
       : '';
     let replyText;
 
-    if (profile.businessType && /what (kind|type|sort) of business/.test(lastAssistantTextLower)) {
+    if (
+      profile.businessType &&
+      /what (kind|type|sort) of business/.test(lastAssistantTextLower)
+    ) {
       const nameLabel = booking.name || 'you';
       replyText = `You’re right, you did — my mistake there. I’ve got you down as ${nameLabel}, running a ${profile.businessType}. Let’s pick up from there and focus on how we can stop those missed calls and lost enquiries for you.`;
     } else if (booking.email && /(email|e-mail|e mail)/.test(lastAssistantTextLower)) {
@@ -1079,7 +1090,11 @@ export async function handleTurn({ userText, callState }) {
     let candidate = null;
     if (cleaned) {
       const parts = cleaned.split(' ').filter(Boolean);
-      if (parts.length >= 2 && parts.length <= 12 && parts.every((p) => p.length === 1)) {
+      if (
+        parts.length >= 2 &&
+        parts.length <= 12 &&
+        parts.every((p) => p.length === 1)
+      ) {
         candidate = parts.join('');
       } else {
         candidate = extractNameFromUtterance(raw);
@@ -1475,7 +1490,8 @@ export async function handleTurn({ userText, callState }) {
         // if we’d repeat the offer, progress instead of looping
         if (wouldRepeat(callState, offerText) || flow.lastQuestionTag === 'offer_zoom') {
           booking.intent = booking.intent || 'mybizpal_consultation';
-          behaviour.bookingReadiness = behaviour.bookingReadiness === 'low' ? 'low' : 'high';
+          behaviour.bookingReadiness =
+            behaviour.bookingReadiness === 'low' ? 'low' : 'high';
           flow.stage = 'collect_contact';
 
           const replyText = buildFastConsultStep(callState, { isVoice });
@@ -1509,8 +1525,7 @@ export async function handleTurn({ userText, callState }) {
       behaviour.bookingReadiness === 'high';
 
     const mentionsEmail =
-      /\b(email|e-mail|e mail)\b/.test(lower) ||
-      /\bzoom link\b/.test(lower);
+      /\b(email|e-mail|e mail)\b/.test(lower) || /\bzoom link\b/.test(lower);
 
     const hardBookingPhrases =
       /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting))\b/.test(
@@ -1566,7 +1581,9 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- OPENAI CALL ----------
-  const systemPrompt = isVoice ? buildSystemPromptVoice(callState) : buildSystemPromptChat(callState);
+  const systemPrompt = isVoice
+    ? buildSystemPromptVoice(callState)
+    : buildSystemPromptChat(callState);
   const messages = [{ role: 'system', content: systemPrompt }];
 
   // SPEED: fewer history messages (voice gets fewer than chat)
@@ -1704,10 +1721,7 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // Remove "agent like me" hallucination
-  botText = botText.replace(
-    /agent like me/gi,
-    'a smart receptionist that sounds like this'
-  );
+  botText = botText.replace(/agent like me/gi, 'a smart receptionist that sounds like this');
 
   // Strip greeting if already greeted
   const alreadyGreeted =
