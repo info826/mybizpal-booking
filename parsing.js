@@ -23,6 +23,7 @@ const NAME_GREETING_STOP_WORDS = new Set([
   'afternoon',
   'evening',
   'please',
+  'mate',
   'would',
   'yes',
   'yeah',
@@ -78,30 +79,58 @@ export function extractName(text) {
   // 2) Short direct answer like: "Gabriel" or "Gabriel Soares"
   const words = normalised.split(' ').filter(Boolean);
 
+  // Stop confirmations / fillers being treated as names (extra-hard guard)
+  const NOT_NAMES = new Set([
+    'yes',
+    'yeah',
+    'yep',
+    'yup',
+    'ok',
+    'okay',
+    'sure',
+    'correct',
+    'right',
+    'exactly',
+    'affirmative',
+    'indeed',
+    'perfect',
+    'fine',
+    'thanks',
+    'thank',
+    'hello',
+    'hi',
+    'hey',
+  ]);
+
   // Only treat it as a name if the caller basically ONLY said their name
   if (words.length <= 2) {
-    const w1 = words[0] || '';
-    const w2 = words[1] || '';
+    const candidate = (words[0] || '').replace(/[^A-Za-z'-]/g, '');
+    const down = candidate.toLowerCase();
 
-    // Must look like a name token (no "correct", no numbers, no punctuation-only)
-    const candidate = w1.replace(/[^A-Za-z'-]/g, '');
-    if (!candidate) return null;
+    // Must be a plausible name token and not a filler/confirmation
+    if (
+      candidate &&
+      candidate.length >= 3 &&
+      candidate.length <= 20 &&
+      looksLikeNameToken(candidate) &&
+      !NOT_NAMES.has(down) &&
+      !isStopWordName(candidate)
+    ) {
+      // If they said two words, reject if the second is a confirmer/correction/filler
+      // e.g. "gabriel correct", "correct gabriel", "right yeah"
+      if (words.length === 2) {
+        const w2 = (words[1] || '').replace(/[^A-Za-z'-]/g, '');
+        const w2Down = w2.toLowerCase();
 
-    // Hard filters
-    if (candidate.length < 3 || candidate.length > 20) return null;
-    if (!looksLikeNameToken(candidate)) return null;
-    if (isStopWordName(candidate)) return null;
+        // "yes <name>" or "<name> yes" patterns -> do not treat as name-only
+        if (isStopWordName(words[0]) || NOT_NAMES.has(String(words[0]).toLowerCase())) return null;
+        if (w2 && (isStopWordName(w2) || NOT_NAMES.has(w2Down))) return null;
+      }
 
-    // If they said two words, reject if the second is a confirmer/correction
-    // e.g. "correct yes", "yes correct", "right yeah"
-    if (w2) {
-      const w2Clean = w2.replace(/[^A-Za-z'-]/g, '');
-      if (w2Clean && isStopWordName(w2Clean)) return null;
-      // also reject patterns like "yes <name>" where first token is yes
-      if (isStopWordName(words[0])) return null;
+      return candidate;
     }
 
-    return candidate;
+    return null;
   }
 
   // Otherwise, don't guess
