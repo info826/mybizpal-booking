@@ -25,6 +25,12 @@ import {
 import OpenAI from 'openai';
 
 const BUSINESS_TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Europe/London';
+const DEBUG_LOG = process.env.DEBUG_LOG === '1';
+
+// Model selection + latency guard for summaries
+const MODEL_SUMMARY = process.env.MYBIZPAL_MODEL_SUMMARY || 'gpt-5.1';
+const SUMMARY_ENABLED = process.env.MYBIZPAL_SUMMARY_ENABLED !== '0';
+const SUMMARY_TIMEOUT_MS = Number(process.env.MYBIZPAL_SUMMARY_TIMEOUT_MS || 2500);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -78,7 +84,6 @@ function detectBookingIntent(text) {
   if (!t) return false;
 
   // Negative guard: operational pain ≠ booking intent
-  // Examples from your logs: "missed calls", "no calls been answered"
   if (
     /\b(missed calls?|no calls?( been)? answered|calls? not answered|missed call|lost calls?)\b/.test(
       t
@@ -87,28 +92,26 @@ function detectBookingIntent(text) {
     return false;
   }
 
-  // Strong scheduling verbs
-  if (/\b(book|schedule|set up|setup|arrange)\b/.test(t)) {
-    // If they mention a call/meeting/consultation alongside scheduling verbs, it’s booking intent
-    if (/\b(call|zoom|meeting|appointment|consultation|demo)\b/.test(t)) return true;
-
-    // Even without those nouns, "book/schedule" alone is often enough
-    return true;
-  }
-
-  // Noun-only booking intent, but must be explicit
+  // Strong scheduling phrases (highest precision)
   if (
-    /\b(appointment|consultation|demo)\b/.test(t)
-  ) {
-    return true;
-  }
-
-  // "call/meeting" should only count if explicitly about setting one up
-  if (
-    /\b(book a call|schedule a call|set up a call|arrange a call|book a meeting|schedule a meeting|set up a meeting|arrange a meeting|zoom call)\b/.test(
+    /\b(book a call|schedule a call|set up a call|setup a call|arrange a call|book a meeting|schedule a meeting|set up a meeting|setup a meeting|arrange a meeting|zoom call)\b/.test(
       t
     )
   ) {
+    return true;
+  }
+
+  // Explicit noun-only booking intent
+  if (/\b(appointment|consultation|demo)\b/.test(t)) return true;
+
+  // Generic scheduling verbs
+  if (/\b(book|schedule|set up|setup|arrange)\b/.test(t)) {
+    // If they also mention the thing being booked, it's definitely booking intent
+    if (/\b(call|zoom|meeting|appointment|consultation|demo)\b/.test(t)) return true;
+
+    // Otherwise: allow, but only if not clearly about booking something else (e.g. "book a taxi")
+    if (/\b(taxi|flight|hotel|table|restaurant|uber)\b/.test(t)) return false;
+
     return true;
   }
 
@@ -118,9 +121,9 @@ function detectBookingIntent(text) {
 function detectEarliestRequest(text) {
   const t = (text || '').toLowerCase();
   return (
-    /earliest available|earliest|soonest|asap|as soon as possible|first available|next available/.test(
+    /earliest available|soonest|asap|as soon as possible|first available|next available/.test(
       t
-    )
+    ) || /\bearliest\b/.test(t)
   );
 }
 
@@ -223,6 +226,26 @@ function buildFallbackSummary(callState) {
   return `Smart summary (for Zoom prep):\n\n${paragraph}`;
 }
 
+async function callOpenAIWithTimeout({ model, messages, maxTokens, temperature, timeoutMs }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const completion = await openai.chat.completions.create(
+      {
+        model,
+        reasoning_effort: 'none',
+        temperature,
+        max_completion_tokens: maxTokens,
+        messages,
+      },
+      { signal: controller.signal }
+    );
+    return (completion.choices?.[0]?.message?.content || '').trim();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * New AI-powered smart summary.
  * Produces a SINGLE paragraph (no bullets) describing:
@@ -233,8 +256,9 @@ function buildFallbackSummary(callState) {
  */
 async function buildSmartSummary(callState) {
   try {
+    if (!SUMMARY_ENABLED) return buildFallbackSummary(callState);
+
     if (!openai.apiKey) {
-      // No API key available – fall back to simple paragraph summary
       return buildFallbackSummary(callState);
     }
 
@@ -304,36 +328,29 @@ BEHAVIOUR CONTEXT:
 ${behaviourContext}
 `.trim();
 
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-5.1',
-      reasoning_effort: 'none',
-      temperature: 0.4,
-      max_completion_tokens: 220,
+    const summary = await callOpenAIWithTimeout({
+      model: MODEL_SUMMARY,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
+      maxTokens: 220,
+      temperature: 0.4,
+      timeoutMs: SUMMARY_TIMEOUT_MS,
     });
 
-    let summary = completion.choices?.[0]?.message?.content?.trim() || '';
-
-    if (!summary) {
-      return buildFallbackSummary(callState);
-    }
+    if (!summary) return buildFallbackSummary(callState);
 
     // Hard safety: ensure it's not accidentally bullet-style
-    if (summary.includes('\n- ') || summary.startsWith('- ')) {
-      summary = summary
-        .replace(/\r/g, ' ')
-        .replace(/\n/g, ' ')
-        .replace(/\s+/g, ' ')
-        .replace(/^- /, '')
-        .trim();
-    }
+    const cleaned = summary
+      .replace(/\r/g, ' ')
+      .replace(/\n/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
 
-    return `Smart summary (for Zoom prep):\n\n${summary}`;
+    return `Smart summary (for Zoom prep):\n\n${cleaned}`;
   } catch (err) {
-    console.error('Error building smart summary:', err);
+    if (DEBUG_LOG) console.error('Error building smart summary:', err);
     return buildFallbackSummary(callState);
   }
 }
@@ -350,9 +367,8 @@ export async function updateBookingStateFromUtterance({
 }) {
   const booking = ensureBooking(callState);
   const raw = userText || '';
-  const lower = raw.toLowerCase();
 
-  // 🔧 If they clearly want to book again but we have an old confirmed booking,
+  // If they clearly want to book again but we have an old confirmed booking,
   // treat this as the start of a *new* booking flow.
   if (detectBookingIntent(raw) && booking.bookingConfirmed) {
     booking.bookingConfirmed = false;
@@ -409,15 +425,15 @@ export async function updateBookingStateFromUtterance({
   // Try parse natural date/time (user saying things like "tomorrow at 12", "Monday at midday")
   const nat = parseNaturalDate(raw, timezone);
   if (nat) {
-    // Giving a specific day/time is effectively agreeing to book
     if (!booking.intent || booking.intent === 'none') {
       booking.intent = 'wants_booking';
     }
 
     // Does this utterance contain an explicit date/day word?
-    const hasExplicitDate = /\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next|this|\d{1,2}(st|nd|rd|th))\b/i.test(
-      raw
-    );
+    const hasExplicitDate =
+      /\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next|this|\d{1,2}(st|nd|rd|th))\b/i.test(
+        raw
+      );
 
     if (booking.timeISO && !hasExplicitDate) {
       // We already have a date; user is probably just changing the time ("12", "half 12", etc.).
@@ -427,7 +443,6 @@ export async function updateBookingStateFromUtterance({
       booking.timeISO = prev.toISOString();
       booking.timeSpoken = formatSpokenDateTime(booking.timeISO, timezone);
     } else {
-      // New date + time request from user
       booking.timeISO = nat.iso;
       booking.timeSpoken = nat.spoken;
     }
@@ -470,7 +485,6 @@ export async function updateBookingStateFromUtterance({
           booking.awaitingTimeConfirm = false;
           booking.lastPromptWasTimeSuggestion = false;
 
-          // Implied booking intent
           if (!booking.intent || booking.intent === 'none') {
             booking.intent = 'wants_booking';
           }
@@ -479,7 +493,6 @@ export async function updateBookingStateFromUtterance({
     }
 
     // 2) If we already have a date, but this utterance is likely a time-only answer
-    //    like "nine o'clock", "9", "9am", "9:30", update the time on that date.
     if (booking.timeISO) {
       let hour = null;
       let minute = 0;
@@ -493,7 +506,7 @@ export async function updateBookingStateFromUtterance({
         if (ampm === 'pm' && hour < 12) hour += 12;
         if (ampm === 'am' && hour === 12) hour = 0;
       } else {
-        // Words pattern: "nine o'clock", "ten o clock"
+        // Words pattern: "nine o'clock"
         const wordMap = {
           one: 1,
           two: 2,
@@ -519,7 +532,6 @@ export async function updateBookingStateFromUtterance({
       }
 
       if (hour !== null) {
-        // Clamp roughly into business hours window (9–17)
         if (hour < 9) hour = 9;
         if (hour > 17) hour = 17;
 
@@ -530,7 +542,6 @@ export async function updateBookingStateFromUtterance({
         booking.awaitingTimeConfirm = false;
         booking.lastPromptWasTimeSuggestion = false;
 
-        // Implied booking intent
         if (!booking.intent || booking.intent === 'none') {
           booking.intent = 'wants_booking';
         }
@@ -539,7 +550,6 @@ export async function updateBookingStateFromUtterance({
   }
 
   // If user wants earliest and we don't yet have a candidate, look it up.
-  // If they mentioned a day ("tomorrow", "next Tuesday"), use that as a starting point.
   if (booking.wantsEarliest && !booking.earliestSlotISO) {
     const fromISO = booking.timeISO || null;
 
@@ -571,45 +581,48 @@ export async function handleSystemActionsFirst({ userText, callState }) {
   const booking = ensureBooking(callState);
   const t = (userText || '').trim().toLowerCase();
 
+  // Respect global opt-out / DNC flags if logic.js applied them
+  if (callState?.flags?.doNotContact) {
+    return { intercept: true, replyText: 'No problem. I won’t contact you again.' };
+  }
+
   const phone = booking.phone || callState.callerNumber || null;
   const email = booking.email || null;
   const name = booking.name || null;
-  const hasContact = !!phone || !!email; // allow booking if we have at least email
+
+  // Allow booking if we have at least one contact method
+  const hasContact = !!phone || !!email;
 
   // Time that we would book if confirmed
   const timeCandidate = booking.timeISO || booking.earliestSlotISO || null;
-  const isUserSpecifiedTime =
-    !!booking.timeISO && booking.timeISO === timeCandidate;
+  const isUserSpecifiedTime = !!booking.timeISO && booking.timeISO === timeCandidate;
 
-  // DEBUG SNAPSHOT: see why bookings do / do not trigger
-  console.log('BOOKING SNAPSHOT IN handleSystemActionsFirst:', {
-    name,
-    email,
-    phone,
-    hasContact,
-    timeISO: booking.timeISO,
-    earliestSlotISO: booking.earliestSlotISO,
-    timeCandidate,
-    isUserSpecifiedTime,
-    intent: booking.intent,
-    bookingConfirmed: booking.bookingConfirmed,
-    awaitingTimeConfirm: booking.awaitingTimeConfirm,
-  });
+  if (DEBUG_LOG) {
+    console.log('BOOKING SNAPSHOT IN handleSystemActionsFirst:', {
+      name,
+      email,
+      phone,
+      hasContact,
+      timeISO: booking.timeISO,
+      earliestSlotISO: booking.earliestSlotISO,
+      timeCandidate,
+      isUserSpecifiedTime,
+      intent: booking.intent,
+      bookingConfirmed: booking.bookingConfirmed,
+      awaitingTimeConfirm: booking.awaitingTimeConfirm,
+    });
+  }
 
   // ---------- EXISTING BOOKING DECISION FLOW (MOVE / CANCEL / KEEP) ----------
-
-  // If we previously asked what to do with an existing booking
   if (booking.pendingExistingAction === 'decide_move_keep_extra') {
     // CANCEL / MOVE TO NEW TIME
     if (/cancel|change|move|instead|earlier|rather/i.test(t) || yesInAnyLang(t)) {
       if (!timeCandidate) {
-        // No new time to move to – just cancel and ask for a new time
         try {
           if (booking.existingEventId) {
             await cancelEventById(booking.existingEventId);
           }
 
-          // 🔔 Send cancellation WhatsApp/SMS if we know the time & phone
           const phoneForNotice = phone;
           if (phoneForNotice && booking.existingEventStartISO) {
             try {
@@ -619,22 +632,18 @@ export async function handleSystemActionsFirst({ userText, callState }) {
                 name,
               });
             } catch (err) {
-              console.warn(
-                'Error sending cancellation notice:',
-                err?.message || err
-              );
+              if (DEBUG_LOG) {
+                console.warn('Error sending cancellation notice:', err?.message || err);
+              }
             }
           }
         } catch (err) {
-          console.error('Error cancelling existing event (no new time):', err);
+          if (DEBUG_LOG) console.error('Error cancelling existing event (no new time):', err);
         }
 
         const existingSpoken =
           booking.existingEventStartISO
-            ? formatSpokenDateTime(
-                booking.existingEventStartISO,
-                BUSINESS_TIMEZONE
-              )
+            ? formatSpokenDateTime(booking.existingEventStartISO, BUSINESS_TIMEZONE)
             : 'your previous session';
 
         booking.pendingExistingAction = null;
@@ -651,10 +660,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       // We have a timeCandidate → move booking to this new time
       const existingSpoken =
         booking.existingEventStartISO
-          ? formatSpokenDateTime(
-              booking.existingEventStartISO,
-              BUSINESS_TIMEZONE
-            )
+          ? formatSpokenDateTime(booking.existingEventStartISO, BUSINESS_TIMEZONE)
           : 'your previous session';
       const newSpoken = formatSpokenDateTime(timeCandidate, BUSINESS_TIMEZONE);
 
@@ -679,16 +685,10 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
         const startISO = event.start?.dateTime || timeCandidate;
 
-        // Standard confirmation (card + reminders) – only if we have a phone
         if (phone) {
-          await sendConfirmationAndReminders({
-            to: phone,
-            startISO,
-            name,
-          });
+          await sendConfirmationAndReminders({ to: phone, startISO, name });
         }
 
-        // 🔔 Extra reschedule notice (short plain text)
         if (phone && oldStartISO) {
           try {
             await sendRescheduleNotice({
@@ -698,10 +698,9 @@ export async function handleSystemActionsFirst({ userText, callState }) {
               name,
             });
           } catch (err) {
-            console.warn(
-              'Error sending reschedule notice:',
-              err?.message || err
-            );
+            if (DEBUG_LOG) {
+              console.warn('Error sending reschedule notice:', err?.message || err);
+            }
           }
         }
 
@@ -711,26 +710,19 @@ export async function handleSystemActionsFirst({ userText, callState }) {
         booking.lastPromptWasTimeSuggestion = false;
         booking.needEmailBeforeBooking = false;
         booking.timeISO = startISO;
-        booking.timeSpoken = formatSpokenDateTime(
-          startISO,
-          BUSINESS_TIMEZONE
-        );
+        booking.timeSpoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
         booking.pendingExistingAction = null;
         booking.existingEventId = null;
         booking.existingEventStartISO = null;
         booking.informedAboutExistingBooking = true;
 
-        const replyText =
-          name
-            ? `All sorted, ${name} — I’ve cancelled your previous booking for ${existingSpoken} and moved it to ${newSpoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
-            : `All sorted — I’ve cancelled your previous booking for ${existingSpoken} and moved it to ${newSpoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
+        const replyText = name
+          ? `All sorted, ${name} — I’ve cancelled your previous booking for ${existingSpoken} and moved it to ${newSpoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`
+          : `All sorted — I’ve cancelled your previous booking for ${existingSpoken} and moved it to ${newSpoken}. You’ll get a message with the Zoom details in a moment. Anything else I can help with today?`;
 
-        return {
-          intercept: true,
-          replyText,
-        };
+        return { intercept: true, replyText };
       } catch (err) {
-        console.error('Error moving existing booking to new time:', err);
+        if (DEBUG_LOG) console.error('Error moving existing booking to new time:', err);
         booking.pendingExistingAction = null;
         return {
           intercept: true,
@@ -740,14 +732,11 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       }
     }
 
-    // KEEP EXISTING TIME (no extra)
+    // KEEP EXISTING TIME
     if (/keep|leave it|as it is|don'?t change/i.test(t) || noInAnyLang(t)) {
       const existingSpoken =
         booking.existingEventStartISO
-          ? formatSpokenDateTime(
-              booking.existingEventStartISO,
-              BUSINESS_TIMEZONE
-            )
+          ? formatSpokenDateTime(booking.existingEventStartISO, BUSINESS_TIMEZONE)
           : 'your booked session';
 
       booking.pendingExistingAction = null;
@@ -758,69 +747,45 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       booking.awaitingTimeConfirm = false;
       booking.lastPromptWasTimeSuggestion = false;
 
-      const replyText =
-        name
-          ? `No problem, ${name} — we’ll keep your booking at ${existingSpoken} just as it is. If you’d like to add another session at a different time, just let me know.`
-          : `No problem — we’ll keep your booking at ${existingSpoken} just as it is. If you’d like to add another session at a different time, just let me know.`;
+      const replyText = name
+        ? `No problem, ${name} — we’ll keep your booking at ${existingSpoken} just as it is. If you’d like to add another session at a different time, just let me know.`
+        : `No problem — we’ll keep your booking at ${existingSpoken} just as it is. If you’d like to add another session at a different time, just let me know.`;
 
-      return {
-        intercept: true,
-        replyText,
-      };
+      return { intercept: true, replyText };
     }
 
-    // If they say something else, let GPT handle it but keep the state
     return { intercept: false };
   }
 
   // ---------- MAIN BOOKING FLOW ----------
-
-  // A) If we already have a CONFIRMED time candidate + some contact,
-  // and no booking yet
-  if (
-    timeCandidate &&
-    hasContact &&
-    !booking.bookingConfirmed &&
-    !booking.awaitingTimeConfirm
-  ) {
-    console.log('MAIN BOOKING FLOW TRIGGERED with:', {
-      name,
-      email,
-      phone,
-      timeCandidate,
-      isUserSpecifiedTime,
-    });
+  if (timeCandidate && hasContact && !booking.bookingConfirmed && !booking.awaitingTimeConfirm) {
+    if (DEBUG_LOG) {
+      console.log('MAIN BOOKING FLOW TRIGGERED with:', {
+        name,
+        email,
+        phone,
+        timeCandidate,
+        isUserSpecifiedTime,
+      });
+    }
 
     // If we have a phone but email is missing → ask once, then wait for it
     if (phone && !email) {
       if (!booking.needEmailBeforeBooking) {
         booking.needEmailBeforeBooking = true;
-        const replyText =
-          'Brilliant — before I lock that in, what’s your best email address?';
         return {
           intercept: true,
-          replyText,
+          replyText: 'Brilliant — before I lock that in, what’s your best email address?',
         };
       }
-      // We've already asked for email; let GPT handle the conversation while
-      // the email-capture logic does its thing.
       return { intercept: false };
     }
 
-    // If we somehow have no phone AND no email, we bail out (shouldn’t happen because of hasContact)
-    if (!phone && !email) {
-      console.log(
-        'MAIN BOOKING FLOW aborted: no phone or email, despite hasContact = true'
-      );
-      return { intercept: false };
-    }
-
-    // 🔍 Check if this caller already has a booking
+    // Existing booking check
     try {
       const existing = await findExistingBooking({ phone, email });
       if (existing && existing.id) {
-        const existingStartISO =
-          existing.start?.dateTime || existing.start?.date || null;
+        const existingStartISO = existing.start?.dateTime || existing.start?.date || null;
         const existingSpoken = existingStartISO
           ? formatSpokenDateTime(existingStartISO, BUSINESS_TIMEZONE)
           : 'a previously booked session';
@@ -829,8 +794,6 @@ export async function handleSystemActionsFirst({ userText, callState }) {
         booking.existingEventId = existing.id;
         booking.existingEventStartISO = existingStartISO;
 
-        // If the requested time is exactly the same as the existing one,
-        // just confirm it instead of creating a new event.
         if (existingStartISO && timeCandidate && isSameMinute(existingStartISO, timeCandidate)) {
           booking.bookingConfirmed = true;
           booking.lastEventId = existing.id;
@@ -838,48 +801,34 @@ export async function handleSystemActionsFirst({ userText, callState }) {
           booking.timeSpoken = existingSpoken;
           booking.informedAboutExistingBooking = true;
 
-          const replyText =
-            name
-              ? `You’re already booked in for ${existingSpoken}, ${name}, so you’re all set. Anything else I can help with today?`
-              : `You’re already booked in for ${existingSpoken}, so you’re all set. Anything else I can help with today?`;
+          const replyText = name
+            ? `You’re already booked in for ${existingSpoken}, ${name}, so you’re all set. Anything else I can help with today?`
+            : `You’re already booked in for ${existingSpoken}, so you’re all set. Anything else I can help with today?`;
 
           return { intercept: true, replyText };
         }
 
-        // Otherwise, ask clearly what they want to do with the existing booking.
-        const newSpoken = formatSpokenDateTime(
-          timeCandidate,
-          BUSINESS_TIMEZONE
-        );
+        const newSpoken = formatSpokenDateTime(timeCandidate, BUSINESS_TIMEZONE);
 
         booking.pendingExistingAction = 'decide_move_keep_extra';
         booking.informedAboutExistingBooking = true;
 
-        const replyText =
-          `I can see you already have a MyBizPal session booked for ${existingSpoken}. ` +
-          `Do you want me to move that booking to ${newSpoken}, keep it where it is, or are you trying to book an extra session as well?`;
-
         return {
           intercept: true,
-          replyText,
+          replyText:
+            `I can see you already have a MyBizPal session booked for ${existingSpoken}. ` +
+            `Do you want me to move that booking to ${newSpoken}, keep it where it is, or are you trying to book an extra session as well?`,
         };
       }
     } catch (e) {
-      console.warn('Existing booking check failed:', e?.message || e);
-      // If this fails, we just carry on and try to create a new event.
+      if (DEBUG_LOG) console.warn('Existing booking check failed:', e?.message || e);
     }
 
-    // 🔍 Check for conflicts ONLY for system-suggested times.
-    // If the caller explicitly asked for a time (booking.timeISO),
-    // we trust that and avoid auto-moving them to "next available".
+    // Conflict checks ONLY for system-suggested times.
     if (!isUserSpecifiedTime) {
-      const conflict = await hasConflict({
-        startISO: timeCandidate,
-        durationMin: 30,
-      });
+      const conflict = await hasConflict({ startISO: timeCandidate, durationMin: 30 });
 
       if (conflict) {
-        // Try to find the next available 30-min slot starting from this time
         const nextSlot = await findEarliestAvailableSlot({
           timezone: BUSINESS_TIMEZONE,
           durationMinutes: 30,
@@ -892,21 +841,17 @@ export async function handleSystemActionsFirst({ userText, callState }) {
           booking.timeSpoken = null;
           booking.earliestSlotISO = nextSlot.iso;
           booking.earliestSlotSpoken =
-            nextSlot.spoken ||
-            formatSpokenDateTime(nextSlot.iso, BUSINESS_TIMEZONE);
+            nextSlot.spoken || formatSpokenDateTime(nextSlot.iso, BUSINESS_TIMEZONE);
           booking.awaitingTimeConfirm = true;
           booking.lastPromptWasTimeSuggestion = true;
           booking.needEmailBeforeBooking = false;
 
-          const replyText = `It looks like that exact time has just been taken. The next available slot I can see is ${booking.earliestSlotSpoken}. Would you like me to book you in for then?`;
-
           return {
             intercept: true,
-            replyText,
+            replyText: `It looks like that exact time has just been taken. The next available slot I can see is ${booking.earliestSlotSpoken}. Would you like me to book you in for then?`,
           };
         }
 
-        // No free slots found at all
         booking.timeISO = null;
         booking.timeSpoken = null;
         booking.earliestSlotISO = null;
@@ -915,19 +860,16 @@ export async function handleSystemActionsFirst({ userText, callState }) {
         booking.lastPromptWasTimeSuggestion = false;
         booking.needEmailBeforeBooking = false;
 
-        const replyText =
-          "It looks like we’re fully booked around that time. What other day and time would work for you (Monday to Friday, 9 to 5 UK time)?";
-
         return {
           intercept: true,
-          replyText,
+          replyText:
+            'It looks like we’re fully booked around that time. What other day and time would work for you (Monday to Friday, 9 to 5 UK time)?',
         };
       }
     }
 
-    // We have time + at least one contact and either no conflict or we trust user time → create booking now
+    // Create booking
     try {
-      // Build smart summary from call history for the calendar notes
       const summaryNotes = await buildSmartSummary(callState);
       booking.summaryNotes = summaryNotes || null;
 
@@ -942,13 +884,8 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
       const startISO = event.start?.dateTime || timeCandidate;
 
-      // Send WhatsApp/SMS confirmation only if we have a phone
       if (phone) {
-        await sendConfirmationAndReminders({
-          to: phone,
-          startISO,
-          name,
-        });
+        await sendConfirmationAndReminders({ to: phone, startISO, name });
       }
 
       booking.bookingConfirmed = true;
@@ -960,19 +897,15 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       booking.timeSpoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
 
       const spoken = booking.timeSpoken;
-      const replyText =
-        name
-          ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get the Zoom details shortly. Anything else I can help with today?`
-          : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get the Zoom details shortly. Anything else I can help with today?`;
+      const replyText = name
+        ? `Brilliant ${name} — I’ve got you booked in for ${spoken}. You’ll get the Zoom details shortly. Anything else I can help with today?`
+        : `Brilliant — I’ve got that booked in for ${spoken}. You’ll get the Zoom details shortly. Anything else I can help with today?`;
 
-      console.log('BOOKING SUCCESSFULLY CREATED with event id:', event.id);
+      if (DEBUG_LOG) console.log('BOOKING SUCCESSFULLY CREATED with event id:', event.id);
 
-      return {
-        intercept: true,
-        replyText,
-      };
+      return { intercept: true, replyText };
     } catch (err) {
-      console.error('Booking error after email capture:', err);
+      if (DEBUG_LOG) console.error('Booking error after email capture:', err);
       booking.awaitingTimeConfirm = false;
       booking.lastPromptWasTimeSuggestion = false;
       booking.needEmailBeforeBooking = false;
@@ -984,25 +917,21 @@ export async function handleSystemActionsFirst({ userText, callState }) {
     }
   }
 
-  // B) If we are waiting on a yes/no for one of OUR suggested times (earliest slot)
+  // B) If we are waiting on a yes/no for one of OUR suggested times
   if (
     booking.awaitingTimeConfirm &&
     booking.lastPromptWasTimeSuggestion &&
     (yesInAnyLang(t) || noInAnyLang(t))
   ) {
     if (yesInAnyLang(t)) {
-      // Decide which time to use as the confirmed slot
       const timeISO = booking.timeISO || booking.earliestSlotISO || null;
 
       if (!timeISO) {
-        // No actual time stored; reset and let GPT re-ask
         booking.awaitingTimeConfirm = false;
         booking.lastPromptWasTimeSuggestion = false;
         return { intercept: false };
       }
 
-      // Store this as the confirmed time; booking of the event
-      // will be handled by the "A" block once we have contact details.
       booking.timeISO = timeISO;
       booking.timeSpoken =
         booking.timeSpoken ||
@@ -1012,8 +941,9 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       booking.lastPromptWasTimeSuggestion = false;
 
       return { intercept: false };
-    } else if (noInAnyLang(t)) {
-      // User rejected the suggested time
+    }
+
+    if (noInAnyLang(t)) {
       booking.awaitingTimeConfirm = false;
       booking.timeISO = null;
       booking.timeSpoken = null;
@@ -1022,16 +952,13 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       booking.lastPromptWasTimeSuggestion = false;
       booking.needEmailBeforeBooking = false;
 
-      const replyText =
-        'No worries at all — what day and time would work better for you (Monday to Friday, 9 to 5 UK time)?';
-
       return {
         intercept: true,
-        replyText,
+        replyText:
+          'No worries at all — what day and time would work better for you (Monday to Friday, 9 to 5 UK time)?',
       };
     }
   }
 
-  // No special system action needed
   return { intercept: false };
 }
