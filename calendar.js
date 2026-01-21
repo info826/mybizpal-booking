@@ -11,7 +11,7 @@ import {
   setMinutes,
   setSeconds,
 } from 'date-fns';
-import { formatInTimeZone } from 'date-fns-tz';
+import { formatInTimeZone, utcToZonedTime, zonedTimeToUtc } from 'date-fns-tz';
 
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 const CALENDAR_ID =
@@ -48,9 +48,9 @@ export function formatSpokenDateTime(iso, timezone = TZ) {
   const date = formatInTimeZone(d, timezone, 'd');
   const month = formatInTimeZone(d, timezone, 'LLLL');
 
-  const mins = formatInTimeZone(d, timezone, 'mm');   // "00", "30", etc.
-  const hour = formatInTimeZone(d, timezone, 'h');    // "1"–"12"
-  const mer = formatInTimeZone(d, timezone, 'a');     // "AM" / "PM"
+  const mins = formatInTimeZone(d, timezone, 'mm'); // "00", "30", etc.
+  const hour = formatInTimeZone(d, timezone, 'h'); // "1"–"12"
+  const mer = formatInTimeZone(d, timezone, 'a'); // "AM" / "PM"
 
   let time;
   if (mins === '00') {
@@ -122,38 +122,71 @@ function safeCallerName(rawName) {
   return raw;
 }
 
+function normalizePhoneDigits(phone) {
+  if (!phone) return '';
+  return String(phone).replace(/[^\d]/g, '');
+}
+
 /**
- * Clamp a proposed start time into business hours:
+ * Clamp a proposed start time into business hours in the BUSINESS timezone:
  * - Mon–Fri only (day is left as-is; earliest-slot logic already avoids weekends)
  * - 09:00–17:00, 30-minute increments (last valid start 16:30)
- * If time is outside this window, we snap it back into the window
- * on the SAME day. This is a safety net (e.g. fixing a 06:00 bug to 09:00).
+ *
+ * IMPORTANT: this clamps in TZ (not server-local time), then converts back to UTC ISO.
  */
-function clampToBusinessHours(startISO) {
-  const d = new Date(startISO);
+function clampToBusinessHours(startISO, timezone = TZ) {
+  // If date-fns-tz helpers are not available for some reason, fall back to old behaviour
+  try {
+    const utcDate = new Date(startISO);
+    const zoned = utcToZonedTime(utcDate, timezone);
 
-  // Only clamp hours/mins; leave the date alone.
-  let hours = d.getHours();
-  let mins = d.getMinutes();
+    // Only clamp hours/mins; leave date alone (in local business TZ).
+    let hours = zoned.getHours();
+    let mins = zoned.getMinutes();
 
-  if (hours < 9) {
-    hours = 9;
-    mins = 0;
-  } else if (hours > 16 || (hours === 16 && mins > 30)) {
-    hours = 16;
-    mins = 30;
-  } else {
-    // Snap minutes to nearest 0 or 30 to keep clean slots
-    if (mins < 15) mins = 0;
-    else if (mins < 45) mins = 30;
-    else {
-      hours += 1;
+    if (hours < 9) {
+      hours = 9;
       mins = 0;
+    } else if (hours > 16 || (hours === 16 && mins > 30)) {
+      hours = 16;
+      mins = 30;
+    } else {
+      // Snap minutes to nearest 0 or 30 to keep clean slots
+      if (mins < 15) mins = 0;
+      else if (mins < 45) mins = 30;
+      else {
+        hours += 1;
+        mins = 0;
+      }
     }
-  }
 
-  d.setHours(hours, mins, 0, 0);
-  return d.toISOString();
+    zoned.setHours(hours, mins, 0, 0);
+
+    const backToUtc = zonedTimeToUtc(zoned, timezone);
+    return backToUtc.toISOString();
+  } catch (e) {
+    const d = new Date(startISO);
+    let hours = d.getHours();
+    let mins = d.getMinutes();
+
+    if (hours < 9) {
+      hours = 9;
+      mins = 0;
+    } else if (hours > 16 || (hours === 16 && mins > 30)) {
+      hours = 16;
+      mins = 30;
+    } else {
+      if (mins < 15) mins = 0;
+      else if (mins < 45) mins = 30;
+      else {
+        hours += 1;
+        mins = 0;
+      }
+    }
+
+    d.setHours(hours, mins, 0, 0);
+    return d.toISOString();
+  }
 }
 
 // ---------- EARLIEST AVAILABLE SLOT ----------
@@ -282,7 +315,9 @@ export async function findEarliestAvailableSlot({
 export async function hasConflict({ startISO, durationMin = 30 }) {
   await ensureGoogleAuth();
   const start = new Date(startISO).toISOString();
-  const end = new Date(new Date(startISO).getTime() + durationMin * 60000).toISOString();
+  const end = new Date(
+    new Date(startISO).getTime() + durationMin * 60000
+  ).toISOString();
 
   const r = await calendar.events.list({
     calendarId: CALENDAR_ID,
@@ -297,11 +332,58 @@ export async function hasConflict({ startISO, durationMin = 30 }) {
 
 // ---------- FIND & CANCEL EXISTING BOOKINGS ----------
 
+/**
+ * Finds an upcoming MyBizPal booking for this caller.
+ * Improvement:
+ * - Uses privateExtendedProperty lookups when possible (fast + accurate).
+ * - Falls back to scanning event list + matching by tag + normalized phone/email.
+ */
 export async function findExistingBooking({ phone, email }) {
   await ensureGoogleAuth();
+
   const nowISO = new Date().toISOString();
   const untilISO = addDays(new Date(), 60).toISOString();
 
+  const tag = 'booked by mybizpal (gabriel)';
+  const wantPhone = phone ? String(phone).trim() : '';
+  const wantEmail = email ? String(email).trim().toLowerCase() : '';
+  const wantDigits = normalizePhoneDigits(wantPhone);
+
+  // 1) Fast path: search by extendedProperties (most reliable)
+  // Google Calendar supports privateExtendedProperty filters.
+  try {
+    const privateExtendedProperty = [];
+    if (wantPhone) privateExtendedProperty.push(`mybizpal_phone=${wantPhone}`);
+    if (wantEmail) privateExtendedProperty.push(`mybizpal_email=${wantEmail}`);
+
+    if (privateExtendedProperty.length) {
+      const r1 = await calendar.events.list({
+        calendarId: CALENDAR_ID,
+        timeMin: nowISO,
+        timeMax: untilISO,
+        singleEvents: true,
+        orderBy: 'startTime',
+        maxResults: 10,
+        privateExtendedProperty,
+      });
+
+      const items1 = r1.data.items || [];
+      const found1 =
+        items1.find((ev) => {
+          const desc = (ev.description || '').toLowerCase();
+          const sum = (ev.summary || '').toLowerCase();
+          const hasTag = desc.includes(tag);
+          const isOurMeeting = sum.includes('mybizpal');
+          return hasTag && isOurMeeting;
+        }) || null;
+
+      if (found1) return found1;
+    }
+  } catch (e) {
+    console.warn('Extended property search failed, falling back:', e?.message || e);
+  }
+
+  // 2) Fallback: scan next events and match by tag + contact in description
   const r = await calendar.events.list({
     calendarId: CALENDAR_ID,
     timeMin: nowISO,
@@ -314,15 +396,21 @@ export async function findExistingBooking({ phone, email }) {
   const items = r.data.items || [];
   return (
     items.find((ev) => {
-      const desc = (ev.description || '').toLowerCase();
+      const descRaw = ev.description || '';
+      const desc = descRaw.toLowerCase();
       const sum = (ev.summary || '').toLowerCase();
-      const tag = 'booked by mybizpal (gabriel)';
+
       const hasTag = desc.includes(tag);
-      const hasContact =
-        (phone && desc.includes(phone.replace('+', ''))) ||
-        (email && desc.includes((email || '').toLowerCase()));
       const isOurMeeting = sum.includes('mybizpal');
-      return hasTag && isOurMeeting && hasContact;
+
+      const descDigits = normalizePhoneDigits(descRaw);
+      const phoneMatches =
+        wantDigits && descDigits && descDigits.includes(wantDigits);
+
+      const emailMatches =
+        wantEmail && desc.includes(wantEmail);
+
+      return hasTag && isOurMeeting && (phoneMatches || emailMatches);
     }) || null
   );
 }
@@ -335,7 +423,7 @@ export async function cancelEventById(id) {
 // ---------- CREATE BOOKING EVENT ----------
 
 /**
- * Creates the event at `startISO` clamped into business hours
+ * Creates the event at `startISO` clamped into business hours (in TZ)
  * and returns the created Google Calendar event.
  * Notifications (WhatsApp/SMS) are handled separately in sms.js.
  */
@@ -349,7 +437,7 @@ export async function createBookingEvent({
 }) {
   await ensureGoogleAuth();
 
-  const correctedStartISO = clampToBusinessHours(startISO);
+  const correctedStartISO = clampToBusinessHours(startISO, TZ);
   const endISO = new Date(
     new Date(correctedStartISO).getTime() + durationMinutes * 60000
   ).toISOString();
@@ -359,7 +447,6 @@ export async function createBookingEvent({
   const zoomPass = process.env.ZOOM_PASSCODE || '';
 
   const safeName = safeCallerName(name);
-  const whoPrefix = safeName && safeName !== 'New caller' ? `(${safeName}) ` : '';
 
   const descriptionLines = [];
 
@@ -391,14 +478,16 @@ export async function createBookingEvent({
     start: { dateTime: correctedStartISO, timeZone: TZ },
     end: { dateTime: endISO, timeZone: TZ },
     description: descriptionLines.join('\n'),
-    // 🔴 IMPORTANT FOR REMINDERS + WHATSAPP CANCEL/RESCHEDULE
+    // IMPORTANT FOR REMINDERS + WHATSAPP CANCEL/RESCHEDULE + FINDING EXISTING EVENTS
     extendedProperties: {
       private: {
-        // New canonical fields used by reminderWorker + server.js
+        // Canonical fields
         mybizpal_phone: phone || '',
+        mybizpal_email: (email || '').toLowerCase(),
         mybizpal_name: safeName,
         // Legacy mirrors (backwards compatible with any old code)
         phone: phone || '',
+        email: (email || '').toLowerCase(),
         name: safeName,
         // Seed last-notified time so reschedule/cancel logic has a baseline
         mybizpal_lastNotifiedStartISO: correctedStartISO,
@@ -417,6 +506,7 @@ export async function createBookingEvent({
     id: created.data.id,
     start: correctedStartISO,
     phone,
+    email: (email || '').toLowerCase(),
     name: safeName,
   });
 
