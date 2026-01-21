@@ -71,6 +71,19 @@ function ensureProfile(callState) {
   return callState.profile;
 }
 
+function ensureFlags(callState) {
+  if (!callState.flags) {
+    callState.flags = {
+      doNotContact: false,
+      doNotCall: false,
+      doNotText: false,
+      optOutReason: null,
+      optOutAt: null,
+    };
+  }
+  return callState.flags;
+}
+
 // ---------- FLOW / LOOP GUARD (NEW) ----------
 function ensureFlowState(callState) {
   if (!callState.flow) {
@@ -198,11 +211,14 @@ function loadSessionForCallIfNeeded(callState) {
     if (saved.profile) {
       callState.profile = { ...(saved.profile || {}), ...(callState.profile || {}) };
     }
-    if (saved.history && Array.isArray(saved.history) && saved.history.length) {
-      callState.history = [...saved.history];
-    }
     if (saved.flow) {
       callState.flow = { ...(saved.flow || {}), ...(callState.flow || {}) };
+    }
+    if (saved.flags) {
+      callState.flags = { ...(saved.flags || {}), ...(callState.flags || {}) };
+    }
+    if (saved.history && Array.isArray(saved.history) && saved.history.length) {
+      callState.history = [...saved.history];
     }
   }
 
@@ -220,6 +236,7 @@ function snapshotSessionFromCall(callState) {
   const capture = callState.capture || {};
   const profile = ensureProfile(callState);
   const flow = ensureFlowState(callState);
+  const flags = ensureFlags(callState);
 
   const snapshot = {
     booking,
@@ -227,6 +244,7 @@ function snapshotSessionFromCall(callState) {
     capture,
     profile,
     flow,
+    flags,
     history: history.slice(-40),
   };
 
@@ -363,6 +381,37 @@ function hasStrongNoCorrection(text) {
   return /\b(not\s+(correct|right)|isn'?t\s+(correct|right)|wrong|incorrect|doesn'?t\s+look\s+right|not\s+quite\s+right)\b/.test(
     t
   );
+}
+
+// ---------- OPT-OUT / DO-NOT-CONTACT DETECTOR (NEW) ----------
+function isOptOutIntent(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+
+  // Explicit stop/remove/unsubscribe + wrong number.
+  return (
+    /\b(stop calling|dont call|don't call|do not call|never call|no more calls|remove me|take me off|opt out|unsubscribe|stop texting|dont text|don't text|do not text|leave me alone)\b/.test(
+      t
+    ) ||
+    /\bnot interested\b/.test(t) ||
+    /\bwrong number\b/.test(t)
+  );
+}
+
+function applyOptOut(callState, reason) {
+  const flags = ensureFlags(callState);
+  flags.doNotContact = true;
+  flags.doNotCall = true;
+  flags.doNotText = true;
+  flags.optOutReason = reason || 'opt_out';
+  flags.optOutAt = Date.now();
+
+  const behaviour = ensureBehaviourState(callState);
+  behaviour.interestLevel = 'low';
+  behaviour.bookingReadiness = 'low';
+
+  const flow = ensureFlowState(callState);
+  flow.stage = 'done';
 }
 
 // ---------- PROACTIVE NAME CAPTURE (NEW) ----------
@@ -628,7 +677,6 @@ function enforceVoiceBrevity(text) {
   if (parts.length <= 2) {
     // still ensure there's a question at the end if possible
     if (!/[?]$/.test(t)) {
-      // if any sentence contains ?, keep last question sentence
       const q = parts.find((s) => s.includes('?'));
       if (q) return q.trim();
     }
@@ -641,14 +689,12 @@ function enforceVoiceBrevity(text) {
   let second = '';
 
   if (lastQuestion) {
-    // avoid repeating the first sentence if the lastQuestion is basically the same
     second = lastQuestion.trim();
     if (second === first) {
       second = (parts[1] || '').trim();
     }
   } else {
     second = (parts[1] || '').trim();
-    // ensure it ends with a question
     if (second && !second.includes('?')) {
       second = second.replace(/[.!]+$/, '').trim() + '?';
     }
@@ -698,6 +744,7 @@ export async function handleTurn({ userText, callState }) {
   ensureBehaviourState(callState);
   ensureProfile(callState);
   ensureFlowState(callState);
+  ensureFlags(callState);
 
   if (!callState.booking) {
     callState.booking = {};
@@ -710,7 +757,23 @@ export async function handleTurn({ userText, callState }) {
   const profile = ensureProfile(callState);
   const booking = callState.booking;
   const flow = ensureFlowState(callState);
+  const flags = ensureFlags(callState);
   const { isChat, isVoice } = getChannelInfo(callState);
+
+  // If this number is opted-out, keep response minimal and end.
+  if (flags.doNotContact) {
+    const safeUserText = userText || '';
+    ensureLastUserInHistory(history, safeUserText);
+
+    const replyText = isVoice
+      ? 'No problem. I won’t contact you again.'
+      : 'No problem — you’re opted out and we won’t contact you again.';
+
+    history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'done');
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: true };
+  }
 
   // Ensure we always have a phone on voice calls (needed for calendar / WhatsApp)
   if (isVoice && !booking.phone && callState.callerNumber) {
@@ -737,6 +800,28 @@ export async function handleTurn({ userText, callState }) {
   // last assistant message (for several heuristics later)
   const lastAssistant = [...history].slice().reverse().find((m) => m.role === 'assistant');
   const lastAssistantText = lastAssistant ? lastAssistant.content : '';
+
+  // ---------- OPT-OUT EARLY EXIT (NEW) ----------
+  if (isOptOutIntent(safeUserText)) {
+    const reason = /\bwrong number\b/.test(userLower)
+      ? 'wrong_number'
+      : /\bnot interested\b/.test(userLower)
+      ? 'not_interested'
+      : 'opt_out';
+
+    applyOptOut(callState, reason);
+
+    ensureLastUserInHistory(history, safeUserText);
+
+    const replyText = isVoice
+      ? 'No worries. I’ll stop contacting you.'
+      : 'No worries — I’ll stop contacting you and remove you from follow-ups.';
+
+    history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'done');
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: true };
+  }
 
   // CRITICAL FIXES: Proactive name & business capture on every message
   // BUT: do NOT auto-grab name on the very first VOICE message – it can be noisy ("I'm Ra...") and cause early jumps.
@@ -1439,7 +1524,6 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- LATENCY KILLER: RULE-BASED FAST REPLIES (VOICE FIRST) ----------
-  // This avoids an OpenAI call for the most common conversational steps.
   if (!DISABLE_RULE_BASED) {
     const hasBookingIntent =
       booking.intent === 'mybizpal_consultation' ||
@@ -1567,7 +1651,6 @@ export async function handleTurn({ userText, callState }) {
           ? 'Before we think about bookings or emails, tell me a bit about your business. What do you do?'
           : 'Before we get into bookings or emails, tell me a bit about your business. What do you do and what’s the main thing you’re trying to fix around calls or messages?';
       } else {
-        // Add a gentle redirect so the user understands why we are not booking yet
         const tail = isVoice
           ? ' Before we even think about bookings, tell me a bit about your business and what you are trying to sort out.'
           : ' Before we even think about bookings, tell me a bit about your business and what you are trying to sort out around calls or enquiries.';
