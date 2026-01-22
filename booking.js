@@ -62,7 +62,7 @@ function ensureBooking(callState) {
 
       // Internal flags
       lastPromptWasTimeSuggestion: false,
-      needEmailBeforeBooking: false, // "we've already asked for email for this confirmed time"
+      needEmailBeforeBooking: false, // legacy field; kept for backward compatibility
 
       // Existing-booking awareness
       existingBookingSpoken: null,
@@ -166,6 +166,47 @@ function isBoringSentence(str = '') {
   if (boring.has(t)) return true;
 
   return false;
+}
+
+function looksLikeExplicitTime(text = '') {
+  const t = String(text).toLowerCase();
+  // numbers like 9, 9:30, 14:00, plus am/pm
+  if (/\b(\d{1,2})(?:[:.]\d{2})?\s*(am|pm)\b/.test(t)) return true;
+  if (/\b([01]?\d|2[0-3])[:.][0-5]\d\b/.test(t)) return true;
+  // common spoken times
+  if (/\b(midday|noon|midnight)\b/.test(t)) return true;
+  return false;
+}
+
+// Intent parsing for existing-booking decision
+function parseExistingBookingChoice(text = '') {
+  const t = String(text).toLowerCase();
+
+  const wantsExtra = /\b(extra|another|second|additional|add one|book an extra|book another)\b/.test(t);
+
+  const wantsMove = /\b(move|change|reschedule|swap|instead|cancel that and|cancel & (re)?book|rebook|earlier|later)\b/.test(
+    t
+  );
+
+  const wantsKeep = /\b(keep|leave it|as it is|dont change|don't change|no change|leave as is)\b/.test(
+    t
+  );
+
+  // Only treat naked yes/no as move/keep IF not ambiguous and not mentioning extra
+  const isYes = yesInAnyLang(t);
+  const isNo = noInAnyLang(t);
+
+  if (wantsExtra) return 'extra';
+  if (wantsMove && wantsKeep) return 'unknown';
+  if (wantsMove) return 'move';
+  if (wantsKeep) return 'keep';
+
+  // If user only says "yes" or "no" after the 3-option question:
+  // Prefer "move" on yes, "keep" on no, but only if no other signals.
+  if (isYes) return 'move';
+  if (isNo) return 'keep';
+
+  return 'unknown';
 }
 
 // Paragraph-style fallback summary (no bullets) if AI is unavailable
@@ -447,12 +488,16 @@ export async function updateBookingStateFromUtterance({
       booking.timeSpoken = nat.spoken;
     }
 
-    // User-provided times are treated as already confirmed (no yes/no needed)
-    booking.awaitingTimeConfirm = false;
-    booking.lastPromptWasTimeSuggestion = false;
+    // If user gave a fuzzy time (e.g. "tomorrow morning"), keep confirmation on.
+    // If it's explicit (e.g. "2pm", "14:00"), treat as confirmed.
+    const explicit = looksLikeExplicitTime(raw);
+    booking.awaitingTimeConfirm = !explicit;
+    booking.lastPromptWasTimeSuggestion = !explicit;
   }
 
   // --- EXTRA FALLBACK: basic weekday + time detection if parseNaturalDate missed it ---
+  // NOTE: This fallback uses server Date(); keep it only as last resort.
+  // Best practice is to improve parseNaturalDate to handle these cases in a timezone-safe way.
   if (!nat) {
     // 1) If we don't yet have any date, but they mention a weekday,
     //    set the date to the *next* occurrence of that weekday at 9:00.
@@ -480,10 +525,13 @@ export async function updateBookingStateFromUtterance({
           const dt = new Date(now);
           dt.setDate(now.getDate() + delta);
           dt.setHours(9, 0, 0, 0); // default 9:00
+
           booking.timeISO = dt.toISOString();
           booking.timeSpoken = formatSpokenDateTime(booking.timeISO, timezone);
-          booking.awaitingTimeConfirm = false;
-          booking.lastPromptWasTimeSuggestion = false;
+
+          // This is a guessed default → confirm it
+          booking.awaitingTimeConfirm = true;
+          booking.lastPromptWasTimeSuggestion = true;
 
           if (!booking.intent || booking.intent === 'none') {
             booking.intent = 'wants_booking';
@@ -539,6 +587,8 @@ export async function updateBookingStateFromUtterance({
         prev.setHours(hour, minute, 0, 0);
         booking.timeISO = prev.toISOString();
         booking.timeSpoken = formatSpokenDateTime(booking.timeISO, timezone);
+
+        // User supplied a time → treat as confirmed
         booking.awaitingTimeConfirm = false;
         booking.lastPromptWasTimeSuggestion = false;
 
@@ -586,6 +636,13 @@ export async function handleSystemActionsFirst({ userText, callState }) {
     return { intercept: true, replyText: 'No problem. I won’t contact you again.' };
   }
 
+  // ✅ Harmony with logic.js capture flow:
+  // Do NOT create/move bookings while we are still confirming captured name/email/phone
+  const capture = callState?.capture || null;
+  if (capture?.pendingConfirm || (capture?.mode && capture.mode !== 'none')) {
+    return { intercept: false };
+  }
+
   const phone = booking.phone || callState.callerNumber || null;
   const email = booking.email || null;
   const name = booking.name || null;
@@ -610,13 +667,45 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       intent: booking.intent,
       bookingConfirmed: booking.bookingConfirmed,
       awaitingTimeConfirm: booking.awaitingTimeConfirm,
+      captureMode: capture?.mode,
+      pendingConfirm: capture?.pendingConfirm,
     });
   }
 
-  // ---------- EXISTING BOOKING DECISION FLOW (MOVE / CANCEL / KEEP) ----------
+  // ---------- EXISTING BOOKING DECISION FLOW (MOVE / CANCEL / KEEP / EXTRA) ----------
   if (booking.pendingExistingAction === 'decide_move_keep_extra') {
-    // CANCEL / MOVE TO NEW TIME
-    if (/cancel|change|move|instead|earlier|rather/i.test(t) || yesInAnyLang(t)) {
+    const choice = parseExistingBookingChoice(t);
+
+    // EXTRA SESSION: keep existing booking and proceed to create a new one
+    if (choice === 'extra') {
+      // Keep the existing booking and start a new booking flow
+      booking.pendingExistingAction = null;
+
+      // Do not overwrite existing booking details; clear new-time fields
+      booking.bookingConfirmed = false;
+      booking.lastEventId = null;
+
+      booking.timeISO = null;
+      booking.timeSpoken = null;
+      booking.wantsEarliest = false;
+      booking.earliestSlotISO = null;
+      booking.earliestSlotSpoken = null;
+
+      booking.awaitingTimeConfirm = false;
+      booking.lastPromptWasTimeSuggestion = false;
+      booking.needEmailBeforeBooking = false;
+
+      booking.intent = 'wants_booking';
+
+      return {
+        intercept: true,
+        replyText:
+          'No problem — we’ll keep your existing booking. What day and time would you like the extra session to be?',
+      };
+    }
+
+    // MOVE / CANCEL / CHANGE
+    if (choice === 'move') {
       if (!timeCandidate) {
         try {
           if (booking.existingEventId) {
@@ -733,7 +822,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
     }
 
     // KEEP EXISTING TIME
-    if (/keep|leave it|as it is|don'?t change/i.test(t) || noInAnyLang(t)) {
+    if (choice === 'keep') {
       const existingSpoken =
         booking.existingEventStartISO
           ? formatSpokenDateTime(booking.existingEventStartISO, BUSINESS_TIMEZONE)
@@ -754,11 +843,25 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       return { intercept: true, replyText };
     }
 
-    return { intercept: false };
+    // Unknown / ambiguous
+    return {
+      intercept: true,
+      replyText:
+        'Just to confirm — do you want me to move the existing booking, keep it where it is, or book an extra session as well?',
+    };
   }
 
   // ---------- MAIN BOOKING FLOW ----------
-  if (timeCandidate && hasContact && !booking.bookingConfirmed && !booking.awaitingTimeConfirm) {
+  // ✅ Require explicit booking intent before any calendar actions
+  const hasBookingIntent = booking.intent === 'wants_booking';
+
+  if (
+    hasBookingIntent &&
+    timeCandidate &&
+    hasContact &&
+    !booking.bookingConfirmed &&
+    !booking.awaitingTimeConfirm
+  ) {
     if (DEBUG_LOG) {
       console.log('MAIN BOOKING FLOW TRIGGERED with:', {
         name,
@@ -769,16 +872,14 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       });
     }
 
-    // If we have a phone but email is missing → ask once, then wait for it
+    // If we have a phone but email is missing → keep intercepting until resolved
+    // (or user explicitly says they don't have email, which logic.js handles)
     if (phone && !email) {
-      if (!booking.needEmailBeforeBooking) {
-        booking.needEmailBeforeBooking = true;
-        return {
-          intercept: true,
-          replyText: 'Brilliant — before I lock that in, what’s your best email address?',
-        };
-      }
-      return { intercept: false };
+      booking.needEmailBeforeBooking = true;
+      return {
+        intercept: true,
+        replyText: 'Brilliant — before I lock that in, what’s your best email address?',
+      };
     }
 
     // Existing booking check
@@ -817,7 +918,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
           intercept: true,
           replyText:
             `I can see you already have a MyBizPal session booked for ${existingSpoken}. ` +
-            `Do you want me to move that booking to ${newSpoken}, keep it where it is, or are you trying to book an extra session as well?`,
+            `Do you want me to move that booking to ${newSpoken}, keep it where it is, or book an extra session as well?`,
         };
       }
     } catch (e) {
