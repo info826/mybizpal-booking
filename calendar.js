@@ -11,7 +11,10 @@ import {
   setMinutes,
   setSeconds,
 } from 'date-fns';
-import { formatInTimeZone, utcToZonedTime, zonedTimeToUtc } from 'date-fns-tz';
+
+// ✅ FIX: date-fns-tz v3+ does NOT export utcToZonedTime / zonedTimeToUtc
+// Use toZonedTime / fromZonedTime instead.
+import { formatInTimeZone, toZonedTime, fromZonedTime } from 'date-fns-tz';
 
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
 const CALENDAR_ID =
@@ -138,7 +141,9 @@ function clampToBusinessHours(startISO, timezone = TZ) {
   // If date-fns-tz helpers are not available for some reason, fall back to old behaviour
   try {
     const utcDate = new Date(startISO);
-    const zoned = utcToZonedTime(utcDate, timezone);
+
+    // ✅ FIX: v3 API
+    const zoned = toZonedTime(utcDate, timezone);
 
     // Only clamp hours/mins; leave date alone (in local business TZ).
     let hours = zoned.getHours();
@@ -162,7 +167,8 @@ function clampToBusinessHours(startISO, timezone = TZ) {
 
     zoned.setHours(hours, mins, 0, 0);
 
-    const backToUtc = zonedTimeToUtc(zoned, timezone);
+    // ✅ FIX: v3 API (inverse of toZonedTime)
+    const backToUtc = fromZonedTime(zoned, timezone);
     return backToUtc.toISOString();
   } catch (e) {
     const d = new Date(startISO);
@@ -407,8 +413,7 @@ export async function findExistingBooking({ phone, email }) {
       const phoneMatches =
         wantDigits && descDigits && descDigits.includes(wantDigits);
 
-      const emailMatches =
-        wantEmail && desc.includes(wantEmail);
+      const emailMatches = wantEmail && desc.includes(wantEmail);
 
       return hasTag && isOurMeeting && (phoneMatches || emailMatches);
     }) || null
