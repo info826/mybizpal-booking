@@ -2,25 +2,20 @@
 // Google Calendar helpers: earliest-available, create, cancel, find existing
 
 import { google } from 'googleapis';
-import {
-  addMinutes,
-  addDays,
-  isBefore,
-  isAfter,
-  setHours,
-  setMinutes,
-  setSeconds,
-} from 'date-fns';
+import { addMinutes, addDays, isBefore, isAfter, setSeconds } from 'date-fns';
 
-// ✅ FIX: date-fns-tz v3+ does NOT export utcToZonedTime / zonedTimeToUtc
-// Use toZonedTime / fromZonedTime instead.
+// ✅ date-fns-tz v3+ API
 import { formatInTimeZone, toZonedTime, fromZonedTime } from 'date-fns-tz';
 
 const TZ = process.env.BUSINESS_TIMEZONE || 'Europe/London';
-const CALENDAR_ID =
-  process.env.GOOGLE_CALENDAR_ID ||
-  process.env.CALENDAR_ID ||
-  'primary';
+const CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || process.env.CALENDAR_ID || 'primary';
+
+const WORK_START_HOUR = Number(process.env.BUSINESS_START_HOUR || 9); // 09:00
+const WORK_END_HOUR = Number(process.env.BUSINESS_END_HOUR || 17); // 17:00
+const SLOT_MINUTES = Number(process.env.BUSINESS_SLOT_MINUTES || 30); // 30-min increments
+
+const TAG = 'tag: booked by mybizpal (gabriel)'; // ✅ keep consistent lower-case for matching
+const SUMMARY_PREFIX = 'MyBizPal'; // summary includes this so we can filter quickly
 
 // ---------- GOOGLE CALENDAR SETUP ----------
 
@@ -34,17 +29,147 @@ const jwt = new google.auth.JWT(
 const calendar = google.calendar({ version: 'v3', auth: jwt });
 
 let googleReady = false;
+let googleReadyPromise = null;
+
 async function ensureGoogleAuth() {
-  if (!googleReady) {
-    await jwt.authorize();
-    googleReady = true;
-    console.log('✅ Google service account authorized for Calendar');
+  if (googleReady) return;
+
+  if (!googleReadyPromise) {
+    googleReadyPromise = (async () => {
+      await jwt.authorize();
+      googleReady = true;
+      console.log('✅ Google service account authorized for Calendar');
+    })().catch((err) => {
+      // allow retry next time
+      googleReadyPromise = null;
+      throw err;
+    });
   }
+
+  await googleReadyPromise;
+}
+
+// ---------- TIME HELPERS (TZ-SAFE) ----------
+
+function isWeekendZoned(zonedDate) {
+  const day = zonedDate.getDay(); // 0 = Sun, 6 = Sat
+  return day === 0 || day === 6;
+}
+
+function setZonedTime(zonedDate, hours, minutes = 0, seconds = 0, ms = 0) {
+  const d = new Date(zonedDate.getTime());
+  d.setHours(hours, minutes, seconds, ms);
+  return d;
+}
+
+function zonedDayStart(zonedDate) {
+  return setZonedTime(zonedDate, WORK_START_HOUR, 0, 0, 0);
+}
+
+function zonedDayEnd(zonedDate) {
+  // end boundary at 17:00; last valid start is 16:30 for 30-min slot
+  return setZonedTime(zonedDate, WORK_END_HOUR, 0, 0, 0);
+}
+
+function snapZonedToSlotBoundary(zonedDate) {
+  const d = new Date(zonedDate.getTime());
+  d.setSeconds(0, 0);
+
+  const mins = d.getMinutes();
+  const extra = mins % SLOT_MINUTES;
+  if (extra !== 0) {
+    d.setMinutes(mins + (SLOT_MINUTES - extra));
+  }
+  return d;
+}
+
+function normaliseCursorToWorkingTimeZoned(zonedCursor) {
+  let c = new Date(zonedCursor.getTime());
+
+  // If weekend, move to next Monday at start of day
+  while (isWeekendZoned(c)) {
+    c = zonedDayStart(addDays(c, 1));
+  }
+
+  // If before start hour → move to day start
+  if (isBefore(c, zonedDayStart(c))) {
+    c = zonedDayStart(c);
+  }
+
+  // If at/after end hour → move to next weekday day start
+  if (isAfter(c, zonedDayEnd(c)) || +c === +zonedDayEnd(c)) {
+    c = zonedDayStart(addDays(c, 1));
+    while (isWeekendZoned(c)) c = zonedDayStart(addDays(c, 1));
+  }
+
+  // Snap to slot boundary (00/30)
+  c = snapZonedToSlotBoundary(c);
+
+  // After snapping, re-check end-of-day
+  const lastStart = setZonedTime(c, WORK_END_HOUR - 1, 30, 0, 0); // assumes 30-min slot; safe for default
+  if (SLOT_MINUTES === 30) {
+    if (isAfter(c, lastStart)) {
+      c = zonedDayStart(addDays(c, 1));
+      while (isWeekendZoned(c)) c = zonedDayStart(addDays(c, 1));
+    }
+  } else {
+    // generic: if slot start + slot mins would exceed day end, move next day
+    const endCandidate = addMinutes(c, SLOT_MINUTES);
+    if (isAfter(endCandidate, zonedDayEnd(c))) {
+      c = zonedDayStart(addDays(c, 1));
+      while (isWeekendZoned(c)) c = zonedDayStart(addDays(c, 1));
+      c = snapZonedToSlotBoundary(c);
+    }
+  }
+
+  return c;
+}
+
+/**
+ * Clamp a proposed start time into business hours in the BUSINESS timezone:
+ * - Mon–Fri only (date is preserved; earliest-slot logic avoids weekends)
+ * - WORK_START_HOUR–WORK_END_HOUR
+ * - Slot boundary snap (00/30 by default)
+ *
+ * Clamp happens in TZ, then converts back to UTC ISO.
+ */
+function clampToBusinessHours(startISO, timezone = TZ) {
+  const utcDate = new Date(startISO);
+  const zoned = toZonedTime(utcDate, timezone);
+
+  let c = new Date(zoned.getTime());
+  c = setSeconds(c, 0);
+
+  // If weekend, keep the date as-is (booking flow already avoids weekends),
+  // but still clamp time. (Alternatively you can bump to next weekday here.)
+  let hours = c.getHours();
+  let mins = c.getMinutes();
+
+  // Snap minutes to slot boundary
+  const extra = mins % SLOT_MINUTES;
+  if (extra !== 0) mins += SLOT_MINUTES - extra;
+
+  // Clamp range: earliest start WORK_START_HOUR, latest start so slot ends at WORK_END_HOUR
+  const latestStartMinutes = WORK_END_HOUR * 60 - SLOT_MINUTES;
+  const proposedMinutes = hours * 60 + mins;
+
+  if (proposedMinutes < WORK_START_HOUR * 60) {
+    hours = WORK_START_HOUR;
+    mins = 0;
+  } else if (proposedMinutes > latestStartMinutes) {
+    hours = Math.floor(latestStartMinutes / 60);
+    mins = latestStartMinutes % 60;
+  }
+
+  c.setHours(hours, mins, 0, 0);
+
+  const backToUtc = fromZonedTime(c, timezone);
+  return backToUtc.toISOString();
 }
 
 // ---------- COMMON HELPERS ----------
 
-// Format spoken time (for messages / Gabriel read-back)
+// Format spoken time (for messages / read-back)
 export function formatSpokenDateTime(iso, timezone = TZ) {
   const d = new Date(iso);
   const day = formatInTimeZone(d, timezone, 'eeee');
@@ -53,43 +178,15 @@ export function formatSpokenDateTime(iso, timezone = TZ) {
 
   const mins = formatInTimeZone(d, timezone, 'mm'); // "00", "30", etc.
   const hour = formatInTimeZone(d, timezone, 'h'); // "1"–"12"
-  const mer = formatInTimeZone(d, timezone, 'a'); // "AM" / "PM"
+  const mer = formatInTimeZone(d, timezone, 'a'); // "AM"/"PM"
 
   let time;
-  if (mins === '00') {
-    // e.g. "9 o'clock A M"
-    time = `${hour} o'clock ${mer[0]} ${mer[1]}`;
-  } else {
-    // e.g. "9:30 A M"
-    time = `${hour}:${mins} ${mer[0]} ${mer[1]}`;
-  }
+  if (mins === '00') time = `${hour} o'clock ${mer[0]} ${mer[1]}`;
+  else time = `${hour}:${mins} ${mer[0]} ${mer[1]}`;
 
   return `${day} ${date} ${month} at ${time}`;
 }
 
-function isWeekend(d) {
-  const day = d.getDay(); // 0 = Sun, 6 = Sat
-  return day === 0 || day === 6;
-}
-
-function dayStart(d) {
-  let s = new Date(d.getTime());
-  s = setHours(s, 9);
-  s = setMinutes(s, 0);
-  s = setSeconds(s, 0);
-  return s;
-}
-
-function dayEnd(d) {
-  // We want last START time 16:30 so a 30-min slot ends at 17:00
-  let e = new Date(d.getTime());
-  e = setHours(e, 17);
-  e = setMinutes(e, 0);
-  e = setSeconds(e, 0);
-  return e;
-}
-
-// Never let junk like "hi/hello/booking/yes" be saved as a name
 function safeCallerName(rawName) {
   const raw = rawName ? String(rawName).trim() : '';
   if (!raw) return 'New caller';
@@ -118,8 +215,6 @@ function safeCallerName(rawName) {
     'mail',
   ]);
   if (bad.has(lower)) return 'New caller';
-
-  // super short "names" are also treated as unknown
   if (lower.length <= 2) return 'New caller';
 
   return raw;
@@ -130,219 +225,124 @@ function normalizePhoneDigits(phone) {
   return String(phone).replace(/[^\d]/g, '');
 }
 
-/**
- * Clamp a proposed start time into business hours in the BUSINESS timezone:
- * - Mon–Fri only (day is left as-is; earliest-slot logic already avoids weekends)
- * - 09:00–17:00, 30-minute increments (last valid start 16:30)
- *
- * IMPORTANT: this clamps in TZ (not server-local time), then converts back to UTC ISO.
- */
-function clampToBusinessHours(startISO, timezone = TZ) {
-  // If date-fns-tz helpers are not available for some reason, fall back to old behaviour
-  try {
-    const utcDate = new Date(startISO);
+// ---------- FAST FREEBUSY (PERFORMANCE) ----------
 
-    // ✅ FIX: v3 API
-    const zoned = toZonedTime(utcDate, timezone);
+async function getBusyRanges({ timeMinISO, timeMaxISO }) {
+  await ensureGoogleAuth();
 
-    // Only clamp hours/mins; leave date alone (in local business TZ).
-    let hours = zoned.getHours();
-    let mins = zoned.getMinutes();
+  const fb = await calendar.freebusy.query({
+    requestBody: {
+      timeMin: timeMinISO,
+      timeMax: timeMaxISO,
+      items: [{ id: CALENDAR_ID }],
+    },
+  });
 
-    if (hours < 9) {
-      hours = 9;
-      mins = 0;
-    } else if (hours > 16 || (hours === 16 && mins > 30)) {
-      hours = 16;
-      mins = 30;
-    } else {
-      // Snap minutes to nearest 0 or 30 to keep clean slots
-      if (mins < 15) mins = 0;
-      else if (mins < 45) mins = 30;
-      else {
-        hours += 1;
-        mins = 0;
-      }
-    }
-
-    zoned.setHours(hours, mins, 0, 0);
-
-    // ✅ FIX: v3 API (inverse of toZonedTime)
-    const backToUtc = fromZonedTime(zoned, timezone);
-    return backToUtc.toISOString();
-  } catch (e) {
-    const d = new Date(startISO);
-    let hours = d.getHours();
-    let mins = d.getMinutes();
-
-    if (hours < 9) {
-      hours = 9;
-      mins = 0;
-    } else if (hours > 16 || (hours === 16 && mins > 30)) {
-      hours = 16;
-      mins = 30;
-    } else {
-      if (mins < 15) mins = 0;
-      else if (mins < 45) mins = 30;
-      else {
-        hours += 1;
-        mins = 0;
-      }
-    }
-
-    d.setHours(hours, mins, 0, 0);
-    return d.toISOString();
-  }
+  const busy = fb.data.calendars?.[CALENDAR_ID]?.busy || [];
+  // busy: [{ start, end }, ...] ISO strings (RFC3339)
+  return busy
+    .map((b) => ({ start: new Date(b.start), end: new Date(b.end) }))
+    .filter((b) => b.start instanceof Date && b.end instanceof Date)
+    .sort((a, b) => a.start - b.start);
 }
 
-// ---------- EARLIEST AVAILABLE SLOT ----------
+function hasOverlapWithBusy(slotStart, slotEnd, busyRanges) {
+  // busyRanges are sorted; small list typical; linear scan is fine
+  for (const b of busyRanges) {
+    // if busy starts after slot ends, can stop early
+    if (b.start >= slotEnd) return false;
+    if (b.end > slotStart && b.start < slotEnd) return true;
+  }
+  return false;
+}
+
+// ---------- EARLIEST AVAILABLE SLOT (TZ-CORRECT + FAST) ----------
 
 /**
- * Find earliest available 30-min slot within next N days,
- * starting from `fromISO` if provided, otherwise "now".
+ * Find earliest available slot within next N days.
  * Rules:
- *  - Only Monday–Friday
- *  - Working hours: 09:00–17:00
- *  - 30-minute increments (00 or 30)
- *  - No overlap with existing events
+ *  - Mon–Fri
+ *  - WORK_START_HOUR–WORK_END_HOUR
+ *  - SLOT_MINUTES increments
+ *  - Uses FREEBUSY (faster + avoids pulling full event bodies)
  */
 export async function findEarliestAvailableSlot({
   timezone = TZ,
-  durationMinutes = 30,
+  durationMinutes = SLOT_MINUTES,
   daysAhead = 7,
   fromISO = null,
 }) {
   await ensureGoogleAuth();
 
-  const base = fromISO ? new Date(fromISO) : new Date();
-  const windowEnd = addDays(base, daysAhead);
+  const baseUtc = fromISO ? new Date(fromISO) : new Date();
+  const windowEndUtc = addDays(baseUtc, daysAhead);
 
-  const timeMin = base.toISOString();
-  const timeMax = windowEnd.toISOString();
+  // Build cursor in business TZ, not server-local time
+  let cursorZoned = toZonedTime(baseUtc, timezone);
+  cursorZoned = setSeconds(cursorZoned, 0);
+  cursorZoned = snapZonedToSlotBoundary(cursorZoned);
+  cursorZoned = normaliseCursorToWorkingTimeZoned(cursorZoned);
 
-  const res = await calendar.events.list({
-    calendarId: CALENDAR_ID,
-    timeMin,
-    timeMax,
-    singleEvents: true,
-    orderBy: 'startTime',
-    maxResults: 250,
-  });
+  const timeMinISO = baseUtc.toISOString();
+  const timeMaxISO = windowEndUtc.toISOString();
 
-  const events = (res.data.items || []).filter(
-    (ev) => ev.start?.dateTime && ev.end?.dateTime
-  );
-
-  // Start cursor from base, rounded UP to the next 30-min boundary
-  let cursor = new Date(base.getTime());
-  cursor.setSeconds(0, 0);
-  const mins = cursor.getMinutes();
-  const extra = mins % 30;
-  if (extra !== 0) {
-    cursor = addMinutes(cursor, 30 - extra);
-  }
-
-  // Move cursor to a valid working time (Mon–Fri, 9–17)
-  function normaliseCursorToWorkingTime(d) {
-    let c = new Date(d.getTime());
-    // If weekend or after hours, bump to next valid weekday at 9:00
-    while (isWeekend(c) || isAfter(c, dayEnd(c))) {
-      c = dayStart(addDays(c, 1));
-    }
-    // If before 9am, move to 9am
-    if (isBefore(c, dayStart(c))) {
-      c = dayStart(c);
-    }
-    return c;
-  }
-
-  cursor = normaliseCursorToWorkingTime(cursor);
+  const busyRanges = await getBusyRanges({ timeMinISO, timeMaxISO });
 
   for (;;) {
-    if (isAfter(cursor, windowEnd)) break;
+    // stop when cursor (converted to UTC) exceeds window end
+    const cursorUtc = fromZonedTime(cursorZoned, timezone);
+    if (isAfter(cursorUtc, windowEndUtc)) break;
 
-    cursor = normaliseCursorToWorkingTime(cursor);
-    if (isAfter(cursor, windowEnd)) break;
+    // ensure cursor is valid working time
+    cursorZoned = normaliseCursorToWorkingTimeZoned(cursorZoned);
 
-    const slotEnd = addMinutes(cursor, durationMinutes);
+    const slotStartUtc = fromZonedTime(cursorZoned, timezone);
+    const slotEndUtc = addMinutes(slotStartUtc, durationMinutes);
 
-    // Ensure this 30-min slot fits entirely within working hours
-    if (isAfter(slotEnd, dayEnd(cursor))) {
-      cursor = dayStart(addDays(cursor, 1));
+    // Ensure slot fits within work day (in TZ)
+    const zonedSlotEnd = toZonedTime(slotEndUtc, timezone);
+    const dayEnd = zonedDayEnd(cursorZoned);
+    if (isAfter(zonedSlotEnd, dayEnd)) {
+      cursorZoned = zonedDayStart(addDays(cursorZoned, 1));
       continue;
     }
 
-    // Check overlap with any existing events
-    const overlapping = events.some((ev) => {
-      const evStart = new Date(ev.start.dateTime);
-      const evEnd = new Date(ev.end.dateTime);
-      const latestStart = evStart > cursor ? evStart : cursor;
-      const earliestEnd = evEnd < slotEnd ? evEnd : slotEnd;
-      return earliestEnd > latestStart; // overlap if end > start
-    });
-
-    if (!overlapping) {
-      const iso = cursor.toISOString();
-      return {
-        iso,
-        spoken: formatSpokenDateTime(iso, timezone),
-      };
+    // Overlap check using busy ranges (UTC)
+    if (!hasOverlapWithBusy(slotStartUtc, slotEndUtc, busyRanges)) {
+      const iso = slotStartUtc.toISOString();
+      return { iso, spoken: formatSpokenDateTime(iso, timezone) };
     }
 
-    // Move cursor to just after the end of the earliest overlapping event
-    const overlappingEvents = events.filter((ev) => {
-      const evStart = new Date(ev.start.dateTime);
-      const evEnd = new Date(ev.end.dateTime);
-      const latestStart = evStart > cursor ? evStart : cursor;
-      const earliestEnd = evEnd < slotEnd ? evEnd : slotEnd;
-      return earliestEnd > latestStart;
-    });
-
-    if (overlappingEvents.length === 0) {
-      cursor = addMinutes(cursor, durationMinutes);
-    } else {
-      let soonestEnd = null;
-      for (const ev of overlappingEvents) {
-        const evEnd = new Date(ev.end.dateTime);
-        if (!soonestEnd || evEnd < soonestEnd) {
-          soonestEnd = evEnd;
-        }
-      }
-      cursor = new Date(soonestEnd.getTime());
-    }
+    // advance cursor by slot size
+    cursorZoned = addMinutes(cursorZoned, durationMinutes);
   }
 
-  // If no free slot found, return null
   return null;
 }
 
-// ---------- BASIC CONFLICT CHECKER ----------
+// ---------- BASIC CONFLICT CHECKER (FAST) ----------
 
-export async function hasConflict({ startISO, durationMin = 30 }) {
+export async function hasConflict({ startISO, durationMin = SLOT_MINUTES }) {
   await ensureGoogleAuth();
-  const start = new Date(startISO).toISOString();
-  const end = new Date(
-    new Date(startISO).getTime() + durationMin * 60000
-  ).toISOString();
 
-  const r = await calendar.events.list({
-    calendarId: CALENDAR_ID,
-    timeMin: start,
-    timeMax: end,
-    maxResults: 1,
-    singleEvents: true,
-    orderBy: 'startTime',
+  const startUtc = new Date(startISO);
+  const endUtc = new Date(startUtc.getTime() + durationMin * 60000);
+
+  const busy = await getBusyRanges({
+    timeMinISO: startUtc.toISOString(),
+    timeMaxISO: endUtc.toISOString(),
   });
-  return (r.data.items || []).length > 0;
+
+  return hasOverlapWithBusy(startUtc, endUtc, busy);
 }
 
 // ---------- FIND & CANCEL EXISTING BOOKINGS ----------
 
 /**
  * Finds an upcoming MyBizPal booking for this caller.
- * Improvement:
- * - Uses privateExtendedProperty lookups when possible (fast + accurate).
- * - Falls back to scanning event list + matching by tag + normalized phone/email.
+ * Performance:
+ * - First tries extendedProperties (privateExtendedProperty)
+ * - Falls back to scanning only "MyBizPal" events and tag match
  */
 export async function findExistingBooking({ phone, email }) {
   await ensureGoogleAuth();
@@ -350,13 +350,11 @@ export async function findExistingBooking({ phone, email }) {
   const nowISO = new Date().toISOString();
   const untilISO = addDays(new Date(), 60).toISOString();
 
-  const tag = 'booked by mybizpal (gabriel)';
   const wantPhone = phone ? String(phone).trim() : '';
   const wantEmail = email ? String(email).trim().toLowerCase() : '';
   const wantDigits = normalizePhoneDigits(wantPhone);
 
-  // 1) Fast path: search by extendedProperties (most reliable)
-  // Google Calendar supports privateExtendedProperty filters.
+  // 1) Fast path: search by extended properties (most reliable)
   try {
     const privateExtendedProperty = [];
     if (wantPhone) privateExtendedProperty.push(`mybizpal_phone=${wantPhone}`);
@@ -378,9 +376,7 @@ export async function findExistingBooking({ phone, email }) {
         items1.find((ev) => {
           const desc = (ev.description || '').toLowerCase();
           const sum = (ev.summary || '').toLowerCase();
-          const hasTag = desc.includes(tag);
-          const isOurMeeting = sum.includes('mybizpal');
-          return hasTag && isOurMeeting;
+          return desc.includes(TAG) && sum.includes(SUMMARY_PREFIX.toLowerCase());
         }) || null;
 
       if (found1) return found1;
@@ -389,7 +385,7 @@ export async function findExistingBooking({ phone, email }) {
     console.warn('Extended property search failed, falling back:', e?.message || e);
   }
 
-  // 2) Fallback: scan next events and match by tag + contact in description
+  // 2) Fallback: scan a limited set using q to reduce payload
   const r = await calendar.events.list({
     calendarId: CALENDAR_ID,
     timeMin: nowISO,
@@ -397,6 +393,7 @@ export async function findExistingBooking({ phone, email }) {
     singleEvents: true,
     maxResults: 50,
     orderBy: 'startTime',
+    q: SUMMARY_PREFIX, // helps performance
   });
 
   const items = r.data.items || [];
@@ -406,13 +403,11 @@ export async function findExistingBooking({ phone, email }) {
       const desc = descRaw.toLowerCase();
       const sum = (ev.summary || '').toLowerCase();
 
-      const hasTag = desc.includes(tag);
-      const isOurMeeting = sum.includes('mybizpal');
+      const hasTag = desc.includes(TAG);
+      const isOurMeeting = sum.includes(SUMMARY_PREFIX.toLowerCase());
 
       const descDigits = normalizePhoneDigits(descRaw);
-      const phoneMatches =
-        wantDigits && descDigits && descDigits.includes(wantDigits);
-
+      const phoneMatches = wantDigits && descDigits && descDigits.includes(wantDigits);
       const emailMatches = wantEmail && desc.includes(wantEmail);
 
       return hasTag && isOurMeeting && (phoneMatches || emailMatches);
@@ -430,22 +425,19 @@ export async function cancelEventById(id) {
 /**
  * Creates the event at `startISO` clamped into business hours (in TZ)
  * and returns the created Google Calendar event.
- * Notifications (WhatsApp/SMS) are handled separately in sms.js.
  */
 export async function createBookingEvent({
   startISO,
-  durationMinutes = 30,
+  durationMinutes = SLOT_MINUTES,
   name,
   email,
   phone,
-  summaryNotes, // optional smart summary text
+  summaryNotes,
 }) {
   await ensureGoogleAuth();
 
   const correctedStartISO = clampToBusinessHours(startISO, TZ);
-  const endISO = new Date(
-    new Date(correctedStartISO).getTime() + durationMinutes * 60000
-  ).toISOString();
+  const endISO = new Date(new Date(correctedStartISO).getTime() + durationMinutes * 60000).toISOString();
 
   const zoomLink = process.env.ZOOM_LINK || '';
   const zoomId = process.env.ZOOM_MEETING_ID || '';
@@ -464,37 +456,29 @@ export async function createBookingEvent({
   descriptionLines.push(`Caller name: ${safeName}`);
   descriptionLines.push(`Caller phone: ${phone || 'n/a'}`);
   descriptionLines.push(`Caller email: ${email || 'n/a'}`);
-
+  descriptionLines.push('');
   if (zoomLink) {
-    descriptionLines.push('');
     descriptionLines.push(`Zoom: ${zoomLink}`);
-    if (zoomId || zoomPass) {
-      descriptionLines.push(`ID: ${zoomId}  Passcode: ${zoomPass}`);
-    }
+    if (zoomId || zoomPass) descriptionLines.push(`ID: ${zoomId}  Passcode: ${zoomPass}`);
     descriptionLines.push('');
-    descriptionLines.push('tag: booked by mybizpal (Gabriel)');
-  } else {
-    descriptionLines.push('');
-    descriptionLines.push('tag: booked by mybizpal (Gabriel)');
   }
+  descriptionLines.push(TAG);
 
   const event = {
-    summary: `Business Strategy Consultation with ${safeName} — MyBizPal`,
+    summary: `Business Strategy Consultation with ${safeName} — ${SUMMARY_PREFIX}`,
     start: { dateTime: correctedStartISO, timeZone: TZ },
     end: { dateTime: endISO, timeZone: TZ },
     description: descriptionLines.join('\n'),
-    // IMPORTANT FOR REMINDERS + WHATSAPP CANCEL/RESCHEDULE + FINDING EXISTING EVENTS
+    // IMPORTANT FOR REMINDERS + FINDING EXISTING EVENTS
     extendedProperties: {
       private: {
-        // Canonical fields
         mybizpal_phone: phone || '',
         mybizpal_email: (email || '').toLowerCase(),
         mybizpal_name: safeName,
-        // Legacy mirrors (backwards compatible with any old code)
+        // legacy mirrors
         phone: phone || '',
         email: (email || '').toLowerCase(),
         name: safeName,
-        // Seed last-notified time so reschedule/cancel logic has a baseline
         mybizpal_lastNotifiedStartISO: correctedStartISO,
         mybizpal_cancel_notified: '0',
       },
@@ -519,20 +503,15 @@ export async function createBookingEvent({
 }
 
 /**
- * New-style helper if you ever want to call with the whole booking object.
- * This simply adapts `booking` → `createBookingEvent` so either style works.
+ * Adapter helper: call with a booking-ish object if needed.
  */
 export async function createBookingCalendarEventAndNotify(booking) {
-  if (!booking) {
-    throw new Error('createBookingCalendarEventAndNotify called without booking');
-  }
+  if (!booking) throw new Error('createBookingCalendarEventAndNotify called without booking');
 
   const startISO = booking.slotStartIso || booking.startISO;
-  const durationMinutes = booking.durationMinutes || 30;
+  const durationMinutes = booking.durationMinutes || SLOT_MINUTES;
 
-  if (!startISO) {
-    throw new Error('Booking is missing slotStartIso/startISO');
-  }
+  if (!startISO) throw new Error('Booking is missing slotStartIso/startISO');
 
   return createBookingEvent({
     startISO,
