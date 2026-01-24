@@ -73,7 +73,15 @@ function ensureBooking(callState) {
 
       // Notes for calendar / Zoom prep
       summaryNotes: null,
+
+      // ✅ NEW: if caller explicitly has no email, don’t block booking on email
+      emailOptOut: false,
     };
+  } else {
+    // Backward compatible add-on
+    if (typeof callState.booking.emailOptOut !== 'boolean') {
+      callState.booking.emailOptOut = false;
+    }
   }
   return callState.booking;
 }
@@ -182,15 +190,19 @@ function looksLikeExplicitTime(text = '') {
 function parseExistingBookingChoice(text = '') {
   const t = String(text).toLowerCase();
 
-  const wantsExtra = /\b(extra|another|second|additional|add one|book an extra|book another)\b/.test(t);
-
-  const wantsMove = /\b(move|change|reschedule|swap|instead|cancel that and|cancel & (re)?book|rebook|earlier|later)\b/.test(
+  const wantsExtra = /\b(extra|another|second|additional|add one|book an extra|book another)\b/.test(
     t
   );
 
-  const wantsKeep = /\b(keep|leave it|as it is|dont change|don't change|no change|leave as is)\b/.test(
-    t
-  );
+  const wantsMove =
+    /\b(move|change|reschedule|swap|instead|cancel that and|cancel & (re)?book|rebook|earlier|later)\b/.test(
+      t
+    );
+
+  const wantsKeep =
+    /\b(keep|leave it|as it is|dont change|don't change|no change|leave as is)\b/.test(
+      t
+    );
 
   // Only treat naked yes/no as move/keep IF not ambiguous and not mentioning extra
   const isYes = yesInAnyLang(t);
@@ -207,6 +219,26 @@ function parseExistingBookingChoice(text = '') {
   if (isNo) return 'keep';
 
   return 'unknown';
+}
+
+// ✅ NEW: infer “no email” from recent history so booking.js doesn’t get stuck
+function inferEmailOptOutFromHistory(callState) {
+  const history = (callState && callState.history) || [];
+  if (!history.length) return false;
+
+  const recent = history.slice(-12);
+  const joined = recent
+    .map((m) => `${m.role}:${String(m.content || '').toLowerCase()}`)
+    .join('\n');
+
+  // Matches both user and assistant wording from logic.js email-capture branch
+  return (
+    /\b(no email|dont have an email|don't have an email|do not have an email|i don.?t use email)\b/.test(
+      joined
+    ) ||
+    /\bbook you in without an email\b/.test(joined) ||
+    /\bwithout an email address\b/.test(joined)
+  );
 }
 
 // Paragraph-style fallback summary (no bullets) if AI is unavailable
@@ -383,11 +415,7 @@ ${behaviourContext}
     if (!summary) return buildFallbackSummary(callState);
 
     // Hard safety: ensure it's not accidentally bullet-style
-    const cleaned = summary
-      .replace(/\r/g, ' ')
-      .replace(/\n/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const cleaned = summary.replace(/\r/g, ' ').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
 
     return `Smart summary (for Zoom prep):\n\n${cleaned}`;
   } catch (err) {
@@ -408,6 +436,14 @@ export async function updateBookingStateFromUtterance({
 }) {
   const booking = ensureBooking(callState);
   const raw = userText || '';
+
+  // ✅ capture “no email” here as well (covers cases where logic.js didn’t intercept)
+  if (
+    /\b(no email|don.?t have an email|do not have an email|i don.?t use email)\b/i.test(raw)
+  ) {
+    booking.emailOptOut = true;
+    booking.email = null;
+  }
 
   // If they clearly want to book again but we have an old confirmed booking,
   // treat this as the start of a *new* booking flow.
@@ -455,8 +491,8 @@ export async function updateBookingStateFromUtterance({
     }
   }
 
-  // Try extract email (smart)
-  if (!booking.email) {
+  // Try extract email (smart), unless they opted out
+  if (!booking.email && !booking.emailOptOut) {
     const eSmart = extractEmailSmart(raw);
     if (eSmart) {
       booking.email = eSmart;
@@ -502,9 +538,7 @@ export async function updateBookingStateFromUtterance({
     // 1) If we don't yet have any date, but they mention a weekday,
     //    set the date to the *next* occurrence of that weekday at 9:00.
     if (!booking.timeISO) {
-      const weekdayMatch = raw.match(
-        /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i
-      );
+      const weekdayMatch = raw.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
       if (weekdayMatch) {
         const weekday = weekdayMatch[1].toLowerCase();
         const dayMap = {
@@ -612,8 +646,7 @@ export async function updateBookingStateFromUtterance({
 
     if (earliest && earliest.iso) {
       booking.earliestSlotISO = earliest.iso;
-      booking.earliestSlotSpoken =
-        earliest.spoken || formatSpokenDateTime(earliest.iso, timezone);
+      booking.earliestSlotSpoken = earliest.spoken || formatSpokenDateTime(earliest.iso, timezone);
       booking.awaitingTimeConfirm = true;
       booking.lastPromptWasTimeSuggestion = true;
     }
@@ -627,9 +660,12 @@ export async function updateBookingStateFromUtterance({
  *  - If we already have a confirmed time + contact, create or move events.
  *  - User confirms or rejects a suggested time (earliest suggestion).
  */
-export async function handleSystemActionsFirst({ userText, callState }) {
+export async function handleSystemActionsFirst({ userText, callState, timezone = BUSINESS_TIMEZONE }) {
   const booking = ensureBooking(callState);
   const t = (userText || '').trim().toLowerCase();
+
+  // ✅ Keep booking.js timezone in sync with the caller (logic.js passes it)
+  const TZ = timezone || BUSINESS_TIMEZONE;
 
   // Respect global opt-out / DNC flags if logic.js applied them
   if (callState?.flags?.doNotContact) {
@@ -641,6 +677,12 @@ export async function handleSystemActionsFirst({ userText, callState }) {
   const capture = callState?.capture || null;
   if (capture?.pendingConfirm || (capture?.mode && capture.mode !== 'none')) {
     return { intercept: false };
+  }
+
+  // ✅ Prevent “email required” loops when user has no email (even if set in logic.js only)
+  if (!booking.emailOptOut && inferEmailOptOutFromHistory(callState)) {
+    booking.emailOptOut = true;
+    booking.email = null;
   }
 
   const phone = booking.phone || callState.callerNumber || null;
@@ -669,6 +711,8 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       awaitingTimeConfirm: booking.awaitingTimeConfirm,
       captureMode: capture?.mode,
       pendingConfirm: capture?.pendingConfirm,
+      emailOptOut: booking.emailOptOut,
+      tz: TZ,
     });
   }
 
@@ -730,10 +774,9 @@ export async function handleSystemActionsFirst({ userText, callState }) {
           if (DEBUG_LOG) console.error('Error cancelling existing event (no new time):', err);
         }
 
-        const existingSpoken =
-          booking.existingEventStartISO
-            ? formatSpokenDateTime(booking.existingEventStartISO, BUSINESS_TIMEZONE)
-            : 'your previous session';
+        const existingSpoken = booking.existingEventStartISO
+          ? formatSpokenDateTime(booking.existingEventStartISO, TZ)
+          : 'your previous session';
 
         booking.pendingExistingAction = null;
         booking.existingEventId = null;
@@ -747,11 +790,10 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       }
 
       // We have a timeCandidate → move booking to this new time
-      const existingSpoken =
-        booking.existingEventStartISO
-          ? formatSpokenDateTime(booking.existingEventStartISO, BUSINESS_TIMEZONE)
-          : 'your previous session';
-      const newSpoken = formatSpokenDateTime(timeCandidate, BUSINESS_TIMEZONE);
+      const existingSpoken = booking.existingEventStartISO
+        ? formatSpokenDateTime(booking.existingEventStartISO, TZ)
+        : 'your previous session';
+      const newSpoken = formatSpokenDateTime(timeCandidate, TZ);
 
       try {
         const oldStartISO = booking.existingEventStartISO || null;
@@ -799,7 +841,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
         booking.lastPromptWasTimeSuggestion = false;
         booking.needEmailBeforeBooking = false;
         booking.timeISO = startISO;
-        booking.timeSpoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
+        booking.timeSpoken = formatSpokenDateTime(startISO, TZ);
         booking.pendingExistingAction = null;
         booking.existingEventId = null;
         booking.existingEventStartISO = null;
@@ -823,10 +865,9 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
     // KEEP EXISTING TIME
     if (choice === 'keep') {
-      const existingSpoken =
-        booking.existingEventStartISO
-          ? formatSpokenDateTime(booking.existingEventStartISO, BUSINESS_TIMEZONE)
-          : 'your booked session';
+      const existingSpoken = booking.existingEventStartISO
+        ? formatSpokenDateTime(booking.existingEventStartISO, TZ)
+        : 'your booked session';
 
       booking.pendingExistingAction = null;
       booking.timeISO = booking.existingEventStartISO;
@@ -869,12 +910,13 @@ export async function handleSystemActionsFirst({ userText, callState }) {
         phone,
         timeCandidate,
         isUserSpecifiedTime,
+        emailOptOut: booking.emailOptOut,
       });
     }
 
-    // If we have a phone but email is missing → keep intercepting until resolved
-    // (or user explicitly says they don't have email, which logic.js handles)
-    if (phone && !email) {
+    // If we have a phone but email is missing → keep intercepting until resolved,
+    // unless user explicitly has no email (emailOptOut)
+    if (phone && !email && !booking.emailOptOut) {
       booking.needEmailBeforeBooking = true;
       return {
         intercept: true,
@@ -888,7 +930,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       if (existing && existing.id) {
         const existingStartISO = existing.start?.dateTime || existing.start?.date || null;
         const existingSpoken = existingStartISO
-          ? formatSpokenDateTime(existingStartISO, BUSINESS_TIMEZONE)
+          ? formatSpokenDateTime(existingStartISO, TZ)
           : 'a previously booked session';
 
         booking.existingBookingSpoken = existingSpoken;
@@ -909,7 +951,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
           return { intercept: true, replyText };
         }
 
-        const newSpoken = formatSpokenDateTime(timeCandidate, BUSINESS_TIMEZONE);
+        const newSpoken = formatSpokenDateTime(timeCandidate, TZ);
 
         booking.pendingExistingAction = 'decide_move_keep_extra';
         booking.informedAboutExistingBooking = true;
@@ -931,7 +973,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
       if (conflict) {
         const nextSlot = await findEarliestAvailableSlot({
-          timezone: BUSINESS_TIMEZONE,
+          timezone: TZ,
           durationMinutes: 30,
           daysAhead: 7,
           fromISO: timeCandidate,
@@ -941,8 +983,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
           booking.timeISO = null;
           booking.timeSpoken = null;
           booking.earliestSlotISO = nextSlot.iso;
-          booking.earliestSlotSpoken =
-            nextSlot.spoken || formatSpokenDateTime(nextSlot.iso, BUSINESS_TIMEZONE);
+          booking.earliestSlotSpoken = nextSlot.spoken || formatSpokenDateTime(nextSlot.iso, TZ);
           booking.awaitingTimeConfirm = true;
           booking.lastPromptWasTimeSuggestion = true;
           booking.needEmailBeforeBooking = false;
@@ -995,7 +1036,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
       booking.lastPromptWasTimeSuggestion = false;
       booking.needEmailBeforeBooking = false;
       booking.timeISO = startISO;
-      booking.timeSpoken = formatSpokenDateTime(startISO, BUSINESS_TIMEZONE);
+      booking.timeSpoken = formatSpokenDateTime(startISO, TZ);
 
       const spoken = booking.timeSpoken;
       const replyText = name
@@ -1035,9 +1076,7 @@ export async function handleSystemActionsFirst({ userText, callState }) {
 
       booking.timeISO = timeISO;
       booking.timeSpoken =
-        booking.timeSpoken ||
-        booking.earliestSlotSpoken ||
-        formatSpokenDateTime(timeISO, BUSINESS_TIMEZONE);
+        booking.timeSpoken || booking.earliestSlotSpoken || formatSpokenDateTime(timeISO, TZ);
       booking.awaitingTimeConfirm = false;
       booking.lastPromptWasTimeSuggestion = false;
 
