@@ -373,6 +373,34 @@ function tryCaptureNameIfMissing(callState, safeUserText) {
   }
 }
 
+function looksLikeBusinessType(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+
+  // too long to be a business type
+  if (t.length > 40) return false;
+
+  // avoid capturing generic intent statements
+  if (/\b(inquire|enquire|services|help|booking|book|missed calls|zoom|availability|earliest)\b/i.test(t)) {
+    return false;
+  }
+
+  // not an email or phone
+  if (/@/.test(t)) return false;
+  if (/\d{3,}/.test(t)) return false;
+
+  // must look like a plausible business noun phrase
+  const keyword =
+    /\b(garage|salon|clinic|dentist|plumber|electrician|restaurant|cafe|shop|studio|agency|law|account|builder|clean|cleaning|repairs|repair|hair|beauty|medical|vet|fitness|gym|dental|spa|trades|contractor|removals|landscap|roofer|architect|consult)\b/i.test(
+      t
+    );
+
+  if (keyword) return true;
+
+  // fallback: short noun-ish phrase
+  return t.split(/\s+/).length <= 4;
+}
+
 // ---------- SMART BUSINESS TYPE CAPTURE ----------
 function updateBusinessTypeFromAnyMessage({ safeUserText, profile }) {
   if (profile.businessType) return;
@@ -416,7 +444,9 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
   const la = lastAssistant.content.toLowerCase();
 
   if (!profile.businessType && /what (kind|type|sort) of business/.test(la)) {
-    profile.businessType = trimmed;
+    if (looksLikeBusinessType(trimmed)) {
+      profile.businessType = trimmed;
+    }
   }
 
   if (
@@ -444,11 +474,11 @@ function buildContextualFallback({ profile, callState }) {
   }
 
   if (profile && profile.businessType) {
-    const bt = profile.businessType.toLowerCase();
-    return `For your ${bt}, what’s the biggest issue right now - missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
+    const biz = profile.businessType ? ` in your ${profile.businessType}` : '';
+    return `Where do enquiries most often go wrong${biz} - missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
   }
 
-  return 'What type of business is it, and what’s the main headache you want to fix - missed calls, slow replies, or messy bookings?';
+  return 'Sure - what type of business is it, and what’s the main thing you want to fix: missed calls, slow replies, or bookings?';
 }
 
 // ---------- FAST CONSULTATION STEP FOR HOT LEADS (VOICE) ----------
@@ -1393,6 +1423,29 @@ export async function handleTurn({ userText, callState }) {
     snapshotSessionFromCall(callState);
     return { text: systemAction.replyText, shouldEnd: false };
   }
+  
+// ---------- AVAILABILITY OVERRIDE (PREVENT LOOP) ----------
+const availabilityQuestion =
+  /\b(earliest|availability|available|what times|what time do you have|tomorrow morning|slots|next slot)\b/i.test(
+    safeUserText
+  );
+
+if (availabilityQuestion) {
+  booking.intent = booking.intent || 'mybizpal_consultation';
+  flow.stage = 'pick_time';
+  booking.requestedAvailability = true;
+  booking.requestedAvailabilityText = safeUserText;
+
+  const replyText = isVoice
+    ? 'Sure - do you want the earliest slot we have, or specifically tomorrow morning?'
+    : 'Sure - do you want the earliest slot we have, or specifically tomorrow morning?';
+
+  ensureLastUserInHistory(history, safeUserText);
+  history.push({ role: 'assistant', content: replyText });
+  registerAssistantForLoopGuard(callState, replyText, 'availability_clarify');
+  snapshotSessionFromCall(callState);
+  return { text: replyText, shouldEnd: false };
+}
 
   // ---------- SPECIAL CASE: USER SAYS "BOTH" / "ALL OF THEM" ----------
   const userSaysBothOrAll =
@@ -1443,8 +1496,7 @@ export async function handleTurn({ userText, callState }) {
     if (isVoice) {
       if (!profile.businessType) {
         flow.stage = 'discovery';
-        const replyText =
-          'Got you. What type of business is it — for example a clinic, salon, trades, dentist, garage or something else?';
+        const replyText = 'Sure - what type of business is it?';
         ensureLastUserInHistory(history, safeUserText);
         history.push({ role: 'assistant', content: replyText });
         registerAssistantForLoopGuard(callState, replyText, 'business_type');
@@ -1454,9 +1506,9 @@ export async function handleTurn({ userText, callState }) {
 
       if (!behaviour.painPointsMentioned) {
         flow.stage = 'discovery';
-        const bt = profile.businessType ? profile.businessType.toLowerCase() : 'business';
-        const replyText =
-          `For your ${bt}, where do enquiries most often go wrong — missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
+      const biz = profile.businessType ? ` in your ${profile.businessType}` : '';
+      const replyText =
+        `Where do enquiries most often go wrong${biz} - missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
         ensureLastUserInHistory(history, safeUserText);
         history.push({ role: 'assistant', content: replyText });
         registerAssistantForLoopGuard(callState, replyText, 'pain_point');
