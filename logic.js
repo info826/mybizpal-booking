@@ -781,14 +781,10 @@ function buildFastConsultStep(callState, { isVoice }) {
   callState.capture = capture;
 
   // Keep it warm but short; vary a little
-  const warm = shouldAddTonePrefix(callState)
-    ? tonePrefix(behaviour)
-    : null;
+  const warm = shouldAddTonePrefix(callState) ? tonePrefix(behaviour) : null;
 
   if (!booking.name) {
-    const replyText = isVoice
-      ? `${warm ? warm + ' ' : ''}What’s your first name?`.trim()
-      : `${warm ? warm + ' ' : ''}What’s your first name?`.trim();
+    const replyText = `${warm ? warm + ' ' : ''}What’s your first name?`.trim();
     capture.mode = 'name';
     capture.buffer = '';
     capture.nameStage = 'initial';
@@ -1017,6 +1013,7 @@ export async function handleTurn({ userText, callState }) {
 
   const safeUserText = userText || '';
   const userLower = safeUserText.toLowerCase();
+  const hasAnyAssistantInHistory = history.some((m) => m.role === 'assistant');
   const isFirstTurn = history.length === 0;
 
   // Update sentiment early (used by both rules + LLM)
@@ -2067,7 +2064,7 @@ export async function handleTurn({ userText, callState }) {
   botText = botText.trim();
 
   // Guard: first assistant turn on voice should not jump to email
-  const isFirstAssistantTurn = history.length === 0;
+  const isFirstAssistantTurn = !hasAnyAssistantInHistory;
   if (isVoice && isFirstAssistantTurn && /email/i.test(botText) && !booking.intent && !profile.businessType) {
     const namePrefix = booking.name ? `${booking.name}, ` : '';
     botText = `${namePrefix}before we grab any details, what kind of business is it and what are you trying to fix — missed calls, slow replies, or bookings?`;
@@ -2099,36 +2096,4 @@ export async function handleTurn({ userText, callState }) {
         /^Good\s+(morning|afternoon|evening|late)[^.!\n]*?I['’` ]m\s+Gabriel\s+from\s+MyBizPal[.!?]*\s*/i,
         ''
       )
-      .trim();
-  }
-
-  // Voice strict brevity last
-  if (isVoice) {
-    botText = enforceVoiceBrevity(botText);
-  }
-
-  // Fallback if post-processing nuked it
-  if (!botText) {
-    botText = buildContextualFallback({ profile, callState });
-  }
-
-  ensureLastUserInHistory(history, safeUserText);
-
-  // Loop guard: if we would repeat, pivot or move the flow forward
-  if (wouldRepeat(callState, botText)) {
-    if (lastAssistantOfferedZoom(lastAssistantText) || /\bzoom\b/i.test(botText)) {
-      booking.intent = booking.intent || 'mybizpal_consultation';
-      behaviour.bookingReadiness = behaviour.bookingReadiness === 'low' ? 'low' : 'high';
-      flow.stage = 'collect_contact';
-      botText = buildFastConsultStep(callState, { isVoice });
-    } else {
-      botText = buildContextualFallback({ profile, callState });
-    }
-  }
-
-  history.push({ role: 'assistant', content: botText });
-  registerAssistantForLoopGuard(callState, botText, flow.stage || null);
-  snapshotSessionFromCall(callState);
-
-  return { text: botText, shouldEnd: false };
-}
+      .trim
