@@ -148,6 +148,18 @@ function lastAssistantOfferedZoom(lastAssistantText) {
       /\bsee how\b/.test(t))
   );
 }
+function extractApproxVolume(text) {
+  const t = String(text || '').toLowerCase();
+
+  const n = t.match(/\b(\d{1,4})\b/);
+  if (n) return Number(n[1]);
+
+  if (/\b(a few|couple)\b/.test(t)) return 3;
+  if (/\bdozens?\b/.test(t)) return 24;
+  if (/\bloads?\b|\blots?\b|\bmany\b/.test(t)) return 15;
+
+  return null;
+}
 
 function hasStrongNoCorrection(text) {
   if (!text) return false;
@@ -424,14 +436,13 @@ function updateBusinessTypeFromAnyMessage({ safeUserText, profile }) {
     }
   }
 
-  if (safeUserText.length < 60) {
-    const match = safeUserText.match(
-      /\b(garage|salon|clinic|shop|studio|gym|dentist|plumber|electrician|mechanic|coach|restaurant|vet|physio)\b/i
-    );
-    if (match) {
-      profile.businessType =
-        match[0].charAt(0).toUpperCase() + match[0].slice(1).toLowerCase();
-    }
+  if (safeUserText.length < 60 && looksLikeBusinessType(safeUserText)) {
+  const match = safeUserText.match(
+    /\b(garage|salon|clinic|shop|studio|gym|dentist|plumber|electrician|mechanic|coach|restaurant|vet|physio)\b/i
+  );
+  if (match) {
+    profile.businessType =
+      match[0].charAt(0).toUpperCase() + match[0].slice(1).toLowerCase();
   }
 }
 
@@ -1425,27 +1436,27 @@ export async function handleTurn({ userText, callState }) {
   }
   
 // ---------- AVAILABILITY OVERRIDE (PREVENT LOOP) ----------
-const availabilityQuestion =
-  /\b(earliest|availability|available|what times|what time do you have|tomorrow morning|slots|next slot)\b/i.test(
-    safeUserText
-  );
+  const availabilityQuestion =
+    /\b(earliest|availability|available|what times|what time do you have|tomorrow morning|slots|next slot)\b/i.test(
+      safeUserText
+    );
 
-if (availabilityQuestion) {
-  booking.intent = booking.intent || 'mybizpal_consultation';
-  flow.stage = 'pick_time';
-  booking.requestedAvailability = true;
-  booking.requestedAvailabilityText = safeUserText;
+  if (availabilityQuestion) {
+    booking.intent = booking.intent || 'mybizpal_consultation';
+    flow.stage = 'pick_time';
+    booking.requestedAvailability = true;
+    booking.requestedAvailabilityText = safeUserText;
 
-  const replyText = isVoice
-    ? 'Sure - do you want the earliest slot we have, or specifically tomorrow morning?'
-    : 'Sure - do you want the earliest slot we have, or specifically tomorrow morning?';
+    const replyText = isVoice
+      ? 'Sure - do you want the earliest slot we have, or specifically tomorrow morning?'
+      : 'Sure - do you want the earliest slot we have, or specifically tomorrow morning?';
 
-  ensureLastUserInHistory(history, safeUserText);
-  history.push({ role: 'assistant', content: replyText });
-  registerAssistantForLoopGuard(callState, replyText, 'availability_clarify');
-  snapshotSessionFromCall(callState);
-  return { text: replyText, shouldEnd: false };
-}
+    ensureLastUserInHistory(history, safeUserText);
+    history.push({ role: 'assistant', content: replyText });
+    registerAssistantForLoopGuard(callState, replyText, 'availability_clarify');
+    snapshotSessionFromCall(callState);
+    return { text: replyText, shouldEnd: false };
+  }
 
   // ---------- SPECIAL CASE: USER SAYS "BOTH" / "ALL OF THEM" ----------
   const userSaysBothOrAll =
@@ -1461,7 +1472,7 @@ if (availabilityQuestion) {
 
     if (looksLikeOptions) {
       const businessLabel = profile.businessType
-        ? `for your ${profile.businessType}`
+        ? `in your ${profile.businessType}`
         : 'in your business';
 
       const replyText = `Got you — sounds like it is a mix of those issues ${businessLabel}. MyBizPal makes sure calls and WhatsApps are answered and people are booked in instead of going cold.\n\nWould a short Zoom with one of the team be useful so you can see how that would look for you?`;
@@ -1517,8 +1528,28 @@ if (availabilityQuestion) {
       }
 
       if (behaviour.painPointsMentioned && behaviour.bookingReadiness !== 'low') {
+        // Ask one qualifying question before offering Zoom
+        if (flow.lastQuestionTag !== 'missed_calls_volume') {
+          flow.stage = 'discovery';
+          const replyText =
+            'Got it. Roughly how many missed calls do you think you get on a typical day?';
+
+          ensureLastUserInHistory(history, safeUserText);
+          history.push({ role: 'assistant', content: replyText });
+          registerAssistantForLoopGuard(callState, replyText, 'missed_calls_volume');
+          snapshotSessionFromCall(callState);
+          return { text: replyText, shouldEnd: false };
+       }
+
+        // If they just answered volume, bridge to Zoom offer
+        const vol = extractApproxVolume(safeUserText);
+        if (vol !== null) {
+          behaviour.interestLevel =
+            behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
+      }
+
         const offerText =
-          'Makes sense. Would a quick Zoom with one of the team help so you can see how it would work for you?';
+          'Thanks - that helps. Would a quick Zoom with one of the team be useful so you can see how it would work for you?';
 
         if (wouldRepeat(callState, offerText) || flow.lastQuestionTag === 'offer_zoom') {
           booking.intent = booking.intent || 'mybizpal_consultation';
@@ -1533,15 +1564,15 @@ if (availabilityQuestion) {
           registerAssistantForLoopGuard(callState, replyText, 'collect_contact');
           snapshotSessionFromCall(callState);
           return { text: replyText, shouldEnd: false };
-        }
+      }
 
-        flow.stage = 'offer_zoom';
+      flow.stage = 'offer_zoom';
 
-        ensureLastUserInHistory(history, safeUserText);
-        history.push({ role: 'assistant', content: offerText });
-        registerAssistantForLoopGuard(callState, offerText, 'offer_zoom');
-        snapshotSessionFromCall(callState);
-        return { text: offerText, shouldEnd: false };
+      ensureLastUserInHistory(history, safeUserText);
+      history.push({ role: 'assistant', content: offerText });
+      registerAssistantForLoopGuard(callState, offerText, 'offer_zoom');
+      snapshotSessionFromCall(callState);
+      return { text: offerText, shouldEnd: false };
       }
     }
   }
@@ -1689,12 +1720,12 @@ if (availabilityQuestion) {
 
   if (confusionRegex.test(botText)) {
     if (profile.businessType) {
-      const bt = profile.businessType.toLowerCase();
+      const biz = profile.businessType ? ` in your ${profile.businessType}` : '';
       botText =
-        `For your ${bt}, what’s the biggest issue right now — missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
+        `Where do enquiries most often go wrong${biz} - missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
     } else {
       botText =
-        'What type of business is it, and what’s the main headache — missed calls, slow replies, or messy bookings?';
+        'Sure - what type of business is it, and what’s the main thing you want to fix: missed calls, slow replies, or bookings?';
     }
   }
 
