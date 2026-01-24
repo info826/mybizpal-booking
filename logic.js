@@ -148,6 +148,8 @@ function lastAssistantOfferedZoom(lastAssistantText) {
       /\bsee how\b/.test(t))
   );
 }
+
+// NEW: approximate volume extractor
 function extractApproxVolume(text) {
   const t = String(text || '').toLowerCase();
 
@@ -310,12 +312,61 @@ function extractNameFromUtterance(text) {
 
   const lower = rawText.toLowerCase();
   const badNameWords = new Set([
-    'hi','hello','hey','yes','yeah','yep','no','nope','ok','okay','fine','good','perfect',
-    'thanks','thank','thank you','please','booking','book','email','mail','business',
-    'curious','testing','test','just','only','nothing','something','anything','in','out',
-    'there','slot','consultation','appointment','meeting','call','garage','salon','clinic',
-    'dentist','doctor','repair','service','mechanic','both','all','excellent',
-    'correct','right','exactly','affirmative','sure','certainly',
+    'hi',
+    'hello',
+    'hey',
+    'yes',
+    'yeah',
+    'yep',
+    'no',
+    'nope',
+    'ok',
+    'okay',
+    'fine',
+    'good',
+    'perfect',
+    'thanks',
+    'thank',
+    'thank you',
+    'please',
+    'booking',
+    'book',
+    'email',
+    'mail',
+    'business',
+    'curious',
+    'testing',
+    'test',
+    'just',
+    'only',
+    'nothing',
+    'something',
+    'anything',
+    'in',
+    'out',
+    'there',
+    'slot',
+    'consultation',
+    'appointment',
+    'meeting',
+    'call',
+    'garage',
+    'salon',
+    'clinic',
+    'dentist',
+    'doctor',
+    'repair',
+    'service',
+    'mechanic',
+    'both',
+    'all',
+    'excellent',
+    'correct',
+    'right',
+    'exactly',
+    'affirmative',
+    'sure',
+    'certainly',
   ]);
 
   const explicitMatch = lower.match(
@@ -393,7 +444,11 @@ function looksLikeBusinessType(text) {
   if (t.length > 40) return false;
 
   // avoid capturing generic intent statements
-  if (/\b(inquire|enquire|services|help|booking|book|missed calls|zoom|availability|earliest)\b/i.test(t)) {
+  if (
+    /\b(inquire|enquire|services|help|booking|book|missed calls|zoom|availability|earliest)\b/i.test(
+      t
+    )
+  ) {
     return false;
   }
 
@@ -420,10 +475,35 @@ function updateBusinessTypeFromAnyMessage({ safeUserText, profile }) {
   const lower = safeUserText.toLowerCase();
 
   const patterns = [
-    'car repair','garage','mechanic','auto repair','clinic','dental','dentist',
-    'salon','hair','beauty','plumber','electrician','trades','trade','coaching',
-    'coach','tutor','online shop','ecommerce','restaurant','cafe','takeaway',
-    'vet','veterinary','physio','chiro','therapist','gym','fitness',
+    'car repair',
+    'garage',
+    'mechanic',
+    'auto repair',
+    'clinic',
+    'dental',
+    'dentist',
+    'salon',
+    'hair',
+    'beauty',
+    'plumber',
+    'electrician',
+    'trades',
+    'trade',
+    'coaching',
+    'coach',
+    'tutor',
+    'online shop',
+    'ecommerce',
+    'restaurant',
+    'cafe',
+    'takeaway',
+    'vet',
+    'veterinary',
+    'physio',
+    'chiro',
+    'therapist',
+    'gym',
+    'fitness',
   ];
 
   for (const pattern of patterns) {
@@ -437,12 +517,13 @@ function updateBusinessTypeFromAnyMessage({ safeUserText, profile }) {
   }
 
   if (safeUserText.length < 60 && looksLikeBusinessType(safeUserText)) {
-  const match = safeUserText.match(
-    /\b(garage|salon|clinic|shop|studio|gym|dentist|plumber|electrician|mechanic|coach|restaurant|vet|physio)\b/i
-  );
-  if (match) {
-    profile.businessType =
-      match[0].charAt(0).toUpperCase() + match[0].slice(1).toLowerCase();
+    const match = safeUserText.match(
+      /\b(garage|salon|clinic|shop|studio|gym|dentist|plumber|electrician|mechanic|coach|restaurant|vet|physio)\b/i
+    );
+    if (match) {
+      profile.businessType =
+        match[0].charAt(0).toUpperCase() + match[0].slice(1).toLowerCase();
+    }
   }
 }
 
@@ -460,10 +541,7 @@ function updateProfileFromUserReply({ safeUserText, history, profile }) {
     }
   }
 
-  if (
-    !profile.location &&
-    /(where are you (calling from|based)|where.*located)/.test(la)
-  ) {
+  if (!profile.location && /(where are you (calling from|based)|where.*located)/.test(la)) {
     profile.location = trimmed;
   }
 }
@@ -509,8 +587,7 @@ function buildFastConsultStep(callState, { isVoice }) {
   callState.capture = capture;
 
   if (!booking.name) {
-    const replyText =
-      'Sure, let’s get that consultation booked in. What’s your first name?';
+    const replyText = 'Sure, let’s get that consultation booked in. What’s your first name?';
     capture.mode = 'name';
     capture.buffer = '';
     capture.nameStage = 'initial';
@@ -522,8 +599,7 @@ function buildFastConsultStep(callState, { isVoice }) {
   }
 
   if (!booking.email) {
-    const replyText =
-      'Perfect. What’s the best email address to send your Zoom link to?';
+    const replyText = 'Perfect. What’s the best email address to send your Zoom link to?';
     capture.mode = 'email';
     capture.buffer = '';
     capture.emailAttempts = 0;
@@ -762,11 +838,7 @@ export async function handleTurn({ userText, callState }) {
     behaviour.rapportLevel = Math.min(5, Number(behaviour.rapportLevel || 0) + 1);
   }
 
-  if (
-    /miss(ed)? calls?|lost leads?|losing leads?|loosing leads?|wasting leads?/.test(
-      userLower
-    )
-  ) {
+  if (/miss(ed)? calls?|lost leads?|losing leads?|loosing leads?|wasting leads?/.test(userLower)) {
     behaviour.painPointsMentioned = true;
     if (behaviour.interestLevel === 'unknown') behaviour.interestLevel = 'medium';
   }
@@ -909,8 +981,7 @@ export async function handleTurn({ userText, callState }) {
       if (!callState.booking) callState.booking = {};
       callState.booking.phone = null;
 
-      const replyText =
-        'Got it, let us fix that. Can you give me your mobile again from the start?';
+      const replyText = 'Got it, let us fix that. Can you give me your mobile again from the start?';
 
       capture.mode = 'phone';
       capture.buffer = '';
@@ -929,15 +1000,11 @@ export async function handleTurn({ userText, callState }) {
 
   // ---------- QUICK INTENT: REPEAT PHONE / EMAIL / DETAILS ----------
   const wantsPhoneRepeat =
-    /\b(repeat|read back|confirm|check|what)\b.*\b(my )?(number|phone|mobile)\b/.test(
-      userLower
-    ) ||
+    /\b(repeat|read back|confirm|check|what)\b.*\b(my )?(number|phone|mobile)\b/.test(userLower) ||
     /\bwhat\b.*\bnumber do you have\b/.test(userLower);
 
   const wantsEmailRepeat =
-    /\b(repeat|read back|confirm|check|what)\b.*\b(my )?(email|e-mail|e mail)\b/.test(
-      userLower
-    ) ||
+    /\b(repeat|read back|confirm|check|what)\b.*\b(my )?(email|e-mail|e mail)\b/.test(userLower) ||
     /\bwhat\b.*\bemail (do you|have you) have\b/.test(userLower);
 
   const wantsDetailsRepeat =
@@ -989,15 +1056,10 @@ export async function handleTurn({ userText, callState }) {
 
   // ---------- USER SAYS THEY ALREADY ANSWERED ----------
   if (/\bi already (told you|answered that|said that)\b/.test(userLower)) {
-    const lastAssistantTextLower = lastAssistant
-      ? lastAssistant.content.toLowerCase()
-      : '';
+    const lastAssistantTextLower = lastAssistant ? lastAssistant.content.toLowerCase() : '';
     let replyText;
 
-    if (
-      profile.businessType &&
-      /what (kind|type|sort) of business/.test(lastAssistantTextLower)
-    ) {
+    if (profile.businessType && /what (kind|type|sort) of business/.test(lastAssistantTextLower)) {
       const nameLabel = booking.name || 'you';
       replyText = `You’re right, you did — my mistake there. I’ve got you down as ${nameLabel}, running a ${profile.businessType}. Let’s pick up from there and focus on how we can stop those missed calls and lost enquiries for you.`;
     } else if (booking.email && /(email|e-mail|e mail)/.test(lastAssistantTextLower)) {
@@ -1010,9 +1072,7 @@ export async function handleTurn({ userText, callState }) {
       if (profile.businessType) bits.push(`business: ${profile.businessType}`);
       if (booking.email) bits.push(`email: ${booking.email}`);
       if (booking.phone) bits.push(`mobile: ${booking.phone}`);
-      const summary = bits.length
-        ? `Here’s what I’ve got so far: ${bits.join(', ')}.`
-        : `I know I asked you a couple of things there.`;
+      const summary = bits.length ? `Here’s what I’ve got so far: ${bits.join(', ')}.` : `I know I asked you a couple of things there.`;
       replyText = `You’re right, that’s on me — no need to repeat yourself. ${summary} Let’s just carry on from there.`;
     }
 
@@ -1054,8 +1114,7 @@ export async function handleTurn({ userText, callState }) {
     /see what you do/.test(userLower) ||
     /what (is|does) mybizpal\b/.test(userLower)
   ) {
-    behaviour.interestLevel =
-      behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
+    behaviour.interestLevel = behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
     const coreExplanation =
       'Short version: MyBizPal answers your calls and WhatsApp messages for you, handles discovery calls and basic sales conversations, books appointments straight into your calendar, sends confirmations and reminders, and stops new enquiries going cold. It’s built for busy clinics, salons, dentists, trades and other local service businesses.';
@@ -1076,8 +1135,7 @@ export async function handleTurn({ userText, callState }) {
   }
 
   if (/\bautomate\b/.test(userLower) || /\bautomation\b/.test(userLower)) {
-    behaviour.interestLevel =
-      behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
+    behaviour.interestLevel = behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
 
     const replyText =
       'Yes – that’s exactly the world we live in. MyBizPal handles calls, WhatsApps, discovery calls and bookings automatically so you’re not forever chasing missed enquiries.\n\nWhat kind of business are you running and where do things feel the most manual at the moment?';
@@ -1108,20 +1166,12 @@ export async function handleTurn({ userText, callState }) {
   // ---------- NAME CAPTURE MODE ----------
   if (capture.mode === 'name') {
     const raw = safeUserText || '';
-    let cleaned = raw
-      .toLowerCase()
-      .replace(/[^a-z\s]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    let cleaned = raw.toLowerCase().replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
 
     let candidate = null;
     if (cleaned) {
       const parts = cleaned.split(' ').filter(Boolean);
-      if (
-        parts.length >= 2 &&
-        parts.length <= 12 &&
-        parts.every((p) => p.length === 1)
-      ) {
+      if (parts.length >= 2 && parts.length <= 12 && parts.every((p) => p.length === 1)) {
         candidate = parts.join('');
       } else {
         candidate = extractNameFromUtterance(raw);
@@ -1129,8 +1179,7 @@ export async function handleTurn({ userText, callState }) {
     }
 
     if (candidate) {
-      const proper =
-        candidate.charAt(0).toUpperCase() + candidate.slice(1).toLowerCase();
+      const proper = candidate.charAt(0).toUpperCase() + candidate.slice(1).toLowerCase();
 
       if (!callState.booking) callState.booking = {};
       callState.booking.name = proper;
@@ -1156,8 +1205,7 @@ export async function handleTurn({ userText, callState }) {
     }
 
     if (safeUserText.length > 40) {
-      const replyText =
-        'Sorry, I did not quite catch your name. Could you just say your first name clearly?';
+      const replyText = 'Sorry, I did not quite catch your name. Could you just say your first name clearly?';
       capture.mode = 'name';
       capture.nameAttempts += 1;
       ensureLastUserInHistory(history, safeUserText);
@@ -1262,16 +1310,11 @@ export async function handleTurn({ userText, callState }) {
 
   // ---------- EMAIL CAPTURE MODE ----------
   if (capture.mode === 'email') {
-    if (
-      /no email|don.?t have an email|do not have an email|i don.?t use email/.test(
-        userLower
-      )
-    ) {
+    if (/no email|don.?t have an email|do not have an email|i don.?t use email/.test(userLower)) {
       if (!callState.booking) callState.booking = {};
       callState.booking.email = null;
 
-      const replyText =
-        'No worries at all, we can still book you in without an email address.';
+      const replyText = 'No worries at all, we can still book you in without an email address.';
 
       capture.mode = 'none';
       capture.buffer = '';
@@ -1292,16 +1335,12 @@ export async function handleTurn({ userText, callState }) {
     let bufferForEmail = rawBuffer;
     const lowerBuffer = rawBuffer.toLowerCase();
 
-    const markerMatch = lowerBuffer.match(
-      /(my\s+email\s+is|email\s+is|email\s*[:=])/i
-    );
+    const markerMatch = lowerBuffer.match(/(my\s+email\s+is|email\s+is|email\s*[:=])/i);
     if (markerMatch) {
       bufferForEmail = rawBuffer.slice(markerMatch.index + markerMatch[0].length);
     }
 
-    const directMatch = bufferForEmail.match(
-      /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/
-    );
+    const directMatch = bufferForEmail.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
     if (directMatch) {
       email = directMatch[0].toLowerCase();
     } else {
@@ -1434,8 +1473,8 @@ export async function handleTurn({ userText, callState }) {
     snapshotSessionFromCall(callState);
     return { text: systemAction.replyText, shouldEnd: false };
   }
-  
-// ---------- AVAILABILITY OVERRIDE (PREVENT LOOP) ----------
+
+  // ---------- AVAILABILITY OVERRIDE (PREVENT LOOP) ----------
   const availabilityQuestion =
     /\b(earliest|availability|available|what times|what time do you have|tomorrow morning|slots|next slot)\b/i.test(
       safeUserText
@@ -1447,9 +1486,7 @@ export async function handleTurn({ userText, callState }) {
     booking.requestedAvailability = true;
     booking.requestedAvailabilityText = safeUserText;
 
-    const replyText = isVoice
-      ? 'Sure - do you want the earliest slot we have, or specifically tomorrow morning?'
-      : 'Sure - do you want the earliest slot we have, or specifically tomorrow morning?';
+    const replyText = 'Sure - do you want the earliest slot we have, or specifically tomorrow morning?';
 
     ensureLastUserInHistory(history, safeUserText);
     history.push({ role: 'assistant', content: replyText });
@@ -1459,21 +1496,17 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- SPECIAL CASE: USER SAYS "BOTH" / "ALL OF THEM" ----------
-  const userSaysBothOrAll =
-    /\b(both|both really|all of (them|those|the above)|all really)\b/.test(userLower);
+  const userSaysBothOrAll = /\b(both|both really|all of (them|those|the above)|all really)\b/.test(
+    userLower
+  );
 
   if (userSaysBothOrAll && lastAssistant) {
     const laLower = lastAssistant.content.toLowerCase();
     const looksLikeOptions =
-      lastAssistant.content.includes('•') ||
-      /\bor\b/.test(laLower) ||
-      /1\)/.test(laLower) ||
-      /2\)/.test(laLower);
+      lastAssistant.content.includes('•') || /\bor\b/.test(laLower) || /1\)/.test(laLower) || /2\)/.test(laLower);
 
     if (looksLikeOptions) {
-      const businessLabel = profile.businessType
-        ? `in your ${profile.businessType}`
-        : 'in your business';
+      const businessLabel = profile.businessType ? `in your ${profile.businessType}` : 'in your business';
 
       const replyText = `Got you — sounds like it is a mix of those issues ${businessLabel}. MyBizPal makes sure calls and WhatsApps are answered and people are booked in instead of going cold.\n\nWould a short Zoom with one of the team be useful so you can see how that would look for you?`;
 
@@ -1517,9 +1550,8 @@ export async function handleTurn({ userText, callState }) {
 
       if (!behaviour.painPointsMentioned) {
         flow.stage = 'discovery';
-      const biz = profile.businessType ? ` in your ${profile.businessType}` : '';
-      const replyText =
-        `Where do enquiries most often go wrong${biz} - missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
+        const biz = profile.businessType ? ` in your ${profile.businessType}` : '';
+        const replyText = `Where do enquiries most often go wrong${biz} - missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
         ensureLastUserInHistory(history, safeUserText);
         history.push({ role: 'assistant', content: replyText });
         registerAssistantForLoopGuard(callState, replyText, 'pain_point');
@@ -1531,30 +1563,27 @@ export async function handleTurn({ userText, callState }) {
         // Ask one qualifying question before offering Zoom
         if (flow.lastQuestionTag !== 'missed_calls_volume') {
           flow.stage = 'discovery';
-          const replyText =
-            'Got it. Roughly how many missed calls do you think you get on a typical day?';
+          const replyText = 'Got it. Roughly how many missed calls do you think you get on a typical day?';
 
           ensureLastUserInHistory(history, safeUserText);
           history.push({ role: 'assistant', content: replyText });
           registerAssistantForLoopGuard(callState, replyText, 'missed_calls_volume');
           snapshotSessionFromCall(callState);
           return { text: replyText, shouldEnd: false };
-       }
+        }
 
         // If they just answered volume, bridge to Zoom offer
         const vol = extractApproxVolume(safeUserText);
         if (vol !== null) {
-          behaviour.interestLevel =
-            behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
-      }
+          behaviour.interestLevel = behaviour.interestLevel === 'unknown' ? 'high' : behaviour.interestLevel;
+        }
 
         const offerText =
           'Thanks - that helps. Would a quick Zoom with one of the team be useful so you can see how it would work for you?';
 
         if (wouldRepeat(callState, offerText) || flow.lastQuestionTag === 'offer_zoom') {
           booking.intent = booking.intent || 'mybizpal_consultation';
-          behaviour.bookingReadiness =
-            behaviour.bookingReadiness === 'low' ? 'low' : 'high';
+          behaviour.bookingReadiness = behaviour.bookingReadiness === 'low' ? 'low' : 'high';
           flow.stage = 'collect_contact';
 
           const replyText = buildFastConsultStep(callState, { isVoice });
@@ -1564,15 +1593,15 @@ export async function handleTurn({ userText, callState }) {
           registerAssistantForLoopGuard(callState, replyText, 'collect_contact');
           snapshotSessionFromCall(callState);
           return { text: replyText, shouldEnd: false };
-      }
+        }
 
-      flow.stage = 'offer_zoom';
+        flow.stage = 'offer_zoom';
 
-      ensureLastUserInHistory(history, safeUserText);
-      history.push({ role: 'assistant', content: offerText });
-      registerAssistantForLoopGuard(callState, offerText, 'offer_zoom');
-      snapshotSessionFromCall(callState);
-      return { text: offerText, shouldEnd: false };
+        ensureLastUserInHistory(history, safeUserText);
+        history.push({ role: 'assistant', content: offerText });
+        registerAssistantForLoopGuard(callState, offerText, 'offer_zoom');
+        snapshotSessionFromCall(callState);
+        return { text: offerText, shouldEnd: false };
       }
     }
   }
@@ -1584,11 +1613,9 @@ export async function handleTurn({ userText, callState }) {
     const lower = botText.toLowerCase();
 
     const hasBookingIntent =
-      booking.intent === 'mybizpal_consultation' ||
-      behaviour.bookingReadiness === 'high';
+      booking.intent === 'mybizpal_consultation' || behaviour.bookingReadiness === 'high';
 
-    const mentionsEmail =
-      /\b(email|e-mail|e mail)\b/.test(lower) || /\bzoom link\b/.test(lower);
+    const mentionsEmail = /\b(email|e-mail|e mail)\b/.test(lower) || /\bzoom link\b/.test(lower);
 
     const hardBookingPhrases =
       /\b(book you in|get you booked|lock that in|lock it in|i can book you|let me get you booked|schedule (a )?(call|consultation|meeting))\b/.test(
@@ -1635,9 +1662,7 @@ export async function handleTurn({ userText, callState }) {
   }
 
   // ---------- OPENAI CALL ----------
-  const systemPrompt = isVoice
-    ? buildSystemPromptVoice(callState)
-    : buildSystemPromptChat(callState);
+  const systemPrompt = isVoice ? buildSystemPromptVoice(callState) : buildSystemPromptChat(callState);
   const messages = [{ role: 'system', content: systemPrompt }];
 
   const recent = isVoice ? history.slice(-4) : history.slice(-8);
@@ -1663,10 +1688,7 @@ export async function handleTurn({ userText, callState }) {
 
   if (!botText && isChat) {
     try {
-      const lastAssistantForSlim = [...history]
-        .slice()
-        .reverse()
-        .find((m) => m.role === 'assistant');
+      const lastAssistantForSlim = [...history].slice().reverse().find((m) => m.role === 'assistant');
 
       const slimMessages = [
         {
@@ -1710,10 +1732,7 @@ export async function handleTurn({ userText, callState }) {
     /I (do not|don't) have (a )?way to (reliably )?remember past (chats|conversations) with you[^.]*\./gi,
     ''
   );
-  botText = botText.replace(
-    /I (only|can only) see (what('?s| is) )?in this conversation( right now)?\.?/gi,
-    ''
-  );
+  botText = botText.replace(/I (only|can only) see (what('?s| is) )?in this conversation( right now)?\.?/gi, '');
 
   const confusionRegex =
     /sorry[, ]+i (do not|don't|did not|didn't) (quite )?(understand|follow) that[^.]*\.?/gi;
@@ -1721,24 +1740,16 @@ export async function handleTurn({ userText, callState }) {
   if (confusionRegex.test(botText)) {
     if (profile.businessType) {
       const biz = profile.businessType ? ` in your ${profile.businessType}` : '';
-      botText =
-        `Where do enquiries most often go wrong${biz} - missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
+      botText = `Where do enquiries most often go wrong${biz} - missed calls, slow replies on WhatsApp, or bookings not getting confirmed?`;
     } else {
-      botText =
-        'Sure - what type of business is it, and what’s the main thing you want to fix: missed calls, slow replies, or bookings?';
+      botText = 'Sure - what type of business is it, and what’s the main thing you want to fix: missed calls, slow replies, or bookings?';
     }
   }
 
   botText = botText.trim();
 
   const isFirstAssistantTurn = history.length === 0;
-  if (
-    isVoice &&
-    isFirstAssistantTurn &&
-    /email/i.test(botText) &&
-    !booking.intent &&
-    !profile.businessType
-  ) {
+  if (isVoice && isFirstAssistantTurn && /email/i.test(botText) && !booking.intent && !profile.businessType) {
     const namePrefix = booking.name ? `${booking.name}, ` : '';
     botText = `${namePrefix}thanks for calling. Before we grab any details, tell me a bit about your business and what you are trying to sort out around calls or bookings.`;
   }
@@ -1753,8 +1764,7 @@ export async function handleTurn({ userText, callState }) {
 
   botText = botText.replace(/agent like me/gi, 'a smart receptionist that sounds like this');
 
-  const alreadyGreeted =
-    !!callState.greeted || history.length > 0 || !!callState._hasTextGreetingSent;
+  const alreadyGreeted = !!callState.greeted || history.length > 0 || !!callState._hasTextGreetingSent;
 
   if (alreadyGreeted) {
     botText = botText
@@ -1766,18 +1776,11 @@ export async function handleTurn({ userText, callState }) {
   }
 
   if (/two quick things so i can lock it in/i.test(botText)) {
-    botText =
-      'Great, let me just grab your details. What is the best email to send your Zoom link to?';
+    botText = 'Great, let me just grab your details. What is the best email to send your Zoom link to?';
   }
 
-  botText = botText.replace(
-    /\b([0-1]?\d):00\s*([AaPp])\.?m\.?\b/g,
-    (_, h, ap) => `${h}${ap.toLowerCase()}m`
-  );
-  botText = botText.replace(
-    /\b([0-1]?\d)\s*([AaPp])\.?m\.?\b/g,
-    (_, h, ap) => `${h}${ap.toLowerCase()}m`
-  );
+  botText = botText.replace(/\b([0-1]?\d):00\s*([AaPp])\.?m\.?\b/g, (_, h, ap) => `${h}${ap.toLowerCase()}m`);
+  botText = botText.replace(/\b([0-1]?\d)\s*([AaPp])\.?m\.?\b/g, (_, h, ap) => `${h}${ap.toLowerCase()}m`);
   botText = botText.replace(
     /\b([0-1]?\d):([0-5]\d)\s*([AaPp])\.?m\.?\b/g,
     (_, h, m, ap) => `${h}:${m}${ap.toLowerCase()}m`
